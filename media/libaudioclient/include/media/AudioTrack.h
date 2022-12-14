@@ -17,16 +17,27 @@
 #ifndef ANDROID_AUDIOTRACK_H
 #define ANDROID_AUDIOTRACK_H
 
+#include <binder/IMemory.h>
 #include <cutils/sched_policy.h>
 #include <media/AudioSystem.h>
 #include <media/AudioTimestamp.h>
-#include <media/IAudioTrack.h>
 #include <media/AudioResamplerPublic.h>
-#include <media/MediaAnalyticsItem.h>
+#include <media/MediaMetricsItem.h>
 #include <media/Modulo.h>
+#include <media/VolumeShaper.h>
 #include <utils/threads.h>
+#include <android/content/AttributionSourceState.h>
+
+#include <chrono>
+#include <string>
+
+#include "android/media/BnAudioTrackCallback.h"
+#include "android/media/IAudioTrack.h"
+#include "android/media/IAudioTrackCallback.h"
 
 namespace android {
+
+using content::AttributionSourceState;
 
 // ----------------------------------------------------------------------------
 
@@ -84,29 +95,36 @@ public:
 
     class Buffer
     {
+    friend AudioTrack;
     public:
-        // FIXME use m prefix
+       size_t size() const { return mSize; }
+       size_t getFrameCount() const { return frameCount; }
+       uint8_t * data() const { return ui8; }
+       // Leaving public for now to ease refactoring. This class will be
+       // replaced
         size_t      frameCount;   // number of sample frames corresponding to size;
                                   // on input to obtainBuffer() it is the number of frames desired,
                                   // on output from obtainBuffer() it is the number of available
                                   //    [empty slots for] frames to be filled
                                   // on input to releaseBuffer() it is currently ignored
-
-        size_t      size;         // input/output in bytes == frameCount * frameSize
+    private:
+        size_t      mSize;        // input/output in bytes == frameCount * frameSize
                                   // on input to obtainBuffer() it is ignored
                                   // on output from obtainBuffer() it is the number of available
                                   //    [empty slots for] bytes to be filled,
                                   //    which is frameCount * frameSize
                                   // on input to releaseBuffer() it is the number of bytes to
                                   //    release
-                                  // FIXME This is redundant with respect to frameCount.  Consider
-                                  //    removing size and making frameCount the primary field.
 
         union {
             void*       raw;
             int16_t*    i16;      // signed 16-bit
-            int8_t*     i8;       // unsigned 8-bit, offset by 0x80
+            uint8_t*    ui8;      // unsigned 8-bit, offset by 0x80
         };                        // input to obtainBuffer(): unused, output: pointer to buffer
+
+        uint32_t    sequence;       // IAudioTrack instance sequence number, as of obtainBuffer().
+                                    // It is set by obtainBuffer() and confirmed by releaseBuffer().
+                                    // Not "user-serviceable".
     };
 
     /* As a convenience, if a callback is supplied, a handler thread
@@ -130,7 +148,79 @@ public:
      *          - EVENT_NEW_TIMESTAMP: pointer to const AudioTimestamp.
      */
 
-    typedef void (*callback_t)(int event, void* user, void *info);
+    typedef void (*legacy_callback_t)(int event, void* user, void* info);
+    class IAudioTrackCallback : public virtual RefBase {
+      friend AudioTrack;
+      protected:
+       /* Request to write more data to buffer.
+        * This event only occurs for TRANSFER_CALLBACK.
+        * If this event is delivered but the callback handler does not want to write more data,
+        * the handler must ignore the event by returning zero.
+        * This might occur, for example, if the application is waiting for source data or is at
+        * the end of stream.
+        * For data filling, it is preferred that the callback does not block and instead returns
+        * a short count of the amount of data actually delivered.
+        * Parameters:
+        *  - buffer: Buffer to fill
+        * Returns:
+        * Amount of data actually written in bytes.
+        */
+        virtual size_t onMoreData([[maybe_unused]] const AudioTrack::Buffer& buffer) { return 0; }
+
+        // Buffer underrun occurred. This will not occur for static tracks.
+        virtual void onUnderrun() {}
+
+       /* Sample loop end was reached; playback restarted from loop start if loop count was not 0
+        * for a static track.
+        * Parameters:
+        *  - loopsRemaining: Number of loops remaining to be played. -1 if infinite looping.
+        */
+        virtual void onLoopEnd([[maybe_unused]] int32_t loopsRemaining) {}
+
+       /* Playback head is at the specified marker (See setMarkerPosition()).
+        * Parameters:
+        *  - onMarker: Marker position in frames
+        */
+        virtual void onMarker([[maybe_unused]] uint32_t markerPosition) {}
+
+       /* Playback head is at a new position (See setPositionUpdatePeriod()).
+        * Parameters:
+        *  - newPos: New position in frames
+        */
+        virtual void onNewPos([[maybe_unused]] uint32_t newPos) {}
+
+        // Playback has completed for a static track.
+        virtual void onBufferEnd() {}
+
+        // IAudioTrack was re-created, either due to re-routing and voluntary invalidation
+        // by mediaserver, or mediaserver crash.
+        virtual void onNewIAudioTrack() {}
+
+        // Sent after all the buffers queued in AF and HW are played back (after stop is called)
+        // for an offloaded track.
+        virtual void onStreamEnd() {}
+
+       /* Delivered periodically and when there's a significant change
+        * in the mapping from frame position to presentation time.
+        * See AudioTimestamp for the information included with event.
+        * TODO not yet implemented.
+        * Parameters:
+        *  - timestamp: New frame position and presentation time mapping.
+        */
+        virtual void onNewTimestamp([[maybe_unused]] AudioTimestamp timestamp) {}
+
+       /* Notification that more data can be given by write()
+        * This event only occurs for TRANSFER_SYNC_NOTIF_CALLBACK.
+        * Similar to onMoreData(), return the number of frames actually written
+        * Parameters:
+        *  - buffer: Buffer to fill
+        * Returns:
+        * Amount of data actually written in bytes.
+        */
+        virtual size_t onCanWriteMoreData([[maybe_unused]] const AudioTrack::Buffer& buffer) {
+            return 0;
+        }
+    };
 
     /* Returns the minimum frame count required for the successful creation of
      * an AudioTrack object.
@@ -168,6 +258,8 @@ public:
      * AudioFlinger takes place.  Use set() after this.
      */
                         AudioTrack();
+
+                        AudioTrack(const AttributionSourceState& attributionSourceState);
 
     /* Creates an AudioTrack object and registers it with AudioFlinger.
      * Once created, the track needs to be started before it can be used.
@@ -215,10 +307,10 @@ public:
      * transferType:       How data is transferred to AudioTrack.
      * offloadInfo:        If not NULL, provides offload parameters for
      *                     AudioSystem::getOutputForAttr().
-     * uid:                User ID of the app which initially requested this AudioTrack
-     *                     for power management tracking, or -1 for current user ID.
-     * pid:                Process ID of the app which initially requested this AudioTrack
-     *                     for power management tracking, or -1 for current process ID.
+     * attributionSource:  The attribution source of the app which initially requested this
+     *                     AudioTrack.
+     *                     Includes the UID and PID for power management tracking, or -1 for
+     *                     current user/process ID, plus the package name.
      * pAttributes:        If not NULL, supersedes streamType for use case selection.
      * doNotReconnect:     If set to true, AudioTrack won't automatically recreate the IAudioTrack
                            binder to AudioFlinger.
@@ -239,15 +331,34 @@ public:
                                     audio_channel_mask_t channelMask,
                                     size_t frameCount    = 0,
                                     audio_output_flags_t flags = AUDIO_OUTPUT_FLAG_NONE,
-                                    callback_t cbf       = NULL,
-                                    void* user           = NULL,
+                                    const wp<IAudioTrackCallback>& callback = nullptr,
                                     int32_t notificationFrames = 0,
                                     audio_session_t sessionId  = AUDIO_SESSION_ALLOCATE,
                                     transfer_type transferType = TRANSFER_DEFAULT,
-                                    const audio_offload_info_t *offloadInfo = NULL,
-                                    uid_t uid = AUDIO_UID_INVALID,
-                                    pid_t pid = -1,
-                                    const audio_attributes_t* pAttributes = NULL,
+                                    const audio_offload_info_t *offloadInfo = nullptr,
+                                    const AttributionSourceState& attributionSource =
+                                        AttributionSourceState(),
+                                    const audio_attributes_t* pAttributes = nullptr,
+                                    bool doNotReconnect = false,
+                                    float maxRequiredSpeed = 1.0f,
+                                    audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE);
+
+
+                        AudioTrack( audio_stream_type_t streamType,
+                                    uint32_t sampleRate,
+                                    audio_format_t format,
+                                    audio_channel_mask_t channelMask,
+                                    size_t frameCount,
+                                    audio_output_flags_t flags,
+                                    legacy_callback_t cbf,
+                                    void* user = nullptr,
+                                    int32_t notificationFrames = 0,
+                                    audio_session_t sessionId  = AUDIO_SESSION_ALLOCATE,
+                                    transfer_type transferType = TRANSFER_DEFAULT,
+                                    const audio_offload_info_t *offloadInfo = nullptr,
+                                    const AttributionSourceState& attributionSource =
+                                        AttributionSourceState(),
+                                    const audio_attributes_t* pAttributes = nullptr,
                                     bool doNotReconnect = false,
                                     float maxRequiredSpeed = 1.0f,
                                     audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE);
@@ -263,22 +374,39 @@ public:
      * It is recommended to pass a callback function to be notified of playback end by an
      * EVENT_UNDERRUN event.
      */
-
                         AudioTrack( audio_stream_type_t streamType,
                                     uint32_t sampleRate,
                                     audio_format_t format,
                                     audio_channel_mask_t channelMask,
                                     const sp<IMemory>& sharedBuffer,
                                     audio_output_flags_t flags = AUDIO_OUTPUT_FLAG_NONE,
-                                    callback_t cbf      = NULL,
-                                    void* user          = NULL,
+                                    const wp<IAudioTrackCallback>& callback = nullptr,
                                     int32_t notificationFrames = 0,
                                     audio_session_t sessionId   = AUDIO_SESSION_ALLOCATE,
                                     transfer_type transferType = TRANSFER_DEFAULT,
-                                    const audio_offload_info_t *offloadInfo = NULL,
-                                    uid_t uid = AUDIO_UID_INVALID,
-                                    pid_t pid = -1,
-                                    const audio_attributes_t* pAttributes = NULL,
+                                    const audio_offload_info_t *offloadInfo = nullptr,
+                                    const AttributionSourceState& attributionSource =
+                                        AttributionSourceState(),
+                                    const audio_attributes_t* pAttributes = nullptr,
+                                    bool doNotReconnect = false,
+                                    float maxRequiredSpeed = 1.0f);
+
+
+                        AudioTrack( audio_stream_type_t streamType,
+                                    uint32_t sampleRate,
+                                    audio_format_t format,
+                                    audio_channel_mask_t channelMask,
+                                    const sp<IMemory>& sharedBuffer,
+                                    audio_output_flags_t flags,
+                                    legacy_callback_t cbf,
+                                    void* user          = nullptr,
+                                    int32_t notificationFrames = 0,
+                                    audio_session_t sessionId   = AUDIO_SESSION_ALLOCATE,
+                                    transfer_type transferType = TRANSFER_DEFAULT,
+                                    const audio_offload_info_t *offloadInfo = nullptr,
+                                    const AttributionSourceState& attributionSource =
+                                        AttributionSourceState(),
+                                    const audio_attributes_t* pAttributes = nullptr,
                                     bool doNotReconnect = false,
                                     float maxRequiredSpeed = 1.0f);
 
@@ -316,17 +444,91 @@ public:
                             audio_channel_mask_t channelMask,
                             size_t frameCount   = 0,
                             audio_output_flags_t flags = AUDIO_OUTPUT_FLAG_NONE,
-                            callback_t cbf      = NULL,
-                            void* user          = NULL,
+                            const wp<IAudioTrackCallback>& callback = nullptr,
                             int32_t notificationFrames = 0,
                             const sp<IMemory>& sharedBuffer = 0,
                             bool threadCanCallJava = false,
                             audio_session_t sessionId  = AUDIO_SESSION_ALLOCATE,
                             transfer_type transferType = TRANSFER_DEFAULT,
-                            const audio_offload_info_t *offloadInfo = NULL,
+                            const audio_offload_info_t *offloadInfo = nullptr,
+                            const AttributionSourceState& attributionSource =
+                                AttributionSourceState(),
+                            const audio_attributes_t* pAttributes = nullptr,
+                            bool doNotReconnect = false,
+                            float maxRequiredSpeed = 1.0f,
+                            audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE);
+
+            struct SetParams {
+                audio_stream_type_t streamType;
+                uint32_t sampleRate;
+                audio_format_t format;
+                audio_channel_mask_t channelMask;
+                size_t frameCount;
+                audio_output_flags_t flags;
+                wp<IAudioTrackCallback> callback;
+                int32_t notificationFrames;
+                sp<IMemory> sharedBuffer;
+                bool threadCanCallJava;
+                audio_session_t sessionId;
+                transfer_type transferType;
+                // TODO don't take pointers here
+                const audio_offload_info_t *offloadInfo;
+                AttributionSourceState attributionSource;
+                const audio_attributes_t* pAttributes;
+                bool doNotReconnect;
+                float maxRequiredSpeed;
+                audio_port_handle_t selectedDeviceId;
+            };
+        private:
+            // Note: Consumes parameters
+            void        set(SetParams& s) {
+                (void)set(s.streamType, s.sampleRate, s.format, s.channelMask, s.frameCount,
+                          s.flags, std::move(s.callback), s.notificationFrames,
+                          std::move(s.sharedBuffer), s.threadCanCallJava, s.sessionId,
+                          s.transferType, s.offloadInfo, std::move(s.attributionSource),
+                          s.pAttributes, s.doNotReconnect, s.maxRequiredSpeed, s.selectedDeviceId);
+                        }
+            void       onFirstRef() override;
+        public:
+            status_t    set(audio_stream_type_t streamType,
+                            uint32_t sampleRate,
+                            audio_format_t format,
+                            audio_channel_mask_t channelMask,
+                            size_t frameCount,
+                            audio_output_flags_t flags,
+                            legacy_callback_t callback,
+                            void * user = nullptr,
+                            int32_t notificationFrames = 0,
+                            const sp<IMemory>& sharedBuffer = 0,
+                            bool threadCanCallJava = false,
+                            audio_session_t sessionId  = AUDIO_SESSION_ALLOCATE,
+                            transfer_type transferType = TRANSFER_DEFAULT,
+                            const audio_offload_info_t *offloadInfo = nullptr,
+                            const AttributionSourceState& attributionSource =
+                                AttributionSourceState(),
+                            const audio_attributes_t* pAttributes = nullptr,
+                            bool doNotReconnect = false,
+                            float maxRequiredSpeed = 1.0f,
+                            audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE);
+
+    // FIXME(b/169889714): Vendor code depends on the old method signature at link time
+            status_t    set(audio_stream_type_t streamType,
+                            uint32_t sampleRate,
+                            audio_format_t format,
+                            uint32_t channelMask,
+                            size_t frameCount   = 0,
+                            audio_output_flags_t flags = AUDIO_OUTPUT_FLAG_NONE,
+                            legacy_callback_t cbf = nullptr,
+                            void* user          = nullptr,
+                            int32_t notificationFrames = 0,
+                            const sp<IMemory>& sharedBuffer = 0,
+                            bool threadCanCallJava = false,
+                            audio_session_t sessionId  = AUDIO_SESSION_ALLOCATE,
+                            transfer_type transferType = TRANSFER_DEFAULT,
+                            const audio_offload_info_t *offloadInfo = nullptr,
                             uid_t uid = AUDIO_UID_INVALID,
                             pid_t pid = -1,
-                            const audio_attributes_t* pAttributes = NULL,
+                            const audio_attributes_t* pAttributes = nullptr,
                             bool doNotReconnect = false,
                             float maxRequiredSpeed = 1.0f,
                             audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE);
@@ -363,6 +565,7 @@ public:
 
             uint32_t    channelCount() const { return mChannelCount; }
             size_t      frameCount() const  { return mFrameCount; }
+            audio_channel_mask_t channelMask() const { return mChannelMask; }
 
     /*
      * Return the period of the notification callback in frames.
@@ -389,10 +592,22 @@ public:
      * less than or equal to the getBufferCapacityInFrames().
      * It may also be adjusted slightly for internal reasons.
      *
-     * Return the final size or a negative error if the track is unitialized
-     * or does not support variable sizes.
+     * Return the final size or a negative value (NO_INIT) if the track is uninitialized.
      */
             ssize_t     setBufferSizeInFrames(size_t size);
+
+    /* Returns the start threshold on the buffer for audio streaming
+     * or a negative value if the AudioTrack is not initialized.
+     */
+            ssize_t     getStartThresholdInFrames() const;
+
+    /* Sets the start threshold in frames on the buffer for audio streaming.
+     *
+     * May be clamped internally. Returns the actual value set, or a negative
+     * value if the AudioTrack is not initialized or if the input
+     * is zero or greater than INT_MAX.
+     */
+            ssize_t     setStartThresholdInFrames(size_t startThresholdInFrames);
 
     /* Return the static buffer specified in constructor or set(), or 0 for streaming mode */
             sp<IMemory> sharedBuffer() const { return mSharedBuffer; }
@@ -400,7 +615,20 @@ public:
     /*
      * return metrics information for the current track.
      */
-            status_t getMetrics(MediaAnalyticsItem * &item);
+            status_t getMetrics(mediametrics::Item * &item);
+
+    /*
+     * Set name of API that is using this object.
+     * For example "aaudio" or "opensles".
+     * This may be logged or reported as part of MediaMetrics.
+     */
+            void setCallerName(const std::string &name) {
+                mCallerName = name;
+            }
+
+            std::string getCallerName() const {
+                return mCallerName;
+            };
 
     /* After it's created the track is not active. Call start() to
      * make it active. If set, the callback will start being called.
@@ -418,6 +646,19 @@ public:
             void        stop();
             bool        stopped() const;
 
+    /* Call stop() and then wait for all of the callbacks to return.
+     * It is safe to call this if stop() or pause() has already been called.
+     *
+     * This function is called from the destructor. But since AudioTrack
+     * is ref counted, the destructor may be called later than desired.
+     * This can be called explicitly as part of closing an AudioTrack
+     * if you want to be certain that callbacks have completely finished.
+     *
+     * This is not thread safe and should only be called from one thread,
+     * ideally as the AudioTrack is being closed.
+     */
+            void        stopAndJoinCallbacks();
+
     /* Flush a stopped or paused track. All previously buffered data is discarded immediately.
      * This has the effect of draining the buffers without mixing or output.
      * Flush is intended for streaming mode, for example before switching to non-contiguous content.
@@ -432,6 +673,14 @@ public:
      * and then the track is marked as paused.  It can be resumed with ramp up by start().
      */
             void        pause();
+
+    /* Pause and wait (with timeout) for the audio track to ramp to silence.
+     *
+     * \param timeout is the time limit to wait before returning.
+     *                A negative number is treated as 0.
+     * \return true if the track is ramped to silence, false if the timeout occurred.
+     */
+            bool        pauseAndWait(const std::chrono::milliseconds& timeout);
 
     /* Set volume for this track, mostly used for games' sound effects
      * left and right volumes. Levels must be >= 0.0 and <= 1.0.
@@ -465,6 +714,18 @@ public:
      */
             uint32_t    getOriginalSampleRate() const;
 
+    /* Sets the Dual Mono mode presentation on the output device. */
+            status_t    setDualMonoMode(audio_dual_mono_mode_t mode);
+
+    /* Returns the Dual Mono mode presentation setting. */
+            status_t    getDualMonoMode(audio_dual_mono_mode_t* mode) const;
+
+    /* Sets the Audio Description Mix level in dB. */
+            status_t    setAudioDescriptionMixLevel(float leveldB);
+
+    /* Returns the Audio Description Mix level in dB. */
+            status_t    getAudioDescriptionMixLevel(float* leveldB) const;
+
     /* Set source playback rate for timestretch
      * 1.0 is normal speed: < 1.0 is slower, > 1.0 is faster
      * 1.0 is normal pitch: < 1.0 is lower pitch, > 1.0 is higher pitch
@@ -478,7 +739,7 @@ public:
             status_t    setPlaybackRate(const AudioPlaybackRate &playbackRate);
 
     /* Return current playback rate */
-            const AudioPlaybackRate& getPlaybackRate() const;
+            const AudioPlaybackRate& getPlaybackRate();
 
     /* Enables looping and sets the start and end points of looping.
      * Only supported for static buffer mode.
@@ -600,9 +861,7 @@ public:
      *  handle on audio hardware output, or AUDIO_IO_HANDLE_NONE if the
      *  track needed to be re-created but that failed
      */
-private:
             audio_io_handle_t    getOutput() const;
-public:
 
     /* Selects the audio device to use for output of this AudioTrack. A value of
      * AUDIO_PORT_HANDLE_NONE indicates default (AudioPolicyManager) routing.
@@ -692,14 +951,17 @@ public:
      *  frameCount  number of [empty slots for] frames requested
      *  size        ignored
      *  raw         ignored
+     *  sequence    ignored
      * After error return:
      *  frameCount  0
      *  size        0
      *  raw         undefined
+     *  sequence    undefined
      * After successful return:
      *  frameCount  actual number of [empty slots for] frames available, <= number requested
      *  size        actual number of bytes available
      *  raw         pointer to the buffer
+     *  sequence    IAudioTrack instance sequence number, as of obtainBuffer()
      */
             status_t    obtainBuffer(Buffer* audioBuffer, int32_t waitCount,
                                 size_t *nonContig = NULL);
@@ -877,8 +1139,6 @@ public:
             virtual void onAudioDeviceUpdate(audio_io_handle_t audioIo,
                                              audio_port_handle_t deviceId);
 
-
-
     /* Obtain the pending duration in milliseconds for playback of pure PCM
      * (mixable without embedded timing) data remaining in AudioTrack.
      *
@@ -925,6 +1185,27 @@ public:
      */
             audio_port_handle_t getPortId() const { return mPortId; };
 
+    /* Sets the LogSessionId field which is used for metrics association of
+     * this object with other objects. A nullptr or empty string clears
+     * the logSessionId.
+     */
+            void setLogSessionId(const char *logSessionId);
+
+    /* Sets the playerIId field to associate the AudioTrack with an interface managed by
+     * AudioService.
+     *
+     * If this value is not set, then the playerIId is reported as -1
+     * (not associated with an AudioService player interface).
+     *
+     * For metrics purposes, we keep the playerIId association in the native
+     * client AudioTrack to improve the robustness under track restoration.
+     */
+            void setPlayerIId(int playerIId);
+
+            void setAudioTrackCallback(const sp<media::IAudioTrackCallback>& callback) {
+                mAudioTrackCallback->setAudioTrackCallback(callback);
+            }
+
  protected:
     /* copying audio tracks is not allowed */
                         AudioTrack(const AudioTrack& other);
@@ -934,7 +1215,7 @@ public:
     class AudioTrackThread : public Thread
     {
     public:
-        AudioTrackThread(AudioTrack& receiver, bool bCanCallJava = false);
+        explicit AudioTrackThread(AudioTrack& receiver);
 
         // Do not call Thread::requestExitAndWait() without first calling requestExit().
         // Thread::requestExitAndWait() is not virtual, and the implementation doesn't do enough.
@@ -1017,8 +1298,14 @@ public:
 
             void     updateRoutedDeviceId_l();
 
+            /* Sets the Dual Mono mode presentation on the output device. */
+            status_t setDualMonoMode_l(audio_dual_mono_mode_t mode);
+
+            /* Sets the Audio Description Mix level in dB. */
+            status_t setAudioDescriptionMixLevel_l(float leveldB);
+
     // Next 4 fields may be changed if IAudioTrack is re-created, but always != 0
-    sp<IAudioTrack>         mAudioTrack;
+    sp<media::IAudioTrack>  mAudioTrack;
     sp<IMemory>             mCblkMemory;
     audio_track_cblk_t*     mCblk;                  // re-load after mLock.unlock()
     audio_io_handle_t       mOutput = AUDIO_IO_HANDLE_NONE; // from AudioSystem::getOutputForAttr()
@@ -1049,14 +1336,14 @@ public:
 
     // constant after constructor or set()
     audio_format_t          mFormat;                // as requested by client, not forced to 16-bit
-    audio_stream_type_t     mStreamType;            // mStreamType == AUDIO_STREAM_DEFAULT implies
-                                                    // this AudioTrack has valid attributes
+    // mOriginalStreamType == AUDIO_STREAM_DEFAULT implies this AudioTrack has valid attributes
+    audio_stream_type_t     mOriginalStreamType = AUDIO_STREAM_DEFAULT;
+    audio_stream_type_t     mStreamType = AUDIO_STREAM_DEFAULT;
     uint32_t                mChannelCount;
     audio_channel_mask_t    mChannelMask;
     sp<IMemory>             mSharedBuffer;
     transfer_type           mTransfer;
     audio_offload_info_t    mOffloadInfoCopy;
-    const audio_offload_info_t* mOffloadInfo;
     audio_attributes_t      mAttributes;
 
     size_t                  mFrameSize;             // frame size in bytes
@@ -1090,11 +1377,13 @@ public:
     }
 
     // for client callback handler
-    callback_t              mCbf;                   // callback handler for events, or NULL
-    void*                   mUserData;
-
+    wp<IAudioTrackCallback> mCallback;                   // callback handler for events, or NULL
+    sp<IAudioTrackCallback> mLegacyCallbackWrapper;      // wrapper for legacy callback interface
     // for notification APIs
+    std::unique_ptr<SetParams> mSetParams;          // Temporary copy of ctor params to allow for
+                                                    // deferred set after first reference.
 
+    bool                    mInitialized = false;   // Set after track is initialized
     // next 2 fields are const after constructor or set()
     uint32_t                mNotificationFramesReq; // requested number of frames between each
                                                     // notification callback,
@@ -1151,8 +1440,11 @@ public:
                                                     // AudioTracks.
 
     bool                    mPreviousTimestampValid;// true if mPreviousTimestamp is valid
-    bool                    mTimestampStartupGlitchReported; // reduce log spam
-    bool                    mRetrogradeMotionReported; // reduce log spam
+    bool                    mTimestampStartupGlitchReported;      // reduce log spam
+    bool                    mTimestampRetrogradePositionReported; // reduce log spam
+    bool                    mTimestampRetrogradeTimeReported;     // reduce log spam
+    bool                    mTimestampStallReported;              // reduce log spam
+    bool                    mTimestampStaleTimeReported;          // reduce log spam
     AudioTimestamp          mPreviousTimestamp;     // used to detect retrograde motion
     ExtendedTimestamp::Location mPreviousLocation;  // location used for previous timestamp
 
@@ -1180,6 +1472,19 @@ public:
     audio_session_t         mSessionId;
     int                     mAuxEffectId;
     audio_port_handle_t     mPortId;                    // Id from Audio Policy Manager
+
+    /**
+     * mPlayerIId is the player id of the AudioTrack used by AudioManager.
+     * For an AudioTrack created by the Java interface, this is generally set once.
+     */
+    int                     mPlayerIId = -1;  // AudioManager.h PLAYER_PIID_INVALID
+
+    /**
+     * mLogSessionId is a string identifying this AudioTrack for the metrics service.
+     * It may be unique or shared with other objects.  An empty string means the
+     * logSessionId is not set.
+     */
+    std::string             mLogSessionId{};
 
     mutable Mutex           mLock;
 
@@ -1210,7 +1515,7 @@ public:
 private:
     class DeathNotifier : public IBinder::DeathRecipient {
     public:
-        DeathNotifier(AudioTrack* audioTrack) : mAudioTrack(audioTrack) { }
+        explicit DeathNotifier(AudioTrack* audioTrack) : mAudioTrack(audioTrack) { }
     protected:
         virtual void        binderDied(const wp<IBinder>& who);
     private:
@@ -1219,29 +1524,49 @@ private:
 
     sp<DeathNotifier>       mDeathNotifier;
     uint32_t                mSequence;              // incremented for each new IAudioTrack attempt
-    uid_t                   mClientUid;
-    pid_t                   mClientPid;
+    AttributionSourceState mClientAttributionSource;
 
     wp<AudioSystem::AudioDeviceCallback> mDeviceCallback;
+
+    // Cached values to restore along with the AudioTrack.
+    audio_dual_mono_mode_t mDualMonoMode = AUDIO_DUAL_MONO_MODE_OFF;
+    float mAudioDescriptionMixLeveldB = -std::numeric_limits<float>::infinity();
 
 private:
     class MediaMetrics {
       public:
-        MediaMetrics() : mAnalyticsItem(MediaAnalyticsItem::create("audiotrack")) {
+        MediaMetrics() : mMetricsItem(mediametrics::Item::create("audiotrack")) {
         }
         ~MediaMetrics() {
-            // mAnalyticsItem alloc failure will be flagged in the constructor
+            // mMetricsItem alloc failure will be flagged in the constructor
             // don't log empty records
-            if (mAnalyticsItem->count() > 0) {
-                mAnalyticsItem->selfrecord();
+            if (mMetricsItem->count() > 0) {
+                mMetricsItem->selfrecord();
             }
         }
         void gather(const AudioTrack *track);
-        MediaAnalyticsItem *dup() { return mAnalyticsItem->dup(); }
+        mediametrics::Item *dup() { return mMetricsItem->dup(); }
       private:
-        std::unique_ptr<MediaAnalyticsItem> mAnalyticsItem;
+        std::unique_ptr<mediametrics::Item> mMetricsItem;
     };
     MediaMetrics mMediaMetrics;
+    std::string mMetricsId;  // GUARDED_BY(mLock), could change in createTrack_l().
+    std::string mCallerName; // for example "aaudio"
+
+    // report error to mediametrics.
+    void reportError(status_t status, const char *event, const char *message) const;
+
+private:
+    class AudioTrackCallback : public media::BnAudioTrackCallback {
+    public:
+        binder::Status onCodecFormatChanged(const std::vector<uint8_t>& audioMetadata) override;
+
+        void setAudioTrackCallback(const sp<media::IAudioTrackCallback>& callback);
+    private:
+        Mutex mAudioTrackCbLock;
+        wp<media::IAudioTrackCallback> mCallback;
+    };
+    sp<AudioTrackCallback> mAudioTrackCallback;
 };
 
 }; // namespace android

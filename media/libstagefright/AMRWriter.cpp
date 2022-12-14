@@ -26,7 +26,7 @@
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/MetaData.h>
-#include <media/MediaSource.h>
+#include <media/stagefright/MediaSource.h>
 #include <media/mediarecorder.h>
 
 namespace android {
@@ -149,11 +149,11 @@ status_t AMRWriter::reset() {
     mDone = true;
 
     void *dummy;
+    status_t status = mSource->stop();
     pthread_join(mThread, &dummy);
 
     status_t err = static_cast<status_t>(reinterpret_cast<uintptr_t>(dummy));
     {
-        status_t status = mSource->stop();
         if (err == OK &&
             (status != OK && status != ERROR_END_OF_STREAM)) {
             err = status;

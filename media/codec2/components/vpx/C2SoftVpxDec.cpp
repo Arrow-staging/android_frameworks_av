@@ -18,17 +18,20 @@
 #define LOG_TAG "C2SoftVpxDec"
 #include <log/log.h>
 
+#include <algorithm>
 #include <media/stagefright/foundation/AUtils.h>
 #include <media/stagefright/foundation/MediaDefs.h>
 
 #include <C2Debug.h>
 #include <C2PlatformSupport.h>
+#include <Codec2BufferUtils.h>
+#include <Codec2CommonUtils.h>
 #include <SimpleC2Interface.h>
 
 #include "C2SoftVpxDec.h"
 
 namespace android {
-
+constexpr size_t kMinInputBufferSize = 2 * 1024 * 1024;
 #ifdef VP9
 constexpr char COMPONENT_NAME[] = "c2.android.vp9.decoder";
 #else
@@ -147,8 +150,16 @@ public:
 #else
         addParameter(
                 DefineParam(mProfileLevel, C2_PARAMKEY_PROFILE_LEVEL)
-                .withConstValue(new C2StreamProfileLevelInfo::input(0u,
-                        C2Config::PROFILE_UNUSED, C2Config::LEVEL_UNUSED))
+                .withDefault(new C2StreamProfileLevelInfo::input(0u,
+                        C2Config::PROFILE_VP8_0, C2Config::LEVEL_UNUSED))
+                .withFields({
+                    C2F(mProfileLevel, profile).equalTo(
+                        PROFILE_VP8_0
+                    ),
+                    C2F(mProfileLevel, level).equalTo(
+                        LEVEL_UNUSED),
+                })
+                .withSetter(ProfileLevelSetter, mSize)
                 .build());
 #endif
 
@@ -164,7 +175,7 @@ public:
 
         addParameter(
                 DefineParam(mMaxInputSize, C2_PARAMKEY_INPUT_MAX_BUFFER_SIZE)
-                .withDefault(new C2StreamMaxBufferSizeInfo::input(0u, 320 * 240 * 3 / 4))
+                .withDefault(new C2StreamMaxBufferSizeInfo::input(0u, kMinInputBufferSize))
                 .withFields({
                     C2F(mMaxInputSize, value).any(),
                 })
@@ -207,11 +218,24 @@ public:
                 .build());
 
         // TODO: support more formats?
+        std::vector<uint32_t> pixelFormats = {HAL_PIXEL_FORMAT_YCBCR_420_888};
+#ifdef VP9
+        if (isHalPixelFormatSupported((AHardwareBuffer_Format)HAL_PIXEL_FORMAT_YCBCR_P010)) {
+            pixelFormats.push_back(HAL_PIXEL_FORMAT_YCBCR_P010);
+        }
+        // If color format surface isn't added to supported formats, there is no way to know
+        // when the color-format is configured to surface. This is necessary to be able to
+        // choose 10-bit format while decoding 10-bit clips in surface mode
+        pixelFormats.push_back(HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED);
+#endif
         addParameter(
                 DefineParam(mPixelFormat, C2_PARAMKEY_PIXEL_FORMAT)
-                .withConstValue(new C2StreamPixelFormatInfo::output(
-                                     0u, HAL_PIXEL_FORMAT_YCBCR_420_888))
+                .withDefault(new C2StreamPixelFormatInfo::output(
+                                  0u, HAL_PIXEL_FORMAT_YCBCR_420_888))
+                .withFields({C2F(mPixelFormat, value).oneOf(pixelFormats)})
+                .withSetter((Setter<decltype(*mPixelFormat)>::StrictValueWithNoDeps))
                 .build());
+
     }
 
     static C2R SizeSetter(bool mayBlock, const C2P<C2StreamPictureSizeInfo::output> &oldMe,
@@ -242,7 +266,8 @@ public:
                                   const C2P<C2StreamMaxPictureSizeTuning::output> &maxSize) {
         (void)mayBlock;
         // assume compression ratio of 2
-        me.set().value = (((maxSize.v.width + 63) / 64) * ((maxSize.v.height + 63) / 64) * 3072);
+        me.set().value = c2_max((((maxSize.v.width + 63) / 64)
+                * ((maxSize.v.height + 63) / 64) * 3072), kMinInputBufferSize);
         return C2R::Ok();
     }
 
@@ -286,6 +311,11 @@ public:
         return C2R::Ok();
     }
 
+    // unsafe getters
+    std::shared_ptr<C2StreamPixelFormatInfo::output> getPixelFormat_l() const {
+        return mPixelFormat;
+    }
+
 private:
     std::shared_ptr<C2StreamProfileLevelInfo::input> mProfileLevel;
     std::shared_ptr<C2StreamPictureSizeInfo::output> mSize;
@@ -303,13 +333,43 @@ private:
 #endif
 };
 
+C2SoftVpxDec::ConverterThread::ConverterThread(
+        const std::shared_ptr<Mutexed<ConversionQueue>> &queue)
+    : Thread(false), mQueue(queue) {}
+
+bool C2SoftVpxDec::ConverterThread::threadLoop() {
+    Mutexed<ConversionQueue>::Locked queue(*mQueue);
+    if (queue->entries.empty()) {
+        queue.waitForCondition(queue->cond);
+        if (queue->entries.empty()) {
+            return true;
+        }
+    }
+    std::function<void()> convert = queue->entries.front();
+    queue->entries.pop_front();
+    if (!queue->entries.empty()) {
+        queue->cond.signal();
+    }
+    queue.unlock();
+
+    convert();
+
+    queue.lock();
+    if (--queue->numPending == 0u) {
+        queue->cond.broadcast();
+    }
+    return true;
+}
+
 C2SoftVpxDec::C2SoftVpxDec(
         const char *name,
         c2_node_id_t id,
         const std::shared_ptr<IntfImpl> &intfImpl)
     : SimpleC2Component(std::make_shared<SimpleInterface<IntfImpl>>(name, id, intfImpl)),
       mIntf(intfImpl),
-      mCodecCtx(nullptr) {
+      mCodecCtx(nullptr),
+      mCoreCount(1),
+      mQueue(new Mutexed<ConversionQueue>) {
 }
 
 C2SoftVpxDec::~C2SoftVpxDec() {
@@ -382,6 +442,11 @@ status_t C2SoftVpxDec::initDecoder() {
 #else
     mMode = MODE_VP8;
 #endif
+    mHalPixelFormat = HAL_PIXEL_FORMAT_YV12;
+    {
+        IntfImpl::Lock lock = mIntf->lock();
+        mPixelFormatInfo = mIntf->getPixelFormat_l();
+    }
 
     mWidth = 320;
     mHeight = 240;
@@ -399,7 +464,7 @@ status_t C2SoftVpxDec::initDecoder() {
 
     vpx_codec_dec_cfg_t cfg;
     memset(&cfg, 0, sizeof(vpx_codec_dec_cfg_t));
-    cfg.threads = GetCPUCoreCount();
+    cfg.threads = mCoreCount = GetCPUCoreCount();
 
     vpx_codec_flags_t flags;
     memset(&flags, 0, sizeof(vpx_codec_flags_t));
@@ -413,6 +478,18 @@ status_t C2SoftVpxDec::initDecoder() {
         return UNKNOWN_ERROR;
     }
 
+    if (mMode == MODE_VP9) {
+        using namespace std::string_literals;
+        for (int i = 0; i < mCoreCount; ++i) {
+            sp<ConverterThread> thread(new ConverterThread(mQueue));
+            mConverterThreads.push_back(thread);
+            if (thread->run(("vp9conv #"s + std::to_string(i)).c_str(),
+                            ANDROID_PRIORITY_AUDIO) != OK) {
+                return UNKNOWN_ERROR;
+            }
+        }
+    }
+
     return OK;
 }
 
@@ -422,6 +499,21 @@ status_t C2SoftVpxDec::destroyDecoder() {
         delete mCodecCtx;
         mCodecCtx = nullptr;
     }
+    bool running = true;
+    for (const sp<ConverterThread> &thread : mConverterThreads) {
+        thread->requestExit();
+    }
+    while (running) {
+        mQueue->lock()->cond.broadcast();
+        running = false;
+        for (const sp<ConverterThread> &thread : mConverterThreads) {
+            if (thread->isRunning()) {
+                running = true;
+                break;
+            }
+        }
+    }
+    mConverterThreads.clear();
 
     return OK;
 }
@@ -534,12 +626,10 @@ void C2SoftVpxDec::process(
         }
     }
 
-    int64_t frameIndex = work->input.ordinal.frameIndex.peekll();
-
     if (inSize) {
         uint8_t *bitstream = const_cast<uint8_t *>(rView.data() + inOffset);
         vpx_codec_err_t err = vpx_codec_decode(
-                mCodecCtx, bitstream, inSize, &frameIndex, 0);
+                mCodecCtx, bitstream, inSize, &work->input.ordinal.frameIndex, 0);
         if (err != VPX_CODEC_OK) {
             ALOGE("on2 decoder failed to decode frame. err: %d", err);
             mSignalledError = true;
@@ -549,7 +639,20 @@ void C2SoftVpxDec::process(
         }
     }
 
-    (void)outputBuffer(pool, work);
+    status_t err = outputBuffer(pool, work);
+    if (err == NOT_ENOUGH_DATA) {
+        if (inSize > 0) {
+            ALOGV("Maybe non-display frame at %lld.",
+                  work->input.ordinal.frameIndex.peekll());
+            // send the work back with empty buffer.
+            inSize = 0;
+        }
+    } else if (err != OK) {
+        ALOGD("Error while getting the output frame out");
+        // work->result would be already filled; do fillEmptyWork() below to
+        // send the work back.
+        inSize = 0;
+    }
 
     if (eos) {
         drainInternal(DRAIN_COMPONENT_WITH_EOS, pool, work);
@@ -559,142 +662,16 @@ void C2SoftVpxDec::process(
     }
 }
 
-static void copyOutputBufferToYV12Frame(uint8_t *dst,
-        const uint8_t *srcY, const uint8_t *srcU, const uint8_t *srcV,
-        size_t srcYStride, size_t srcUStride, size_t srcVStride,
-        uint32_t width, uint32_t height) {
-    size_t dstYStride = align(width, 16);
-    size_t dstUVStride = align(dstYStride / 2, 16);
-    uint8_t *dstStart = dst;
-
-    for (size_t i = 0; i < height; ++i) {
-         memcpy(dst, srcY, width);
-         srcY += srcYStride;
-         dst += dstYStride;
-    }
-
-    dst = dstStart + dstYStride * height;
-    for (size_t i = 0; i < height / 2; ++i) {
-         memcpy(dst, srcV, width / 2);
-         srcV += srcVStride;
-         dst += dstUVStride;
-    }
-
-    dst = dstStart + (dstYStride * height) + (dstUVStride * height / 2);
-    for (size_t i = 0; i < height / 2; ++i) {
-         memcpy(dst, srcU, width / 2);
-         srcU += srcUStride;
-         dst += dstUVStride;
-    }
-}
-
-static void convertYUV420Planar16ToY410(uint32_t *dst,
-        const uint16_t *srcY, const uint16_t *srcU, const uint16_t *srcV,
-        size_t srcYStride, size_t srcUStride, size_t srcVStride,
-        size_t dstStride, size_t width, size_t height) {
-
-    // Converting two lines at a time, slightly faster
-    for (size_t y = 0; y < height; y += 2) {
-        uint32_t *dstTop = (uint32_t *) dst;
-        uint32_t *dstBot = (uint32_t *) (dst + dstStride);
-        uint16_t *ySrcTop = (uint16_t*) srcY;
-        uint16_t *ySrcBot = (uint16_t*) (srcY + srcYStride);
-        uint16_t *uSrc = (uint16_t*) srcU;
-        uint16_t *vSrc = (uint16_t*) srcV;
-
-        uint32_t u01, v01, y01, y23, y45, y67, uv0, uv1;
-        size_t x = 0;
-        for (; x < width - 3; x += 4) {
-
-            u01 = *((uint32_t*)uSrc); uSrc += 2;
-            v01 = *((uint32_t*)vSrc); vSrc += 2;
-
-            y01 = *((uint32_t*)ySrcTop); ySrcTop += 2;
-            y23 = *((uint32_t*)ySrcTop); ySrcTop += 2;
-            y45 = *((uint32_t*)ySrcBot); ySrcBot += 2;
-            y67 = *((uint32_t*)ySrcBot); ySrcBot += 2;
-
-            uv0 = (u01 & 0x3FF) | ((v01 & 0x3FF) << 20);
-            uv1 = (u01 >> 16) | ((v01 >> 16) << 20);
-
-            *dstTop++ = 3 << 30 | ((y01 & 0x3FF) << 10) | uv0;
-            *dstTop++ = 3 << 30 | ((y01 >> 16) << 10) | uv0;
-            *dstTop++ = 3 << 30 | ((y23 & 0x3FF) << 10) | uv1;
-            *dstTop++ = 3 << 30 | ((y23 >> 16) << 10) | uv1;
-
-            *dstBot++ = 3 << 30 | ((y45 & 0x3FF) << 10) | uv0;
-            *dstBot++ = 3 << 30 | ((y45 >> 16) << 10) | uv0;
-            *dstBot++ = 3 << 30 | ((y67 & 0x3FF) << 10) | uv1;
-            *dstBot++ = 3 << 30 | ((y67 >> 16) << 10) | uv1;
-        }
-
-        // There should be at most 2 more pixels to process. Note that we don't
-        // need to consider odd case as the buffer is always aligned to even.
-        if (x < width) {
-            u01 = *uSrc;
-            v01 = *vSrc;
-            y01 = *((uint32_t*)ySrcTop);
-            y45 = *((uint32_t*)ySrcBot);
-            uv0 = (u01 & 0x3FF) | ((v01 & 0x3FF) << 20);
-            *dstTop++ = ((y01 & 0x3FF) << 10) | uv0;
-            *dstTop++ = ((y01 >> 16) << 10) | uv0;
-            *dstBot++ = ((y45 & 0x3FF) << 10) | uv0;
-            *dstBot++ = ((y45 >> 16) << 10) | uv0;
-        }
-
-        srcY += srcYStride * 2;
-        srcU += srcUStride;
-        srcV += srcVStride;
-        dst += dstStride * 2;
-    }
-
-    return;
-}
-
-static void convertYUV420Planar16ToYUV420Planar(uint8_t *dst,
-        const uint16_t *srcY, const uint16_t *srcU, const uint16_t *srcV,
-        size_t srcYStride, size_t srcUStride, size_t srcVStride,
-        size_t dstStride, size_t width, size_t height) {
-
-    uint8_t *dstY = (uint8_t *)dst;
-    size_t dstYSize = dstStride * height;
-    size_t dstUVStride = align(dstStride / 2, 16);
-    size_t dstUVSize = dstUVStride * height / 2;
-    uint8_t *dstV = dstY + dstYSize;
-    uint8_t *dstU = dstV + dstUVSize;
-
-    for (size_t y = 0; y < height; ++y) {
-        for (size_t x = 0; x < width; ++x) {
-            dstY[x] = (uint8_t)(srcY[x] >> 2);
-        }
-
-        srcY += srcYStride;
-        dstY += dstStride;
-    }
-
-    for (size_t y = 0; y < (height + 1) / 2; ++y) {
-        for (size_t x = 0; x < (width + 1) / 2; ++x) {
-            dstU[x] = (uint8_t)(srcU[x] >> 2);
-            dstV[x] = (uint8_t)(srcV[x] >> 2);
-        }
-
-        srcU += srcUStride;
-        srcV += srcVStride;
-        dstU += dstUVStride;
-        dstV += dstUVStride;
-    }
-    return;
-}
-bool C2SoftVpxDec::outputBuffer(
+status_t C2SoftVpxDec::outputBuffer(
         const std::shared_ptr<C2BlockPool> &pool,
         const std::unique_ptr<C2Work> &work)
 {
-    if (!(work && pool)) return false;
+    if (!(work && pool)) return BAD_VALUE;
 
     vpx_codec_iter_t iter = nullptr;
     vpx_image_t *img = vpx_codec_get_frame(mCodecCtx, &iter);
 
-    if (!img) return false;
+    if (!img) return NOT_ENOUGH_DATA;
 
     if (img->d_w != mWidth || img->d_h != mHeight) {
         mWidth = img->d_w;
@@ -711,46 +688,80 @@ bool C2SoftVpxDec::outputBuffer(
             mSignalledError = true;
             work->workletsProcessed = 1u;
             work->result = C2_CORRUPTED;
-            return false;
+            return UNKNOWN_ERROR;
         }
 
     }
-    CHECK(img->fmt == VPX_IMG_FMT_I420 || img->fmt == VPX_IMG_FMT_I42016);
+    if(img->fmt != VPX_IMG_FMT_I420 && img->fmt != VPX_IMG_FMT_I42016) {
+        ALOGE("img->fmt %d not supported", img->fmt);
+        mSignalledError = true;
+        work->workletsProcessed = 1u;
+        work->result = C2_CORRUPTED;
+        return false;
+    }
 
     std::shared_ptr<C2GraphicBlock> block;
     uint32_t format = HAL_PIXEL_FORMAT_YV12;
-    if (img->fmt == VPX_IMG_FMT_I42016) {
+    std::shared_ptr<C2StreamColorAspectsTuning::output> defaultColorAspects;
+    if (img->fmt == VPX_IMG_FMT_I42016 &&
+            mPixelFormatInfo->value != HAL_PIXEL_FORMAT_YCBCR_420_888) {
         IntfImpl::Lock lock = mIntf->lock();
-        std::shared_ptr<C2StreamColorAspectsTuning::output> defaultColorAspects = mIntf->getDefaultColorAspects_l();
-
+        defaultColorAspects = mIntf->getDefaultColorAspects_l();
+        bool allowRGBA1010102 = false;
         if (defaultColorAspects->primaries == C2Color::PRIMARIES_BT2020 &&
             defaultColorAspects->matrix == C2Color::MATRIX_BT2020 &&
             defaultColorAspects->transfer == C2Color::TRANSFER_ST2084) {
-            format = HAL_PIXEL_FORMAT_RGBA_1010102;
+            allowRGBA1010102 = true;
         }
+        format = getHalPixelFormatForBitDepth10(allowRGBA1010102);
     }
+
+    if (mHalPixelFormat != format) {
+        C2StreamPixelFormatInfo::output pixelFormat(0u, format);
+        std::vector<std::unique_ptr<C2SettingResult>> failures;
+        c2_status_t err = mIntf->config({&pixelFormat }, C2_MAY_BLOCK, &failures);
+        if (err == C2_OK) {
+            work->worklets.front()->output.configUpdate.push_back(
+                C2Param::Copy(pixelFormat));
+        } else {
+            ALOGE("Config update pixelFormat failed");
+            mSignalledError = true;
+            work->workletsProcessed = 1u;
+            work->result = C2_CORRUPTED;
+            return UNKNOWN_ERROR;
+        }
+        mHalPixelFormat = format;
+    }
+
     C2MemoryUsage usage = { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE };
     c2_status_t err = pool->fetchGraphicBlock(align(mWidth, 16), mHeight, format, usage, &block);
     if (err != C2_OK) {
         ALOGE("fetchGraphicBlock for Output failed with status %d", err);
         work->result = err;
-        return false;
+        return UNKNOWN_ERROR;
     }
 
     C2GraphicView wView = block->map().get();
     if (wView.error()) {
         ALOGE("graphic view map failed %d", wView.error());
         work->result = C2_CORRUPTED;
-        return false;
+        return UNKNOWN_ERROR;
     }
 
-    ALOGV("provided (%dx%d) required (%dx%d), out frameindex %d",
-           block->width(), block->height(), mWidth, mHeight, (int)*(int64_t *)img->user_priv);
+    ALOGV("provided (%dx%d) required (%dx%d), out frameindex %lld",
+           block->width(), block->height(), mWidth, mHeight,
+           ((c2_cntr64_t *)img->user_priv)->peekll());
 
-    uint8_t *dst = const_cast<uint8_t *>(wView.data()[C2PlanarLayout::PLANE_Y]);
+    uint8_t *dstY = const_cast<uint8_t *>(wView.data()[C2PlanarLayout::PLANE_Y]);
+    uint8_t *dstU = const_cast<uint8_t *>(wView.data()[C2PlanarLayout::PLANE_U]);
+    uint8_t *dstV = const_cast<uint8_t *>(wView.data()[C2PlanarLayout::PLANE_V]);
+
     size_t srcYStride = img->stride[VPX_PLANE_Y];
     size_t srcUStride = img->stride[VPX_PLANE_U];
     size_t srcVStride = img->stride[VPX_PLANE_V];
+    C2PlanarLayout layout = wView.layout();
+    size_t dstYStride = layout.planes[C2PlanarLayout::PLANE_Y].rowInc;
+    size_t dstUVStride = layout.planes[C2PlanarLayout::PLANE_U].rowInc;
 
     if (img->fmt == VPX_IMG_FMT_I42016) {
         const uint16_t *srcY = (const uint16_t *)img->planes[VPX_PLANE_Y];
@@ -758,25 +769,52 @@ bool C2SoftVpxDec::outputBuffer(
         const uint16_t *srcV = (const uint16_t *)img->planes[VPX_PLANE_V];
 
         if (format == HAL_PIXEL_FORMAT_RGBA_1010102) {
-            convertYUV420Planar16ToY410((uint32_t *)dst, srcY, srcU, srcV, srcYStride / 2,
-                                    srcUStride / 2, srcVStride / 2,
-                                    align(mWidth, 16),
-                                    mWidth, mHeight);
+            Mutexed<ConversionQueue>::Locked queue(*mQueue);
+            size_t i = 0;
+            constexpr size_t kHeight = 64;
+            for (; i < mHeight; i += kHeight) {
+                queue->entries.push_back(
+                        [dstY, srcY, srcU, srcV,
+                         srcYStride, srcUStride, srcVStride, dstYStride,
+                         width = mWidth, height = std::min(mHeight - i, kHeight),
+                         defaultColorAspects] {
+                            convertYUV420Planar16ToY410OrRGBA1010102(
+                                    (uint32_t *)dstY, srcY, srcU, srcV, srcYStride / 2,
+                                    srcUStride / 2, srcVStride / 2, dstYStride / sizeof(uint32_t),
+                                    width, height,
+                                    std::static_pointer_cast<const C2ColorAspectsStruct>(
+                                            defaultColorAspects));
+                        });
+                srcY += srcYStride / 2 * kHeight;
+                srcU += srcUStride / 2 * (kHeight / 2);
+                srcV += srcVStride / 2 * (kHeight / 2);
+                dstY += dstYStride * kHeight;
+            }
+            CHECK_EQ(0u, queue->numPending);
+            queue->numPending = queue->entries.size();
+            while (queue->numPending > 0) {
+                queue->cond.signal();
+                queue.waitForCondition(queue->cond);
+            }
+        } else if (format == HAL_PIXEL_FORMAT_YCBCR_P010) {
+            convertYUV420Planar16ToP010((uint16_t *)dstY, (uint16_t *)dstU, srcY, srcU, srcV,
+                                        srcYStride / 2, srcUStride / 2, srcVStride / 2,
+                                        dstYStride / 2, dstUVStride / 2, mWidth, mHeight);
         } else {
-            convertYUV420Planar16ToYUV420Planar(dst, srcY, srcU, srcV, srcYStride / 2,
-                                    srcUStride / 2, srcVStride / 2,
-                                    align(mWidth, 16),
-                                    mWidth, mHeight);
+            convertYUV420Planar16ToYV12(dstY, dstU, dstV, srcY, srcU, srcV, srcYStride / 2,
+                                        srcUStride / 2, srcVStride / 2, dstYStride, dstUVStride,
+                                        mWidth, mHeight);
         }
     } else {
         const uint8_t *srcY = (const uint8_t *)img->planes[VPX_PLANE_Y];
         const uint8_t *srcU = (const uint8_t *)img->planes[VPX_PLANE_U];
         const uint8_t *srcV = (const uint8_t *)img->planes[VPX_PLANE_V];
-        copyOutputBufferToYV12Frame(dst, srcY, srcU, srcV,
-                                srcYStride, srcUStride, srcVStride, mWidth, mHeight);
+
+        convertYUV420Planar8ToYV12(dstY, dstU, dstV, srcY, srcU, srcV, srcYStride, srcUStride,
+                                   srcVStride, dstYStride, dstUVStride, mWidth, mHeight);
     }
-    finishWork(*(int64_t *)img->user_priv, work, std::move(block));
-    return true;
+    finishWork(((c2_cntr64_t *)img->user_priv)->peekull(), work, std::move(block));
+    return OK;
 }
 
 c2_status_t C2SoftVpxDec::drainInternal(
@@ -792,7 +830,7 @@ c2_status_t C2SoftVpxDec::drainInternal(
         return C2_OMITTED;
     }
 
-    while ((outputBuffer(pool, work))) {
+    while (outputBuffer(pool, work) == OK) {
     }
 
     if (drainMode == DRAIN_COMPONENT_WITH_EOS &&
@@ -845,11 +883,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftVpxFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

@@ -19,8 +19,6 @@
 #define GRAPHIC_BUFFER_SOURCE_H_
 
 #include <binder/Status.h>
-#include <gui/BufferQueue.h>
-#include <gui/IGraphicBufferProducer.h>
 #include <utils/RefBase.h>
 
 #include <media/hardware/VideoAPI.h>
@@ -28,13 +26,15 @@
 #include <media/stagefright/foundation/AHandlerReflector.h>
 #include <media/stagefright/foundation/ALooper.h>
 #include <media/stagefright/bqhelper/ComponentWrapper.h>
+#include <android/hardware/graphics/bufferqueue/1.0/IGraphicBufferProducer.h>
+#include <android/hardware/graphics/bufferqueue/2.0/IGraphicBufferProducer.h>
 
 namespace android {
 
-using ::android::binder::Status;
-
 struct FrameDropper;
-
+class BufferItem;
+class IGraphicBufferProducer;
+class IGraphicBufferConsumer;
 /*
  * This class is used to feed codecs from a Surface via BufferQueue or
  * HW producer.
@@ -68,7 +68,7 @@ struct FrameDropper;
  * (even if it was dropped) to reencode it after an interval if no further
  * frames are sent by the producer.
  */
-class GraphicBufferSource : public BufferQueue::ConsumerListener {
+class GraphicBufferSource : public RefBase {
 public:
     GraphicBufferSource();
 
@@ -82,33 +82,41 @@ public:
 
     // Returns the handle to the producer side of the BufferQueue.  Buffers
     // queued on this will be received by GraphicBufferSource.
-    sp<IGraphicBufferProducer> getIGraphicBufferProducer() const {
-        return mProducer;
-    }
+    sp<IGraphicBufferProducer> getIGraphicBufferProducer() const;
+
+    // Returns the handle to the bufferqueue HAL (V1_0) producer side of the BufferQueue.
+    // Buffers queued on this will be received by GraphicBufferSource.
+    sp<::android::hardware::graphics::bufferqueue::V1_0::IGraphicBufferProducer>
+        getHGraphicBufferProducer_V1_0() const;
+
+    // Returns the handle to the bufferqueue HAL producer side of the BufferQueue.
+    // Buffers queued on this will be received by GraphicBufferSource.
+    sp<::android::hardware::graphics::bufferqueue::V2_0::IGraphicBufferProducer>
+        getHGraphicBufferProducer() const;
 
     // This is called when component transitions to running state, which means
     // we can start handing it buffers.  If we already have buffers of data
     // sitting in the BufferQueue, this will send them to the codec.
-    Status start();
+    status_t start();
 
     // This is called when component transitions to stopped, indicating that
     // the codec is meant to return all buffers back to the client for them
     // to be freed. Do NOT submit any more buffers to the component.
-    Status stop();
+    status_t stop();
 
     // This is called when component transitions to released, indicating that
     // we are shutting down.
-    Status release();
+    status_t release();
 
     // A "codec buffer", i.e. a buffer that can be used to pass data into
     // the encoder, has been allocated.  (This call does not call back into
     // component.)
-    Status onInputBufferAdded(int32_t bufferId);
+    status_t onInputBufferAdded(int32_t bufferId);
 
     // Called when encoder is no longer using the buffer.  If we have a BQ
     // buffer available, fill it with a new frame of data; otherwise, just mark
     // it as available.
-    Status onInputBufferEmptied(int32_t bufferId, int fenceFd);
+    status_t onInputBufferEmptied(int32_t bufferId, int fenceFd);
 
     // IGraphicBufferSource interface
     // ------------------------------
@@ -190,8 +198,6 @@ public:
     status_t setColorAspects(int32_t aspectsPacked);
 
 protected:
-    // BQ::ConsumerListener interface
-    // ------------------------------
 
     // BufferQueue::ConsumerListener interface, called when a new frame of
     // data is available.  If we're executing and a codec buffer is
@@ -199,19 +205,24 @@ protected:
     // into the codec buffer, and call Empty[This]Buffer.  If we're not yet
     // executing or there's no codec buffer available, we just increment
     // mNumFramesAvailable and return.
-    void onFrameAvailable(const BufferItem& item) override;
+    void onFrameAvailable(const BufferItem& item) ;
 
     // BufferQueue::ConsumerListener interface, called when the client has
     // released one or more GraphicBuffers.  We clear out the appropriate
     // set of mBufferSlot entries.
-    void onBuffersReleased() override;
+    void onBuffersReleased() ;
 
     // BufferQueue::ConsumerListener interface, called when the client has
     // changed the sideband stream. GraphicBufferSource doesn't handle sideband
     // streams so this is a no-op (and should never be called).
-    void onSidebandStreamChanged() override;
+    void onSidebandStreamChanged() ;
 
 private:
+    // BQ::ConsumerListener interface
+    // ------------------------------
+    struct ConsumerProxy;
+    sp<ConsumerProxy> mConsumerProxy;
+
     // Lock, covers all member variables.
     mutable Mutex mMutex;
 
@@ -448,12 +459,33 @@ private:
     // Slow motion mode is enabled if both encoding and capture frame rates are
     // defined and the encoding frame rate is less than half the capture frame
     // rate. In this mode, the source is expected to produce frames with an even
-    // timestamp interval (after rounding) with the configured capture fps. The
-    // first source timestamp is used as the source base time. Afterwards, the
-    // timestamp of each source frame is snapped to the nearest expected capture
-    // timestamp and scaled to match the configured encoding frame rate.
+    // timestamp interval (after rounding) with the configured capture fps.
+    //
+    // These modes must be configured by calling setTimeLapseConfig() before
+    // using this source.
+    //
+    // Timestamp snapping for slow motion recording
+    // ============================================
+    //
+    // When the slow motion mode is configured with setTimeLapseConfig(), the
+    // property "debug.stagefright.snap_timestamps" will be checked. If the
+    // value of the property is set to any value other than 1, mSnapTimestamps
+    // will be set to false. Otherwise, mSnapTimestamps will be set to true.
+    // (mSnapTimestamps will be false for time lapse recording regardless of the
+    // value of the property.)
+    //
+    // If mSnapTimestamps is true, i.e., timestamp snapping is enabled, the
+    // first source timestamp will be used as the source base time; afterwards,
+    // the timestamp of each source frame will be snapped to the nearest
+    // expected capture timestamp and scaled to match the configured encoding
+    // frame rate.
+    //
+    // If timestamp snapping is disabled, the timestamp of source frames will
+    // be scaled to match the ratio between the configured encoding frame rate
+    // and the configured capture frame rate.
 
-    // These modes must be enabled before using this source.
+    // whether timestamps will be snapped
+    bool mSnapTimestamps{true};
 
     // adjusted capture timestamp of the base frame
     int64_t mBaseCaptureUs;

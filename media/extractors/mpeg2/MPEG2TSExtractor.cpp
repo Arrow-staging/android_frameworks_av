@@ -24,21 +24,19 @@
 
 #include "MPEG2TSExtractor.h"
 
-#include <media/DataSourceBase.h>
 #include <media/IStreamSource.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/ALooper.h>
 #include <media/stagefright/foundation/AUtils.h>
 #include <media/stagefright/foundation/MediaKeys.h>
+#include <media/stagefright/DataSourceBase.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/Utils.h>
+#include <mpeg2ts/AnotherPacketSource.h>
 #include <utils/String8.h>
-
-#include "mpeg2ts/AnotherPacketSource.h"
-#include "mpeg2ts/ATSParser.h"
 
 #include <hidl/HybridInterface.h>
 #include <android/hardware/cas/1.0/ICas.h>
@@ -238,6 +236,12 @@ MPEG2TSExtractor::MPEG2TSExtractor(DataSourceHelper *source)
       mParser(new ATSParser),
       mLastSyncEvent(0),
       mOffset(0) {
+    char header;
+    if (source->readAt(0, &header, 1) == 1 && header == 0x47) {
+        mHeaderSkip = 0;
+    } else {
+        mHeaderSkip = 4;
+    }
     init();
 }
 
@@ -263,6 +267,9 @@ MediaTrackHelper *MPEG2TSExtractor::getTrack(size_t index) {
 media_status_t MPEG2TSExtractor::getTrackMetaData(
         AMediaFormat *meta,
         size_t index, uint32_t /* flags */) {
+    if (meta == nullptr) {
+        return AMEDIA_ERROR_INVALID_PARAMETER;
+    }
     sp<MetaData> implMeta = index < mSourceImpls.size()
         ? mSourceImpls.editItemAt(index)->getFormat() : NULL;
     if (implMeta == NULL) {
@@ -460,7 +467,7 @@ status_t MPEG2TSExtractor::feedMore(bool isInit) {
     Mutex::Autolock autoLock(mLock);
 
     uint8_t packet[kTSPacketSize];
-    ssize_t n = mDataSource->readAt(mOffset, packet, kTSPacketSize);
+    ssize_t n = mDataSource->readAt(mOffset + mHeaderSkip, packet, kTSPacketSize);
 
     if (n < (ssize_t)kTSPacketSize) {
         if (n >= 0) {
@@ -470,7 +477,7 @@ status_t MPEG2TSExtractor::feedMore(bool isInit) {
     }
 
     ATSParser::SyncEvent event(mOffset);
-    mOffset += n;
+    mOffset += mHeaderSkip + n;
     status_t err = mParser->feedTSPacket(packet, kTSPacketSize, &event);
     if (event.hasReturnedData()) {
         if (isInit) {
@@ -539,15 +546,15 @@ status_t MPEG2TSExtractor::estimateDurationsFromTimesUsAtEnd()  {
                 break;
             }
 
-            ssize_t n = mDataSource->readAt(offset, packet, kTSPacketSize);
+            ssize_t n = mDataSource->readAt(offset+mHeaderSkip, packet, kTSPacketSize);
             if (n < 0) {
                 return n;
             } else if (n < (ssize_t)kTSPacketSize) {
                 break;
             }
 
-            offset += kTSPacketSize;
-            bytesRead += kTSPacketSize;
+            offset += kTSPacketSize + mHeaderSkip;
+            bytesRead += kTSPacketSize + mHeaderSkip;
             err = parser->feedTSPacket(packet, kTSPacketSize, &ev);
             if (err != OK) {
                 return err;
@@ -791,7 +798,17 @@ bool SniffMPEG2TS(DataSourceHelper *source, float *confidence) {
         char header;
         if (source->readAt(kTSPacketSize * i, &header, 1) != 1
                 || header != 0x47) {
-            return false;
+            // not ts file, check if m2ts file
+            for (int j = 0; j < 5; ++j) {
+                char headers[5];
+                if (source->readAt((kTSPacketSize + 4) * j, &headers, 5) != 5
+                    || headers[4] != 0x47) {
+                    // not m2ts file too, return
+                    return false;
+                }
+            }
+            ALOGV("this is m2ts file\n");
+            break;
         }
     }
 

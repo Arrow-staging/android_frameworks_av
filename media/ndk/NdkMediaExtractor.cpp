@@ -22,6 +22,7 @@
 #include <media/NdkMediaExtractor.h>
 #include <media/NdkMediaErrorPriv.h>
 #include <media/NdkMediaFormatPriv.h>
+#include "NdkJavaVMHelperPriv.h"
 #include "NdkMediaDataSourcePriv.h"
 
 
@@ -34,7 +35,6 @@
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/NuMediaExtractor.h>
 #include <media/IMediaHTTPService.h>
-#include <android_runtime/AndroidRuntime.h>
 #include <android_util_Binder.h>
 
 #include <jni.h>
@@ -64,7 +64,10 @@ EXPORT
 AMediaExtractor* AMediaExtractor_new() {
     ALOGV("ctor");
     AMediaExtractor *mData = new AMediaExtractor();
-    mData->mImpl = new NuMediaExtractor();
+    mData->mImpl = new NuMediaExtractor(
+        NdkJavaVMHelper::getJNIEnv() != nullptr
+                ? NuMediaExtractor::EntryPoint::NDK_WITH_JVM
+                : NuMediaExtractor::EntryPoint::NDK_NO_JVM );
     return mData;
 }
 
@@ -90,7 +93,7 @@ media_status_t AMediaExtractor_setDataSourceWithHeaders(AMediaExtractor *mData,
 
     ALOGV("setDataSource(%s)", uri);
 
-    sp<MediaHTTPService> httpService = createMediaHttpService(uri, /* version = */ 1);
+    sp<MediaHTTPService> httpService = createMediaHttpService(uri);
     if (httpService == NULL) {
         ALOGE("can't create http service");
         return AMEDIA_ERROR_UNSUPPORTED;
@@ -385,9 +388,11 @@ AMediaCodecCryptoInfo *AMediaExtractor_getSampleCryptoInfo(AMediaExtractor *ex) 
         mode = CryptoPlugin::kMode_AES_CTR;
     }
 
+    sp<ABuffer> clearbuf;
+    sp<ABuffer> cryptedbuf;
     if (sizeof(uint32_t) != sizeof(size_t)) {
-        sp<ABuffer> clearbuf   = U32ArrayToSizeBuf(numSubSamples, (uint32_t *)cleardata);
-        sp<ABuffer> cryptedbuf = U32ArrayToSizeBuf(numSubSamples, (uint32_t *)crypteddata);
+        clearbuf   = U32ArrayToSizeBuf(numSubSamples, (uint32_t *)cleardata);
+        cryptedbuf = U32ArrayToSizeBuf(numSubSamples, (uint32_t *)crypteddata);
         cleardata   = clearbuf    == NULL ? NULL : clearbuf->data();
         crypteddata = crypteddata == NULL ? NULL : cryptedbuf->data();
         if(crypteddata == NULL || cleardata == NULL) {
@@ -416,6 +421,7 @@ int64_t AMediaExtractor_getCachedDuration(AMediaExtractor *ex) {
 
 EXPORT
 media_status_t AMediaExtractor_getSampleFormat(AMediaExtractor *ex, AMediaFormat *fmt) {
+    ALOGV("AMediaExtractor_getSampleFormat");
     if (fmt == NULL) {
         return AMEDIA_ERROR_INVALID_PARAMETER;
     }
@@ -425,6 +431,9 @@ media_status_t AMediaExtractor_getSampleFormat(AMediaExtractor *ex, AMediaFormat
     if (err != OK) {
         return translate_error(err);
     }
+#ifdef LOG_NDEBUG
+    sampleMeta->dumpToLog();
+#endif
 
     sp<AMessage> meta;
     AMediaFormat_getFormat(fmt, &meta);
@@ -479,6 +488,19 @@ media_status_t AMediaExtractor_getSampleFormat(AMediaExtractor *ex, AMediaFormat
                 audioPresentationsPointer, audioPresentationsLength);
         meta->setBuffer(AMEDIAFORMAT_KEY_AUDIO_PRESENTATION_INFO, audioPresentationsData);
     }
+
+    int64_t val64;
+    if (sampleMeta->findInt64(kKeySampleFileOffset, &val64)) {
+        meta->setInt64("sample-file-offset", val64);
+        ALOGV("SampleFileOffset Found");
+    }
+    if (sampleMeta->findInt64(kKeyLastSampleIndexInChunk, &val64)) {
+        meta->setInt64("last-sample-index-in-chunk" /*AMEDIAFORMAT_KEY_LAST_SAMPLE_INDEX_IN_CHUNK*/,
+                       val64);
+        ALOGV("kKeyLastSampleIndexInChunk Found");
+    }
+
+    ALOGV("AMediaFormat_toString:%s", AMediaFormat_toString(fmt));
 
     return AMEDIA_OK;
 }

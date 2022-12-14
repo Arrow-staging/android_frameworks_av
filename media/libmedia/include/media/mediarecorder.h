@@ -25,6 +25,7 @@
 #include <media/IMediaRecorderClient.h>
 #include <media/IMediaDeathNotifier.h>
 #include <media/MicrophoneInfo.h>
+#include <android/content/AttributionSourceState.h>
 
 namespace android {
 
@@ -107,7 +108,9 @@ enum video_encoder {
     VIDEO_ENCODER_MPEG_4_SP = 3,
     VIDEO_ENCODER_VP8 = 4,
     VIDEO_ENCODER_HEVC = 5,
-
+    VIDEO_ENCODER_VP9 = 6,
+    VIDEO_ENCODER_DOLBY_VISION = 7,
+    VIDEO_ENCODER_AV1 = 8,
     VIDEO_ENCODER_LIST_END // must be the last - used to validate the video encoder type
 };
 
@@ -226,7 +229,7 @@ class MediaRecorder : public BnMediaRecorderClient,
                       public virtual IMediaDeathNotifier
 {
 public:
-    MediaRecorder(const String16& opPackageName);
+    explicit MediaRecorder(const android::content::AttributionSourceState& attributionSource);
     ~MediaRecorder();
 
     void        died();
@@ -236,6 +239,8 @@ public:
     status_t    setPreviewSurface(const sp<IGraphicBufferProducer>& surface);
     status_t    setVideoSource(int vs);
     status_t    setAudioSource(int as);
+    status_t    setPrivacySensitive(bool privacySensitive);
+    status_t    isPrivacySensitive(bool *privacySensitive) const;
     status_t    setOutputFormat(int of);
     status_t    setVideoEncoder(int ve);
     status_t    setAudioEncoder(int ae);
@@ -264,7 +269,11 @@ public:
     status_t    getRoutedDeviceId(audio_port_handle_t *deviceId);
     status_t    enableAudioDeviceCallback(bool enabled);
     status_t    getActiveMicrophones(std::vector<media::MicrophoneInfo>* activeMicrophones);
+    status_t    setPreferredMicrophoneDirection(audio_microphone_direction_t direction);
+    status_t    setPreferredMicrophoneFieldDimension(float zoom);
+
     status_t    getPortId(audio_port_handle_t *portId) const;
+    status_t    getRtpDataUsage(uint64_t *bytes);
 
 private:
     void                    doCleanUp();
@@ -286,6 +295,8 @@ private:
     bool                        mIsOutputFileSet;
     Mutex                       mLock;
     Mutex                       mNotifyLock;
+
+    output_format               mOutputFormat;
 };
 
 };  // namespace android

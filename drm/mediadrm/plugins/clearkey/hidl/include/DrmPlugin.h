@@ -17,7 +17,7 @@
 #ifndef CLEARKEY_DRM_PLUGIN_H_
 #define CLEARKEY_DRM_PLUGIN_H_
 
-#include <android/hardware/drm/1.2/IDrmPlugin.h>
+#include <android/hardware/drm/1.4/IDrmPlugin.h>
 #include <android/hardware/drm/1.2/IDrmPluginListener.h>
 
 #include <map>
@@ -32,7 +32,7 @@
 namespace android {
 namespace hardware {
 namespace drm {
-namespace V1_2 {
+namespace V1_4 {
 namespace clearkey {
 
 namespace drm = ::android::hardware::drm;
@@ -50,9 +50,12 @@ using drm::V1_1::DrmMetricGroup;
 using drm::V1_1::HdcpLevel;
 using drm::V1_1::SecureStopRelease;
 using drm::V1_1::SecurityLevel;
-using drm::V1_2::IDrmPlugin;
 using drm::V1_2::KeySetId;
 using drm::V1_2::OfflineLicenseState;
+using drm::V1_4::clearkey::DeviceFiles;
+using drm::V1_4::clearkey::Session;
+using drm::V1_4::clearkey::SessionLibrary;
+using drm::V1_4::IDrmPlugin;
 
 using ::android::hardware::hidl_string;
 using ::android::hardware::hidl_vec;
@@ -62,6 +65,7 @@ using ::android::sp;
 
 typedef drm::V1_1::KeyRequestType KeyRequestType_V1_1;
 typedef drm::V1_2::IDrmPluginListener IDrmPluginListener_V1_2;
+typedef drm::V1_2::KeyStatus KeyStatus_V1_2;
 typedef drm::V1_2::Status Status_V1_2;
 typedef drm::V1_2::HdcpLevel HdcpLevel_V1_2;
 
@@ -197,6 +201,18 @@ struct DrmPlugin : public IDrmPlugin {
 
     Return<Status> setPropertyByteArray(
             const hidl_string& name, const hidl_vec<uint8_t>& value) override;
+
+    Return<void> getLogMessages(
+        getLogMessages_cb _hidl_cb) override;
+
+    Return<Status> setPlaybackId(
+        const hidl_vec<uint8_t>& sessionId,
+        const hidl_string& playbackId) override;
+
+    Return<bool> requiresSecureDecoder(
+            const hidl_string& mime, SecurityLevel level) override;
+
+    Return<bool> requiresSecureDecoderDefault(const hidl_string& mime) override;
 
     Return<Status> setCipherAlgorithm(
             const hidl_vec<uint8_t>& sessionId, const hidl_string& algorithm) {
@@ -335,6 +351,15 @@ struct DrmPlugin : public IDrmPlugin {
         return Void();
     }
 
+    Return<void> sendKeysChange_1_2(
+            const hidl_vec<uint8_t>& sessionId,
+            const hidl_vec<KeyStatus_V1_2>& keyStatusList, bool hasNewUsableKey) {
+        if (mListenerV1_2 != NULL) {
+            mListenerV1_2->sendKeysChange_1_2(sessionId, keyStatusList, hasNewUsableKey);
+        }
+        return Void();
+    }
+
     Return<void> sendSessionLostState(
             const hidl_vec<uint8_t>& sessionId) {
         if (mListenerV1_2 != NULL) {
@@ -388,7 +413,9 @@ private:
     std::map<std::string, std::string> mStringProperties;
     std::map<std::string, std::vector<uint8_t> > mByteArrayProperties;
     std::map<std::string, std::vector<uint8_t> > mReleaseKeysMap;
-    std::map<std::vector<uint8_t>, SecurityLevel> mSecurityLevel;
+    std::map<std::vector<uint8_t>, std::string> mPlaybackId;
+    std::map<std::vector<uint8_t>, SecurityLevel> mSecurityLevel
+        GUARDED_BY(mSecurityLevelLock);
     sp<IDrmPluginListener> mListener;
     sp<IDrmPluginListener_V1_2> mListenerV1_2;
     SessionLibrary *mSessionLibrary;
@@ -396,6 +423,7 @@ private:
     int64_t mCloseSessionOkCount;
     int64_t mCloseSessionNotOpenedCount;
     uint32_t mNextSecureStopId;
+    android::Mutex mPlayPolicyLock;
 
     // set by property to mock error scenarios
     Status_V1_2 mMockError;
@@ -406,12 +434,14 @@ private:
     }
 
     DeviceFiles mFileHandle;
+    Mutex mSecureStopLock;
+    Mutex mSecurityLevelLock;
 
     CLEARKEY_DISALLOW_COPY_AND_ASSIGN_AND_NEW(DrmPlugin);
 };
 
 } // namespace clearkey
-} // namespace V1_2
+} // namespace V1_4
 } // namespace drm
 } // namespace hardware
 } // namespace android

@@ -36,8 +36,13 @@
 #ifndef _NDK_MEDIA_FORMAT_H
 #define _NDK_MEDIA_FORMAT_H
 
+#include <stdbool.h>
 #include <sys/cdefs.h>
 #include <sys/types.h>
+
+#if !defined(__INTRODUCED_IN)
+#define __INTRODUCED_IN(__api_level) /* nothing */
+#endif
 
 #include "NdkMediaError.h"
 
@@ -46,42 +51,78 @@ __BEGIN_DECLS
 struct AMediaFormat;
 typedef struct AMediaFormat AMediaFormat;
 
-#if __ANDROID_API__ >= 21
-
+/**
+ * Available since API level 21.
+ */
 AMediaFormat *AMediaFormat_new() __INTRODUCED_IN(21);
+
+/**
+ * Available since API level 21.
+ */
 media_status_t AMediaFormat_delete(AMediaFormat*) __INTRODUCED_IN(21);
 
 /**
  * Human readable representation of the format. The returned string is owned by the format,
  * and remains valid until the next call to toString, or until the format is deleted.
+ *
+ * Available since API level 21.
  */
 const char* AMediaFormat_toString(AMediaFormat*) __INTRODUCED_IN(21);
 
+/**
+ * Available since API level 21.
+ */
 bool AMediaFormat_getInt32(AMediaFormat*, const char *name, int32_t *out) __INTRODUCED_IN(21);
+/**
+ * Available since API level 21.
+ */
 bool AMediaFormat_getInt64(AMediaFormat*, const char *name, int64_t *out) __INTRODUCED_IN(21);
+/**
+ * Available since API level 21.
+ */
 bool AMediaFormat_getFloat(AMediaFormat*, const char *name, float *out) __INTRODUCED_IN(21);
+/**
+ * Available since API level 21.
+ */
 bool AMediaFormat_getSize(AMediaFormat*, const char *name, size_t *out) __INTRODUCED_IN(21);
 /**
  * The returned data is owned by the format and remains valid as long as the named entry
  * is part of the format.
+ *
+ * Available since API level 21.
  */
 bool AMediaFormat_getBuffer(AMediaFormat*, const char *name, void** data, size_t *size) __INTRODUCED_IN(21);
 /**
  * The returned string is owned by the format, and remains valid until the next call to getString,
  * or until the format is deleted.
+ *
+ * Available since API level 21.
  */
 bool AMediaFormat_getString(AMediaFormat*, const char *name, const char **out) __INTRODUCED_IN(21);
 
 
+/**
+ * Available since API level 21.
+ */
 void AMediaFormat_setInt32(AMediaFormat*, const char* name, int32_t value) __INTRODUCED_IN(21);
+/**
+ * Available since API level 21.
+ */
 void AMediaFormat_setInt64(AMediaFormat*, const char* name, int64_t value) __INTRODUCED_IN(21);
+/**
+ * Available since API level 21.
+ */
 void AMediaFormat_setFloat(AMediaFormat*, const char* name, float value) __INTRODUCED_IN(21);
 /**
  * The provided string is copied into the format.
+ *
+ * Available since API level 21.
  */
 void AMediaFormat_setString(AMediaFormat*, const char* name, const char* value) __INTRODUCED_IN(21);
 /**
  * The provided data is copied into the format.
+ *
+ * Available since API level 21.
  */
 void AMediaFormat_setBuffer(AMediaFormat*, const char* name, const void* data, size_t size) __INTRODUCED_IN(21);
 
@@ -152,27 +193,42 @@ extern const char* AMEDIAFORMAT_KEY_TIME_US __INTRODUCED_IN(28);
 extern const char* AMEDIAFORMAT_KEY_TRACK_ID __INTRODUCED_IN(28);
 extern const char* AMEDIAFORMAT_KEY_TRACK_INDEX __INTRODUCED_IN(28);
 extern const char* AMEDIAFORMAT_KEY_WIDTH __INTRODUCED_IN(21);
-#endif /* __ANDROID_API__ >= 21 */
 
-#if __ANDROID_API__ >= 28
+/**
+ * Available since API level 28.
+ */
 bool AMediaFormat_getDouble(AMediaFormat*, const char *name, double *out) __INTRODUCED_IN(28);
+/**
+ * Available since API level 28.
+ */
 bool AMediaFormat_getRect(AMediaFormat*, const char *name,
         int32_t *left, int32_t *top, int32_t *right, int32_t *bottom) __INTRODUCED_IN(28);
 
+/**
+ * Available since API level 28.
+ */
 void AMediaFormat_setDouble(AMediaFormat*, const char* name, double value) __INTRODUCED_IN(28);
+/**
+ * Available since API level 28.
+ */
 void AMediaFormat_setSize(AMediaFormat*, const char* name, size_t value) __INTRODUCED_IN(28);
+/**
+ * Available since API level 28.
+ */
 void AMediaFormat_setRect(AMediaFormat*, const char* name,
         int32_t left, int32_t top, int32_t right, int32_t bottom) __INTRODUCED_IN(28);
-#endif /* __ANDROID_API__ >= 28 */
 
-#if __ANDROID_API__ >= 29
 /**
- * remove all key/value pairs from the given AMediaFormat
+ * Remove all key/value pairs from the given AMediaFormat.
+ *
+ * Available since API level 29.
  */
 void AMediaFormat_clear(AMediaFormat*) __INTRODUCED_IN(29);
 
 /**
- * copy one AMediaFormat to another
+ * Copy one AMediaFormat to another.
+ *
+ * Available since API level 29.
  */
 media_status_t AMediaFormat_copy(AMediaFormat *to, AMediaFormat *from) __INTRODUCED_IN(29);
 
@@ -209,6 +265,7 @@ extern const char* AMEDIAFORMAT_KEY_EXIF_OFFSET __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_EXIF_SIZE __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_FRAME_COUNT __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_GENRE __INTRODUCED_IN(29);
+extern const char* AMEDIAFORMAT_KEY_HAPTIC_CHANNEL_COUNT __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_ICC_PROFILE __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_IS_SYNC_FRAME __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_LOCATION __INTRODUCED_IN(29);
@@ -226,6 +283,7 @@ extern const char* AMEDIAFORMAT_KEY_SAR_WIDTH __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_TARGET_TIME __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_TEMPORAL_LAYER_COUNT __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_TEXT_FORMAT_DATA __INTRODUCED_IN(29);
+extern const char* AMEDIAFORMAT_KEY_THUMBNAIL_CSD_HEVC __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_THUMBNAIL_HEIGHT __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_THUMBNAIL_TIME __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_THUMBNAIL_WIDTH __INTRODUCED_IN(29);
@@ -233,7 +291,66 @@ extern const char* AMEDIAFORMAT_KEY_TITLE __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_VALID_SAMPLES __INTRODUCED_IN(29);
 extern const char* AMEDIAFORMAT_KEY_YEAR __INTRODUCED_IN(29);
 
-#endif /* __ANDROID_API__ >= 29 */
+/**
+ * An optional key describing the low latency decoding mode. This is an optional parameter
+ * that applies only to decoders. If enabled, the decoder doesn't hold input and output
+ * data more than required by the codec standards.
+ * The associated value is an integer (0 or 1): 1 when low-latency decoding is enabled,
+ * 0 otherwise. The default value is 0.
+ *
+ * Available since API level 30.
+ */
+extern const char* AMEDIAFORMAT_KEY_LOW_LATENCY __INTRODUCED_IN(30);
+
+extern const char* AMEDIAFORMAT_KEY_HDR10_PLUS_INFO __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_KEY_SLOW_MOTION_MARKERS __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_KEY_THUMBNAIL_CSD_AV1C __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_KEY_XMP_OFFSET __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_KEY_XMP_SIZE __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_KEY_SAMPLE_FILE_OFFSET __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_KEY_LAST_SAMPLE_INDEX_IN_CHUNK __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_KEY_SAMPLE_TIME_BEFORE_APPEND __INTRODUCED_IN(31);
+
+extern const char* AMEDIAFORMAT_KEY_PICTURE_TYPE __INTRODUCED_IN(33);
+extern const char* AMEDIAFORMAT_KEY_VIDEO_ENCODING_STATISTICS_LEVEL __INTRODUCED_IN(33);
+extern const char* AMEDIAFORMAT_KEY_VIDEO_QP_AVERAGE __INTRODUCED_IN(33);
+
+extern const char* AMEDIAFORMAT_VIDEO_QP_B_MAX __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_VIDEO_QP_B_MIN __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_VIDEO_QP_I_MAX __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_VIDEO_QP_I_MIN __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_VIDEO_QP_MAX __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_VIDEO_QP_MIN __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_VIDEO_QP_P_MAX __INTRODUCED_IN(31);
+extern const char* AMEDIAFORMAT_VIDEO_QP_P_MIN __INTRODUCED_IN(31);
+
+/**
+ * MPEG-H audio profile and level compatibility.
+ *
+ * See FDAmd_2 of ISO_IEC_23008-3;2019 MHAProfileAndLevelCompatibilitySetBox.
+ *
+ * Available since API level 32.
+ */
+extern const char* AMEDIAFORMAT_KEY_MPEGH_COMPATIBLE_SETS __INTRODUCED_IN(32);
+
+/**
+ * MPEG-H audio profile level indication.
+ *
+ * See ISO_IEC_23008-3;2019 MHADecoderConfigurationRecord mpegh3daProfileLevelIndication.
+ *
+ * Available since API level 32.
+ */
+extern const char* AMEDIAFORMAT_KEY_MPEGH_PROFILE_LEVEL_INDICATION __INTRODUCED_IN(32);
+
+/**
+ * MPEG-H audio reference channel layout.
+ *
+ * See ISO_IEC_23008-3;2019 MHADecoderConfigurationRecord referenceChannelLayout
+ * and ISO_IEC_23001‐8 ChannelConfiguration value.
+ *
+ * Available since API level 32.
+ */
+extern const char* AMEDIAFORMAT_KEY_MPEGH_REFERENCE_CHANNEL_LAYOUT __INTRODUCED_IN(32);
 
 __END_DECLS
 

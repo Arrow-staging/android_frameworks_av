@@ -26,10 +26,6 @@
 #include <utils/StrongPointer.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/AMessage.h>
-#include <android_runtime/AndroidRuntime.h>
-#include <android_util_Binder.h>
-
-#include <jni.h>
 
 using namespace android;
 
@@ -204,8 +200,11 @@ bool AMediaFormat_getString(AMediaFormat* mData, const char *name, const char **
     AString tmp;
     if (mData->mFormat->findString(name, &tmp)) {
         String8 ret(tmp.c_str());
-        mData->mStringCache.add(String8(name), ret);
-        *out = ret.string();
+        ssize_t i = mData->mStringCache.add(String8(name), ret);
+        if (i < 0) {
+            return false;
+        }
+        *out = mData->mStringCache.valueAt(i).string();
         return true;
     }
     return false;
@@ -325,6 +324,7 @@ EXPORT const char* AMEDIAFORMAT_KEY_FRAME_RATE = "frame-rate";
 EXPORT const char* AMEDIAFORMAT_KEY_GENRE = "genre";
 EXPORT const char* AMEDIAFORMAT_KEY_GRID_COLUMNS = "grid-cols";
 EXPORT const char* AMEDIAFORMAT_KEY_GRID_ROWS = "grid-rows";
+EXPORT const char* AMEDIAFORMAT_KEY_HAPTIC_CHANNEL_COUNT = "haptic-channel-count";
 EXPORT const char* AMEDIAFORMAT_KEY_HDR_STATIC_INFO = "hdr-static-info";
 EXPORT const char* AMEDIAFORMAT_KEY_HDR10_PLUS_INFO = "hdr10-plus-info";
 EXPORT const char* AMEDIAFORMAT_KEY_HEIGHT = "height";
@@ -337,10 +337,12 @@ EXPORT const char* AMEDIAFORMAT_KEY_IS_FORCED_SUBTITLE = "is-forced-subtitle";
 EXPORT const char* AMEDIAFORMAT_KEY_IS_SYNC_FRAME = "is-sync-frame";
 EXPORT const char* AMEDIAFORMAT_KEY_I_FRAME_INTERVAL = "i-frame-interval";
 EXPORT const char* AMEDIAFORMAT_KEY_LANGUAGE = "language";
+EXPORT const char* AMEDIAFORMAT_KEY_LAST_SAMPLE_INDEX_IN_CHUNK = "last-sample-index-in-chunk";
 EXPORT const char* AMEDIAFORMAT_KEY_LATENCY = "latency";
 EXPORT const char* AMEDIAFORMAT_KEY_LEVEL = "level";
 EXPORT const char* AMEDIAFORMAT_KEY_LOCATION = "location";
 EXPORT const char* AMEDIAFORMAT_KEY_LOOP = "loop";
+EXPORT const char* AMEDIAFORMAT_KEY_LOW_LATENCY = "low-latency";
 EXPORT const char* AMEDIAFORMAT_KEY_LYRICIST = "lyricist";
 EXPORT const char* AMEDIAFORMAT_KEY_MANUFACTURER = "manufacturer";
 EXPORT const char* AMEDIAFORMAT_KEY_MAX_BIT_RATE = "max-bitrate";
@@ -352,8 +354,14 @@ EXPORT const char* AMEDIAFORMAT_KEY_MAX_WIDTH = "max-width";
 EXPORT const char* AMEDIAFORMAT_KEY_MIME = "mime";
 EXPORT const char* AMEDIAFORMAT_KEY_MPEG_USER_DATA = "mpeg-user-data";
 EXPORT const char* AMEDIAFORMAT_KEY_MPEG2_STREAM_HEADER = "mpeg2-stream-header";
+EXPORT const char* AMEDIAFORMAT_KEY_MPEGH_COMPATIBLE_SETS = "mpegh-compatible-sets";
+EXPORT const char* AMEDIAFORMAT_KEY_MPEGH_PROFILE_LEVEL_INDICATION =
+        "mpegh-profile-level-indication";
+EXPORT const char* AMEDIAFORMAT_KEY_MPEGH_REFERENCE_CHANNEL_LAYOUT =
+        "mpegh-reference-channel-layout";
 EXPORT const char* AMEDIAFORMAT_KEY_OPERATING_RATE = "operating-rate";
 EXPORT const char* AMEDIAFORMAT_KEY_PCM_ENCODING = "pcm-encoding";
+EXPORT const char* AMEDIAFORMAT_KEY_PICTURE_TYPE = "picture-type";
 EXPORT const char* AMEDIAFORMAT_KEY_PRIORITY = "priority";
 EXPORT const char* AMEDIAFORMAT_KEY_PROFILE = "profile";
 EXPORT const char* AMEDIAFORMAT_KEY_PCM_BIG_ENDIAN = "pcm-big-endian";
@@ -361,17 +369,22 @@ EXPORT const char* AMEDIAFORMAT_KEY_PSSH = "pssh";
 EXPORT const char* AMEDIAFORMAT_KEY_PUSH_BLANK_BUFFERS_ON_STOP = "push-blank-buffers-on-shutdown";
 EXPORT const char* AMEDIAFORMAT_KEY_REPEAT_PREVIOUS_FRAME_AFTER = "repeat-previous-frame-after";
 EXPORT const char* AMEDIAFORMAT_KEY_ROTATION = "rotation-degrees";
+EXPORT const char* AMEDIAFORMAT_KEY_SAMPLE_FILE_OFFSET = "sample-file-offset";
 EXPORT const char* AMEDIAFORMAT_KEY_SAMPLE_RATE = "sample-rate";
+EXPORT const char* AMEDIAFORMAT_KEY_SAMPLE_TIME_BEFORE_APPEND = "sample-time-before-append";
 EXPORT const char* AMEDIAFORMAT_KEY_SAR_HEIGHT = "sar-height";
 EXPORT const char* AMEDIAFORMAT_KEY_SAR_WIDTH = "sar-width";
 EXPORT const char* AMEDIAFORMAT_KEY_SEI = "sei";
 EXPORT const char* AMEDIAFORMAT_KEY_SLICE_HEIGHT = "slice-height";
+EXPORT const char* AMEDIAFORMAT_KEY_SLOW_MOTION_MARKERS = "slow-motion-markers";
 EXPORT const char* AMEDIAFORMAT_KEY_STRIDE = "stride";
 EXPORT const char* AMEDIAFORMAT_KEY_TARGET_TIME = "target-time";
 EXPORT const char* AMEDIAFORMAT_KEY_TEMPORAL_LAYER_COUNT = "temporal-layer-count";
 EXPORT const char* AMEDIAFORMAT_KEY_TEMPORAL_LAYER_ID = "temporal-layer-id";
 EXPORT const char* AMEDIAFORMAT_KEY_TEMPORAL_LAYERING = "ts-schema";
 EXPORT const char* AMEDIAFORMAT_KEY_TEXT_FORMAT_DATA = "text-format-data";
+EXPORT const char* AMEDIAFORMAT_KEY_THUMBNAIL_CSD_AV1C = "thumbnail-csd-av1c";
+EXPORT const char* AMEDIAFORMAT_KEY_THUMBNAIL_CSD_HEVC = "thumbnail-csd-hevc";
 EXPORT const char* AMEDIAFORMAT_KEY_THUMBNAIL_HEIGHT = "thumbnail-height";
 EXPORT const char* AMEDIAFORMAT_KEY_THUMBNAIL_TIME = "thumbnail-time";
 EXPORT const char* AMEDIAFORMAT_KEY_THUMBNAIL_WIDTH = "thumbnail-width";
@@ -382,7 +395,20 @@ EXPORT const char* AMEDIAFORMAT_KEY_TITLE = "title";
 EXPORT const char* AMEDIAFORMAT_KEY_TRACK_ID = "track-id";
 EXPORT const char* AMEDIAFORMAT_KEY_TRACK_INDEX = "track-index";
 EXPORT const char* AMEDIAFORMAT_KEY_VALID_SAMPLES = "valid-samples";
+EXPORT const char* AMEDIAFORMAT_KEY_VIDEO_ENCODING_STATISTICS_LEVEL =
+        "video-encoding-statistics-level";
+EXPORT const char* AMEDIAFORMAT_KEY_VIDEO_QP_AVERAGE = "video-qp-average";
+EXPORT const char* AMEDIAFORMAT_VIDEO_QP_B_MAX = "video-qp-b-max";
+EXPORT const char* AMEDIAFORMAT_VIDEO_QP_B_MIN = "video-qp-b-min";
+EXPORT const char* AMEDIAFORMAT_VIDEO_QP_I_MAX = "video-qp-i-max";
+EXPORT const char* AMEDIAFORMAT_VIDEO_QP_I_MIN = "video-qp-i-min";
+EXPORT const char* AMEDIAFORMAT_VIDEO_QP_MAX = "video-qp-max";
+EXPORT const char* AMEDIAFORMAT_VIDEO_QP_MIN = "video-qp-min";
+EXPORT const char* AMEDIAFORMAT_VIDEO_QP_P_MAX = "video-qp-p-max";
+EXPORT const char* AMEDIAFORMAT_VIDEO_QP_P_MIN = "video-qp-p-min";
 EXPORT const char* AMEDIAFORMAT_KEY_WIDTH = "width";
+EXPORT const char* AMEDIAFORMAT_KEY_XMP_OFFSET = "xmp-offset";
+EXPORT const char* AMEDIAFORMAT_KEY_XMP_SIZE = "xmp-size";
 EXPORT const char* AMEDIAFORMAT_KEY_YEAR = "year";
 
 } // extern "C"

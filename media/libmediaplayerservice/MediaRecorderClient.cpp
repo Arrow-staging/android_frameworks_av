@@ -18,32 +18,34 @@
 #define LOG_TAG "MediaRecorderService"
 #include <utils/Log.h>
 
-#include <sys/types.h>
-#include <sys/stat.h>
-#include <dirent.h>
-#include <unistd.h>
-#include <string.h>
-#include <cutils/atomic.h>
-#include <cutils/properties.h> // for property_get
+#include "MediaRecorderClient.h"
+#include "MediaPlayerService.h"
+#include "StagefrightRecorder.h"
+
+#include <android/hardware/media/omx/1.0/IOmx.h>
+#include <android/hardware/media/c2/1.0/IComponentStore.h>
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 #include <binder/MemoryHeapBase.h>
 #include <binder/MemoryBase.h>
-
+#include <camera/CameraUtils.h>
+#include <codec2/hidl/client.h>
+#include <cutils/atomic.h>
+#include <cutils/properties.h> // for property_get
+#include <gui/IGraphicBufferProducer.h>
+#include <mediautils/ServiceUtilities.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <system/audio.h>
 #include <utils/String16.h>
 
-#include <system/audio.h>
-
-#include "MediaRecorderClient.h"
-#include "MediaPlayerService.h"
-
-#include "StagefrightRecorder.h"
-#include <gui/IGraphicBufferProducer.h>
+#include <dirent.h>
+#include <unistd.h>
+#include <string.h>
 
 namespace android {
 
 const char* cameraPermission = "android.permission.CAMERA";
-const char* recordAudioPermission = "android.permission.RECORD_AUDIO";
 
 static bool checkPermission(const char* permissionString) {
     if (getpid() == IPCThreadState::self()->getCallingPid()) return true;
@@ -117,7 +119,21 @@ status_t MediaRecorderClient::setVideoSource(int vs)
 status_t MediaRecorderClient::setAudioSource(int as)
 {
     ALOGV("setAudioSource(%d)", as);
-    if (!checkPermission(recordAudioPermission)) {
+    if (as < AUDIO_SOURCE_DEFAULT
+            || (as >= AUDIO_SOURCE_CNT && as != AUDIO_SOURCE_FM_TUNER)) {
+        ALOGE("Invalid audio source: %d", as);
+        return BAD_VALUE;
+    }
+
+    if ((as == AUDIO_SOURCE_FM_TUNER
+                && !(captureAudioOutputAllowed(mAttributionSource)
+                    || captureTunerAudioInputAllowed(mAttributionSource)))
+            || (as == AUDIO_SOURCE_REMOTE_SUBMIX
+                && !(captureAudioOutputAllowed(mAttributionSource)
+                    || modifyAudioRoutingAllowed(mAttributionSource)))
+            || (as == AUDIO_SOURCE_ECHO_REFERENCE
+                && !captureAudioOutputAllowed(mAttributionSource))
+            || !recordingAllowed(mAttributionSource, (audio_source_t)as)) {
         return PERMISSION_DENIED;
     }
     Mutex::Autolock lock(mLock);
@@ -126,6 +142,29 @@ status_t MediaRecorderClient::setAudioSource(int as)
         return NO_INIT;
     }
     return mRecorder->setAudioSource((audio_source_t)as);
+}
+
+status_t MediaRecorderClient::setPrivacySensitive(bool privacySensitive)
+{
+    ALOGV("%s(%s)", __func__, privacySensitive ? "true" : "false");
+    Mutex::Autolock lock(mLock);
+    if (mRecorder == NULL)  {
+        ALOGE("%s: recorder is not initialized", __func__);
+        return NO_INIT;
+    }
+    return mRecorder->setPrivacySensitive(privacySensitive);
+}
+
+status_t MediaRecorderClient::isPrivacySensitive(bool *privacySensitive) const
+{
+    Mutex::Autolock lock(mLock);
+    if (mRecorder == NULL)  {
+        ALOGE("%s: recorder is not initialized", __func__);
+        return NO_INIT;
+    }
+    status_t status = mRecorder->isPrivacySensitive(privacySensitive);
+    ALOGV("%s: status: %d enabled: %s", __func__, status, *privacySensitive ? "true" : "false");
+    return status;
 }
 
 status_t MediaRecorderClient::setOutputFormat(int of)
@@ -339,16 +378,17 @@ status_t MediaRecorderClient::release()
         wp<MediaRecorderClient> client(this);
         mMediaPlayerService->removeMediaRecorderClient(client);
     }
-    clearDeathNotifiers_l();
+    mDeathNotifiers.clear();
     return NO_ERROR;
 }
 
-MediaRecorderClient::MediaRecorderClient(const sp<MediaPlayerService>& service, pid_t pid,
-        const String16& opPackageName)
+MediaRecorderClient::MediaRecorderClient(const sp<MediaPlayerService>& service,
+        const AttributionSourceState& attributionSource)
 {
     ALOGV("Client constructor");
-    mPid = pid;
-    mRecorder = new StagefrightRecorder(opPackageName);
+    // attribution source already validated in createMediaRecorder
+    mAttributionSource = attributionSource;
+    mRecorder = new StagefrightRecorder(attributionSource);
     mMediaPlayerService = service;
 }
 
@@ -356,59 +396,6 @@ MediaRecorderClient::~MediaRecorderClient()
 {
     ALOGV("Client destructor");
     release();
-}
-
-MediaRecorderClient::ServiceDeathNotifier::ServiceDeathNotifier(
-        const sp<IBinder>& service,
-        const sp<IMediaRecorderClient>& listener,
-        int which) {
-    mService = service;
-    mOmx = nullptr;
-    mListener = listener;
-    mWhich = which;
-}
-
-MediaRecorderClient::ServiceDeathNotifier::ServiceDeathNotifier(
-        const sp<IOmx>& omx,
-        const sp<IMediaRecorderClient>& listener,
-        int which) {
-    mService = nullptr;
-    mOmx = omx;
-    mListener = listener;
-    mWhich = which;
-}
-
-MediaRecorderClient::ServiceDeathNotifier::~ServiceDeathNotifier() {
-}
-
-void MediaRecorderClient::ServiceDeathNotifier::binderDied(const wp<IBinder>& /*who*/) {
-    sp<IMediaRecorderClient> listener = mListener.promote();
-    if (listener != NULL) {
-        listener->notify(MEDIA_ERROR, MEDIA_ERROR_SERVER_DIED, mWhich);
-    } else {
-        ALOGW("listener for process %d death is gone", mWhich);
-    }
-}
-
-void MediaRecorderClient::ServiceDeathNotifier::serviceDied(
-        uint64_t /* cookie */,
-        const wp<::android::hidl::base::V1_0::IBase>& /* who */) {
-    sp<IMediaRecorderClient> listener = mListener.promote();
-    if (listener != NULL) {
-        listener->notify(MEDIA_ERROR, MEDIA_ERROR_SERVER_DIED, mWhich);
-    } else {
-        ALOGW("listener for process %d death is gone", mWhich);
-    }
-}
-
-void MediaRecorderClient::ServiceDeathNotifier::unlinkToDeath() {
-    if (mService != nullptr) {
-        mService->unlinkToDeath(this);
-        mService = nullptr;
-    } else if (mOmx != nullptr) {
-        mOmx->unlinkToDeath(this);
-        mOmx = nullptr;
-    }
 }
 
 MediaRecorderClient::AudioDeviceUpdatedNotifier::AudioDeviceUpdatedNotifier(
@@ -430,22 +417,11 @@ void MediaRecorderClient::AudioDeviceUpdatedNotifier::onAudioDeviceUpdate(
     }
 }
 
-void MediaRecorderClient::clearDeathNotifiers_l() {
-    if (mCameraDeathListener != nullptr) {
-        mCameraDeathListener->unlinkToDeath();
-        mCameraDeathListener = nullptr;
-    }
-    if (mCodecDeathListener != nullptr) {
-        mCodecDeathListener->unlinkToDeath();
-        mCodecDeathListener = nullptr;
-    }
-}
-
 status_t MediaRecorderClient::setListener(const sp<IMediaRecorderClient>& listener)
 {
     ALOGV("setListener");
     Mutex::Autolock lock(mLock);
-    clearDeathNotifiers_l();
+    mDeathNotifiers.clear();
     if (mRecorder == NULL) {
         ALOGE("recorder is not initialized");
         return NO_INIT;
@@ -454,29 +430,87 @@ status_t MediaRecorderClient::setListener(const sp<IMediaRecorderClient>& listen
 
     sp<IServiceManager> sm = defaultServiceManager();
 
-    // WORKAROUND: We don't know if camera exists here and getService might block for 5 seconds.
-    // Use checkService for camera if we don't know it exists.
-    static std::atomic<bool> sCameraChecked(false);  // once true never becomes false.
-    static std::atomic<bool> sCameraVerified(false); // once true never becomes false.
-    sp<IBinder> binder = (sCameraVerified || !sCameraChecked)
-        ? sm->getService(String16("media.camera")) : sm->checkService(String16("media.camera"));
-    // If the device does not have a camera, do not create a death listener for it.
-    if (binder != NULL) {
-        sCameraVerified = true;
-        mCameraDeathListener = new ServiceDeathNotifier(binder, listener,
-                MediaPlayerService::CAMERA_PROCESS_DEATH);
-        binder->linkToDeath(mCameraDeathListener);
-    }
-    sCameraChecked = true;
+    static const bool sCameraDisabled = CameraUtils::isCameraServiceDisabled();
 
-    sp<IOmx> omx = IOmx::getService();
-    if (omx == nullptr) {
-        ALOGE("IOmx service is not available");
-        return NO_INIT;
+    if (!sCameraDisabled) {
+        // WORKAROUND: We don't know if camera exists here and getService might block for 5 seconds.
+        // Use checkService for camera if we don't know it exists.
+        static std::atomic<bool> sCameraChecked(false);  // once true never becomes false.
+        static std::atomic<bool> sCameraVerified(false); // once true never becomes false.
+
+        sp<IBinder> binder = (sCameraVerified || !sCameraChecked)
+            ? sm->getService(String16("media.camera")) : sm->checkService(String16("media.camera"));
+        // If the device does not have a camera, do not create a death listener for it.
+        if (binder != NULL) {
+            sCameraVerified = true;
+            mDeathNotifiers.emplace_back(
+                    binder, [l = wp<IMediaRecorderClient>(listener)](){
+                sp<IMediaRecorderClient> listener = l.promote();
+                if (listener) {
+                    ALOGV("media.camera service died. "
+                          "Sending death notification.");
+                    listener->notify(
+                            MEDIA_ERROR, MEDIA_ERROR_SERVER_DIED,
+                            MediaPlayerService::CAMERA_PROCESS_DEATH);
+                } else {
+                    ALOGW("media.camera service died without a death handler.");
+                }
+            });
+        }
+        sCameraChecked = true;
     }
-    mCodecDeathListener = new ServiceDeathNotifier(omx, listener,
-            MediaPlayerService::MEDIACODEC_PROCESS_DEATH);
-    omx->linkToDeath(mCodecDeathListener, 0);
+
+    {
+        using ::android::hidl::base::V1_0::IBase;
+
+        // Listen to OMX's IOmxStore/default
+        {
+            sp<IBase> base = ::android::hardware::media::omx::V1_0::
+                    IOmx::getService();
+            if (base == nullptr) {
+                ALOGD("OMX service is not available");
+            } else {
+                mDeathNotifiers.emplace_back(
+                        base, [l = wp<IMediaRecorderClient>(listener)](){
+                    sp<IMediaRecorderClient> listener = l.promote();
+                    if (listener) {
+                        ALOGV("OMX service died. "
+                              "Sending death notification.");
+                        listener->notify(
+                                MEDIA_ERROR, MEDIA_ERROR_SERVER_DIED,
+                                MediaPlayerService::MEDIACODEC_PROCESS_DEATH);
+                    } else {
+                        ALOGW("OMX service died without a death handler.");
+                    }
+                });
+            }
+        }
+
+        // Listen to Codec2's IComponentStore instances
+        {
+            for (std::shared_ptr<Codec2Client> const& client :
+                    Codec2Client::CreateFromAllServices()) {
+                sp<IBase> base = client->getBase();
+                mDeathNotifiers.emplace_back(
+                        base, [l = wp<IMediaRecorderClient>(listener),
+                               name = std::string(client->getServiceName())]() {
+                    sp<IMediaRecorderClient> listener = l.promote();
+                    if (listener) {
+                        ALOGV("Codec2 service \"%s\" died. "
+                              "Sending death notification",
+                              name.c_str());
+                        listener->notify(
+                                MEDIA_ERROR, MEDIA_ERROR_SERVER_DIED,
+                                MediaPlayerService::MEDIACODEC_PROCESS_DEATH);
+                    } else {
+                        ALOGW("Codec2 service \"%s\" died "
+                              "without a death handler",
+                              name.c_str());
+                    }
+                });
+            }
+        }
+    }
 
     mAudioDeviceUpdatedNotifier = new AudioDeviceUpdatedNotifier(listener);
     mRecorder->setAudioDeviceCallback(mAudioDeviceUpdatedNotifier);
@@ -538,11 +572,37 @@ status_t MediaRecorderClient::getActiveMicrophones(
     return NO_INIT;
 }
 
+status_t MediaRecorderClient::setPreferredMicrophoneDirection(
+            audio_microphone_direction_t direction) {
+    ALOGV("setPreferredMicrophoneDirection(%d)", direction);
+    if (mRecorder != NULL) {
+        return mRecorder->setPreferredMicrophoneDirection(direction);
+    }
+    return NO_INIT;
+}
+
+status_t MediaRecorderClient::setPreferredMicrophoneFieldDimension(float zoom) {
+    ALOGV("setPreferredMicrophoneFieldDimension(%f)", zoom);
+    if (mRecorder != NULL) {
+        return mRecorder->setPreferredMicrophoneFieldDimension(zoom);
+    }
+    return NO_INIT;
+}
+
 status_t MediaRecorderClient::getPortId(audio_port_handle_t *portId) {
     ALOGV("getPortId");
     Mutex::Autolock lock(mLock);
     if (mRecorder != NULL) {
         return mRecorder->getPortId(portId);
+    }
+    return NO_INIT;
+}
+
+status_t MediaRecorderClient::getRtpDataUsage(uint64_t *bytes) {
+    ALOGV("getRtpDataUsage");
+    Mutex::Autolock lock(mLock);
+    if (mRecorder != NULL) {
+        return mRecorder->getRtpDataUsage(bytes);
     }
     return NO_INIT;
 }

@@ -1,3 +1,12 @@
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_av_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_av_license"],
+}
+
 minijail_common_cflags = [
     "-Wall",
     "-Werror",
@@ -17,14 +26,13 @@ cc_defaults {
 cc_library_shared {
     name: "libavservices_minijail",
     defaults: ["libavservices_minijail_defaults"],
-    export_include_dirs: ["."],
-}
+    vendor_available: true,
+    min_sdk_version: "29",
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.media.swcodec",
+    ],
 
-// Small library for media.extractor and media.codec sandboxing.
-cc_library_shared {
-    name: "libavservices_minijail_vendor",
-    vendor: true,
-    defaults: ["libavservices_minijail_defaults"],
     export_include_dirs: ["."],
 }
 
@@ -35,4 +43,5 @@ cc_test {
     srcs: [
         "av_services_minijail_unittest.cpp",
     ],
+    test_suites: ["device-tests"],
 }

@@ -16,15 +16,28 @@
 
 //#define LOG_NDEBUG 0
 #define LOG_TAG "Codec2Buffer"
+#define ATRACE_TAG  ATRACE_TAG_VIDEO
 #include <utils/Log.h>
+#include <utils/Trace.h>
 
+#include <aidl/android/hardware/graphics/common/Cta861_3.h>
+#include <aidl/android/hardware/graphics/common/Smpte2086.h>
+#include <android-base/properties.h>
+#include <android/hardware/cas/native/1.0/types.h>
+#include <android/hardware/drm/1.0/types.h>
+#include <android/hardware/graphics/common/1.2/types.h>
+#include <android/hardware/graphics/mapper/4.0/IMapper.h>
+#include <gralloctypes/Gralloc4.h>
 #include <hidlmemory/FrameworkUtils.h>
 #include <media/hardware/HardwareAPI.h>
+#include <media/stagefright/CodecBase.h>
 #include <media/stagefright/MediaCodecConstants.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/AMessage.h>
 #include <media/stagefright/foundation/AUtils.h>
+#include <mediadrm/ICrypto.h>
 #include <nativebase/nativebase.h>
+#include <ui/Fence.h>
 
 #include <C2AllocatorGralloc.h>
 #include <C2BlockInternal.h>
@@ -109,7 +122,11 @@ DummyContainerBuffer::DummyContainerBuffer(
 }
 
 std::shared_ptr<C2Buffer> DummyContainerBuffer::asC2Buffer() {
-    return std::move(mBufferRef);
+    return mBufferRef;
+}
+
+void DummyContainerBuffer::clearC2BufferRefs() {
+    mBufferRef.reset();
 }
 
 bool DummyContainerBuffer::canCopy(const std::shared_ptr<C2Buffer> &) const {
@@ -185,7 +202,11 @@ ConstLinearBlockBuffer::ConstLinearBlockBuffer(
 }
 
 std::shared_ptr<C2Buffer> ConstLinearBlockBuffer::asC2Buffer() {
-    return std::move(mBufferRef);
+    return mBufferRef;
+}
+
+void ConstLinearBlockBuffer::clearC2BufferRefs() {
+    mBufferRef.reset();
 }
 
 // GraphicView2MediaImageConverter
@@ -198,20 +219,25 @@ public:
      * Creates a C2GraphicView <=> MediaImage converter
      *
      * \param view C2GraphicView object
-     * \param colorFormat desired SDK color format for the MediaImage (if this is a flexible format,
-     *        an attempt is made to simply represent the graphic view as a flexible SDK format
-     *        without a memcpy)
+     * \param format buffer format
+     * \param copy whether the converter is used for copy or not
      */
     GraphicView2MediaImageConverter(
-            const C2GraphicView &view, int32_t colorFormat)
+            const C2GraphicView &view, const sp<AMessage> &format, bool copy)
         : mInitCheck(NO_INIT),
           mView(view),
           mWidth(view.width()),
           mHeight(view.height()),
-          mColorFormat(colorFormat),
           mAllocatedDepth(0),
           mBackBufferSize(0),
           mMediaImage(new ABuffer(sizeof(MediaImage2))) {
+        ATRACE_CALL();
+        if (!format->findInt32(KEY_COLOR_FORMAT, &mClientColorFormat)) {
+            mClientColorFormat = COLOR_FormatYUV420Flexible;
+        }
+        if (!format->findInt32("android._color-format", &mComponentColorFormat)) {
+            mComponentColorFormat = COLOR_FormatYUV420Flexible;
+        }
         if (view.error() != C2_OK) {
             ALOGD("Converter: view.error() = %d", view.error());
             mInitCheck = BAD_VALUE;
@@ -229,170 +255,304 @@ public:
         uint32_t bitDepth = layout.planes[0].bitDepth;
 
         // align width and height to support subsampling cleanly
-        uint32_t mStride = align(mWidth, 2) * divUp(layout.planes[0].allocatedDepth, 8u);
-        uint32_t mVStride = align(mHeight, 2);
+        uint32_t stride = align(view.crop().width, 2) * divUp(layout.planes[0].allocatedDepth, 8u);
+        uint32_t vStride = align(view.crop().height, 2);
+
+        bool tryWrapping = !copy;
 
         switch (layout.type) {
-            case C2PlanarLayout::TYPE_YUV:
+            case C2PlanarLayout::TYPE_YUV: {
                 mediaImage->mType = MediaImage2::MEDIA_IMAGE_TYPE_YUV;
                 if (layout.numPlanes != 3) {
                     ALOGD("Converter: %d planes for YUV layout", layout.numPlanes);
                     mInitCheck = BAD_VALUE;
                     return;
                 }
-                if (layout.planes[0].channel != C2PlaneInfo::CHANNEL_Y
-                        || layout.planes[1].channel != C2PlaneInfo::CHANNEL_CB
-                        || layout.planes[2].channel != C2PlaneInfo::CHANNEL_CR
-                        || layout.planes[0].colSampling != 1
-                        || layout.planes[0].rowSampling != 1
-                        || layout.planes[1].colSampling != 2
-                        || layout.planes[1].rowSampling != 2
-                        || layout.planes[2].colSampling != 2
-                        || layout.planes[2].rowSampling != 2) {
-                    ALOGD("Converter: not YUV420 for YUV layout");
+                std::optional<int> clientBitDepth = {};
+                switch (mClientColorFormat) {
+                    case COLOR_FormatYUVP010:
+                        clientBitDepth = 10;
+                        break;
+                    case COLOR_FormatYUV411PackedPlanar:
+                    case COLOR_FormatYUV411Planar:
+                    case COLOR_FormatYUV420Flexible:
+                    case COLOR_FormatYUV420PackedPlanar:
+                    case COLOR_FormatYUV420PackedSemiPlanar:
+                    case COLOR_FormatYUV420Planar:
+                    case COLOR_FormatYUV420SemiPlanar:
+                    case COLOR_FormatYUV422Flexible:
+                    case COLOR_FormatYUV422PackedPlanar:
+                    case COLOR_FormatYUV422PackedSemiPlanar:
+                    case COLOR_FormatYUV422Planar:
+                    case COLOR_FormatYUV422SemiPlanar:
+                    case COLOR_FormatYUV444Flexible:
+                    case COLOR_FormatYUV444Interleaved:
+                        clientBitDepth = 8;
+                        break;
+                    default:
+                        // no-op; used with optional
+                        break;
+
+                }
+                // conversion fails if client bit-depth and the component bit-depth differs
+                if ((clientBitDepth) && (bitDepth != clientBitDepth.value())) {
+                    ALOGD("Bit depth of client: %d and component: %d differs",
+                        *clientBitDepth, bitDepth);
                     mInitCheck = BAD_VALUE;
                     return;
                 }
-                switch (mColorFormat) {
-                    case COLOR_FormatYUV420Flexible:
-                    {  // try to map directly. check if the planes are near one another
-                        const uint8_t *minPtr = mView.data()[0];
-                        const uint8_t *maxPtr = mView.data()[0];
-                        int32_t planeSize = 0;
-                        for (uint32_t i = 0; i < layout.numPlanes; ++i) {
-                            const C2PlaneInfo &plane = layout.planes[i];
-                            ssize_t minOffset = plane.minOffset(mWidth, mHeight);
-                            ssize_t maxOffset = plane.maxOffset(mWidth, mHeight);
-                            if (minPtr > mView.data()[i] + minOffset) {
-                                minPtr = mView.data()[i] + minOffset;
-                            }
-                            if (maxPtr < mView.data()[i] + maxOffset) {
-                                maxPtr = mView.data()[i] + maxOffset;
-                            }
-                            planeSize += std::abs(plane.rowInc) * align(mHeight, 64)
-                                    / plane.rowSampling / plane.colSampling * divUp(mAllocatedDepth, 8u);
-                        }
-
-                        if ((maxPtr - minPtr + 1) <= planeSize) {
-                            // FIXME: this is risky as reading/writing data out of bound results in
-                            //        an undefined behavior, but gralloc does assume a contiguous
-                            //        mapping
-                            for (uint32_t i = 0; i < layout.numPlanes; ++i) {
-                                const C2PlaneInfo &plane = layout.planes[i];
-                                mediaImage->mPlane[i].mOffset = mView.data()[i] - minPtr;
-                                mediaImage->mPlane[i].mColInc = plane.colInc;
-                                mediaImage->mPlane[i].mRowInc = plane.rowInc;
-                                mediaImage->mPlane[i].mHorizSubsampling = plane.colSampling;
-                                mediaImage->mPlane[i].mVertSubsampling = plane.rowSampling;
-                            }
-                            mWrapped = new ABuffer(const_cast<uint8_t *>(minPtr), maxPtr - minPtr + 1);
+                C2PlaneInfo yPlane = layout.planes[C2PlanarLayout::PLANE_Y];
+                C2PlaneInfo uPlane = layout.planes[C2PlanarLayout::PLANE_U];
+                C2PlaneInfo vPlane = layout.planes[C2PlanarLayout::PLANE_V];
+                if (yPlane.channel != C2PlaneInfo::CHANNEL_Y
+                        || uPlane.channel != C2PlaneInfo::CHANNEL_CB
+                        || vPlane.channel != C2PlaneInfo::CHANNEL_CR) {
+                    ALOGD("Converter: not YUV layout");
+                    mInitCheck = BAD_VALUE;
+                    return;
+                }
+                bool yuv420888 = yPlane.rowSampling == 1 && yPlane.colSampling == 1
+                        && uPlane.rowSampling == 2 && uPlane.colSampling == 2
+                        && vPlane.rowSampling == 2 && vPlane.colSampling == 2;
+                if (yuv420888) {
+                    for (uint32_t i = 0; i < 3; ++i) {
+                        const C2PlaneInfo &plane = layout.planes[i];
+                        if (plane.allocatedDepth != 8 || plane.bitDepth != 8) {
+                            yuv420888 = false;
                             break;
                         }
                     }
-                    [[fallthrough]];
-
+                    yuv420888 = yuv420888 && yPlane.colInc == 1 && uPlane.rowInc == vPlane.rowInc;
+                }
+                int32_t copyFormat = mClientColorFormat;
+                if (yuv420888 && mClientColorFormat == COLOR_FormatYUV420Flexible) {
+                    if (uPlane.colInc == 2 && vPlane.colInc == 2
+                            && yPlane.rowInc == uPlane.rowInc) {
+                        copyFormat = COLOR_FormatYUV420PackedSemiPlanar;
+                    } else if (uPlane.colInc == 1 && vPlane.colInc == 1
+                            && yPlane.rowInc == uPlane.rowInc * 2) {
+                        copyFormat = COLOR_FormatYUV420PackedPlanar;
+                    }
+                }
+                ALOGV("client_fmt=0x%x y:{colInc=%d rowInc=%d} u:{colInc=%d rowInc=%d} "
+                        "v:{colInc=%d rowInc=%d}",
+                        mClientColorFormat,
+                        yPlane.colInc, yPlane.rowInc,
+                        uPlane.colInc, uPlane.rowInc,
+                        vPlane.colInc, vPlane.rowInc);
+                switch (copyFormat) {
+                    case COLOR_FormatYUV420Flexible:
                     case COLOR_FormatYUV420Planar:
                     case COLOR_FormatYUV420PackedPlanar:
                         mediaImage->mPlane[mediaImage->Y].mOffset = 0;
                         mediaImage->mPlane[mediaImage->Y].mColInc = 1;
-                        mediaImage->mPlane[mediaImage->Y].mRowInc = mStride;
+                        mediaImage->mPlane[mediaImage->Y].mRowInc = stride;
                         mediaImage->mPlane[mediaImage->Y].mHorizSubsampling = 1;
                         mediaImage->mPlane[mediaImage->Y].mVertSubsampling = 1;
 
-                        mediaImage->mPlane[mediaImage->U].mOffset = mStride * mVStride;
+                        mediaImage->mPlane[mediaImage->U].mOffset = stride * vStride;
                         mediaImage->mPlane[mediaImage->U].mColInc = 1;
-                        mediaImage->mPlane[mediaImage->U].mRowInc = mStride / 2;
+                        mediaImage->mPlane[mediaImage->U].mRowInc = stride / 2;
                         mediaImage->mPlane[mediaImage->U].mHorizSubsampling = 2;
                         mediaImage->mPlane[mediaImage->U].mVertSubsampling = 2;
 
-                        mediaImage->mPlane[mediaImage->V].mOffset = mStride * mVStride * 5 / 4;
+                        mediaImage->mPlane[mediaImage->V].mOffset = stride * vStride * 5 / 4;
                         mediaImage->mPlane[mediaImage->V].mColInc = 1;
-                        mediaImage->mPlane[mediaImage->V].mRowInc = mStride / 2;
+                        mediaImage->mPlane[mediaImage->V].mRowInc = stride / 2;
                         mediaImage->mPlane[mediaImage->V].mHorizSubsampling = 2;
                         mediaImage->mPlane[mediaImage->V].mVertSubsampling = 2;
+
+                        if (tryWrapping && mClientColorFormat != COLOR_FormatYUV420Flexible) {
+                            tryWrapping = yuv420888 && uPlane.colInc == 1 && vPlane.colInc == 1
+                                    && yPlane.rowInc == uPlane.rowInc * 2
+                                    && view.data()[0] < view.data()[1]
+                                    && view.data()[1] < view.data()[2];
+                        }
                         break;
 
                     case COLOR_FormatYUV420SemiPlanar:
                     case COLOR_FormatYUV420PackedSemiPlanar:
                         mediaImage->mPlane[mediaImage->Y].mOffset = 0;
                         mediaImage->mPlane[mediaImage->Y].mColInc = 1;
-                        mediaImage->mPlane[mediaImage->Y].mRowInc = mStride;
+                        mediaImage->mPlane[mediaImage->Y].mRowInc = stride;
                         mediaImage->mPlane[mediaImage->Y].mHorizSubsampling = 1;
                         mediaImage->mPlane[mediaImage->Y].mVertSubsampling = 1;
 
-                        mediaImage->mPlane[mediaImage->U].mOffset = mStride * mVStride;
+                        mediaImage->mPlane[mediaImage->U].mOffset = stride * vStride;
                         mediaImage->mPlane[mediaImage->U].mColInc = 2;
-                        mediaImage->mPlane[mediaImage->U].mRowInc = mStride;
+                        mediaImage->mPlane[mediaImage->U].mRowInc = stride;
                         mediaImage->mPlane[mediaImage->U].mHorizSubsampling = 2;
                         mediaImage->mPlane[mediaImage->U].mVertSubsampling = 2;
 
-                        mediaImage->mPlane[mediaImage->V].mOffset = mStride * mVStride + 1;
+                        mediaImage->mPlane[mediaImage->V].mOffset = stride * vStride + 1;
                         mediaImage->mPlane[mediaImage->V].mColInc = 2;
-                        mediaImage->mPlane[mediaImage->V].mRowInc = mStride;
+                        mediaImage->mPlane[mediaImage->V].mRowInc = stride;
                         mediaImage->mPlane[mediaImage->V].mHorizSubsampling = 2;
                         mediaImage->mPlane[mediaImage->V].mVertSubsampling = 2;
+
+                        if (tryWrapping && mClientColorFormat != COLOR_FormatYUV420Flexible) {
+                            tryWrapping = yuv420888 && uPlane.colInc == 2 && vPlane.colInc == 2
+                                    && yPlane.rowInc == uPlane.rowInc
+                                    && view.data()[0] < view.data()[1]
+                                    && view.data()[1] < view.data()[2];
+                        }
                         break;
 
-                    default:
-                        ALOGD("Converter: incompactible color format (%d) for YUV layout", mColorFormat);
-                        mInitCheck = BAD_VALUE;
-                        return;
+                    case COLOR_FormatYUVP010:
+                        // stride is in bytes
+                        mediaImage->mPlane[mediaImage->Y].mOffset = 0;
+                        mediaImage->mPlane[mediaImage->Y].mColInc = 2;
+                        mediaImage->mPlane[mediaImage->Y].mRowInc = stride;
+                        mediaImage->mPlane[mediaImage->Y].mHorizSubsampling = 1;
+                        mediaImage->mPlane[mediaImage->Y].mVertSubsampling = 1;
+
+                        mediaImage->mPlane[mediaImage->U].mOffset = stride * vStride;
+                        mediaImage->mPlane[mediaImage->U].mColInc = 4;
+                        mediaImage->mPlane[mediaImage->U].mRowInc = stride;
+                        mediaImage->mPlane[mediaImage->U].mHorizSubsampling = 2;
+                        mediaImage->mPlane[mediaImage->U].mVertSubsampling = 2;
+
+                        mediaImage->mPlane[mediaImage->V].mOffset = stride * vStride + 2;
+                        mediaImage->mPlane[mediaImage->V].mColInc = 4;
+                        mediaImage->mPlane[mediaImage->V].mRowInc = stride;
+                        mediaImage->mPlane[mediaImage->V].mHorizSubsampling = 2;
+                        mediaImage->mPlane[mediaImage->V].mVertSubsampling = 2;
+                        if (tryWrapping) {
+                            tryWrapping = yPlane.allocatedDepth == 16
+                                    && uPlane.allocatedDepth == 16
+                                    && vPlane.allocatedDepth == 16
+                                    && yPlane.bitDepth == 10
+                                    && uPlane.bitDepth == 10
+                                    && vPlane.bitDepth == 10
+                                    && yPlane.rightShift == 6
+                                    && uPlane.rightShift == 6
+                                    && vPlane.rightShift == 6
+                                    && yPlane.rowSampling == 1 && yPlane.colSampling == 1
+                                    && uPlane.rowSampling == 2 && uPlane.colSampling == 2
+                                    && vPlane.rowSampling == 2 && vPlane.colSampling == 2
+                                    && yPlane.colInc == 2
+                                    && uPlane.colInc == 4
+                                    && vPlane.colInc == 4
+                                    && yPlane.rowInc == uPlane.rowInc
+                                    && yPlane.rowInc == vPlane.rowInc;
+                        }
+                        break;
+
+                    default: {
+                        // default to fully planar format --- this will be overridden if wrapping
+                        // TODO: keep interleaved format
+                        int32_t colInc = divUp(mAllocatedDepth, 8u);
+                        int32_t rowInc = stride * colInc / yPlane.colSampling;
+                        mediaImage->mPlane[mediaImage->Y].mOffset = 0;
+                        mediaImage->mPlane[mediaImage->Y].mColInc = colInc;
+                        mediaImage->mPlane[mediaImage->Y].mRowInc = rowInc;
+                        mediaImage->mPlane[mediaImage->Y].mHorizSubsampling = yPlane.colSampling;
+                        mediaImage->mPlane[mediaImage->Y].mVertSubsampling = yPlane.rowSampling;
+                        int32_t offset = rowInc * vStride / yPlane.rowSampling;
+
+                        rowInc = stride * colInc / uPlane.colSampling;
+                        mediaImage->mPlane[mediaImage->U].mOffset = offset;
+                        mediaImage->mPlane[mediaImage->U].mColInc = colInc;
+                        mediaImage->mPlane[mediaImage->U].mRowInc = rowInc;
+                        mediaImage->mPlane[mediaImage->U].mHorizSubsampling = uPlane.colSampling;
+                        mediaImage->mPlane[mediaImage->U].mVertSubsampling = uPlane.rowSampling;
+                        offset += rowInc * vStride / uPlane.rowSampling;
+
+                        rowInc = stride * colInc / vPlane.colSampling;
+                        mediaImage->mPlane[mediaImage->V].mOffset = offset;
+                        mediaImage->mPlane[mediaImage->V].mColInc = colInc;
+                        mediaImage->mPlane[mediaImage->V].mRowInc = rowInc;
+                        mediaImage->mPlane[mediaImage->V].mHorizSubsampling = vPlane.colSampling;
+                        mediaImage->mPlane[mediaImage->V].mVertSubsampling = vPlane.rowSampling;
+                        break;
+                    }
                 }
                 break;
+            }
+
             case C2PlanarLayout::TYPE_YUVA:
-                mediaImage->mType = MediaImage2::MEDIA_IMAGE_TYPE_YUVA;
-                // We don't have an SDK YUVA format
-                ALOGD("Converter: incompactible color format (%d) for YUVA layout", mColorFormat);
-                mInitCheck = BAD_VALUE;
+                ALOGD("Converter: unrecognized color format "
+                        "(client %d component %d) for YUVA layout",
+                        mClientColorFormat, mComponentColorFormat);
+                mInitCheck = NO_INIT;
                 return;
             case C2PlanarLayout::TYPE_RGB:
-                mediaImage->mType = MediaImage2::MEDIA_IMAGE_TYPE_RGB;
-                switch (mColorFormat) {
-                    // TODO media image
-                    case COLOR_FormatRGBFlexible:
-                    case COLOR_Format24bitBGR888:
-                    case COLOR_Format24bitRGB888:
-                        break;
-                    default:
-                        ALOGD("Converter: incompactible color format (%d) for RGB layout", mColorFormat);
-                        mInitCheck = BAD_VALUE;
-                        return;
-                }
-                if (layout.numPlanes != 3) {
-                    ALOGD("Converter: %d planes for RGB layout", layout.numPlanes);
-                    mInitCheck = BAD_VALUE;
-                    return;
-                }
-                break;
+                ALOGD("Converter: unrecognized color format "
+                        "(client %d component %d) for RGB layout",
+                        mClientColorFormat, mComponentColorFormat);
+                mInitCheck = NO_INIT;
+                // TODO: support MediaImage layout
+                return;
             case C2PlanarLayout::TYPE_RGBA:
-                mediaImage->mType = MediaImage2::MEDIA_IMAGE_TYPE_RGBA;
-                switch (mColorFormat) {
-                    // TODO media image
-                    case COLOR_FormatRGBAFlexible:
-                    case COLOR_Format32bitABGR8888:
-                    case COLOR_Format32bitARGB8888:
-                    case COLOR_Format32bitBGRA8888:
-                        break;
-                    default:
-                        ALOGD("Incompactible color format (%d) for RGBA layout", mColorFormat);
-                        mInitCheck = BAD_VALUE;
-                        return;
-                }
-                if (layout.numPlanes != 4) {
-                    ALOGD("Converter: %d planes for RGBA layout", layout.numPlanes);
-                    mInitCheck = BAD_VALUE;
-                    return;
-                }
-                break;
+                ALOGD("Converter: unrecognized color format "
+                        "(client %d component %d) for RGBA layout",
+                        mClientColorFormat, mComponentColorFormat);
+                mInitCheck = NO_INIT;
+                // TODO: support MediaImage layout
+                return;
             default:
                 mediaImage->mType = MediaImage2::MEDIA_IMAGE_TYPE_UNKNOWN;
-                ALOGD("Unknown layout");
-                mInitCheck = BAD_VALUE;
-                return;
+                if (layout.numPlanes == 1) {
+                    const C2PlaneInfo &plane = layout.planes[0];
+                    if (plane.colInc < 0 || plane.rowInc < 0) {
+                        // Copy-only if we have negative colInc/rowInc
+                        tryWrapping = false;
+                    }
+                    mediaImage->mPlane[0].mOffset = 0;
+                    mediaImage->mPlane[0].mColInc = std::abs(plane.colInc);
+                    mediaImage->mPlane[0].mRowInc = std::abs(plane.rowInc);
+                    mediaImage->mPlane[0].mHorizSubsampling = plane.colSampling;
+                    mediaImage->mPlane[0].mVertSubsampling = plane.rowSampling;
+                } else {
+                    ALOGD("Converter: unrecognized layout: color format (client %d component %d)",
+                            mClientColorFormat, mComponentColorFormat);
+                    mInitCheck = NO_INIT;
+                    return;
+                }
+                break;
+        }
+        if (tryWrapping) {
+            // try to map directly. check if the planes are near one another
+            const uint8_t *minPtr = mView.data()[0];
+            const uint8_t *maxPtr = mView.data()[0];
+            int32_t planeSize = 0;
+            for (uint32_t i = 0; i < layout.numPlanes; ++i) {
+                const C2PlaneInfo &plane = layout.planes[i];
+                int64_t planeStride = std::abs(plane.rowInc / plane.colInc);
+                ssize_t minOffset = plane.minOffset(
+                        mWidth / plane.colSampling, mHeight / plane.rowSampling);
+                ssize_t maxOffset = plane.maxOffset(
+                        mWidth / plane.colSampling, mHeight / plane.rowSampling);
+                if (minPtr > mView.data()[i] + minOffset) {
+                    minPtr = mView.data()[i] + minOffset;
+                }
+                if (maxPtr < mView.data()[i] + maxOffset) {
+                    maxPtr = mView.data()[i] + maxOffset;
+                }
+                planeSize += planeStride * divUp(mAllocatedDepth, 8u)
+                        * align(mHeight, 64) / plane.rowSampling;
+            }
+
+            if (minPtr == mView.data()[0] && (maxPtr - minPtr + 1) <= planeSize) {
+                // FIXME: this is risky as reading/writing data out of bound results
+                //        in an undefined behavior, but gralloc does assume a
+                //        contiguous mapping
+                for (uint32_t i = 0; i < layout.numPlanes; ++i) {
+                    const C2PlaneInfo &plane = layout.planes[i];
+                    mediaImage->mPlane[i].mOffset = mView.data()[i] - minPtr;
+                    mediaImage->mPlane[i].mColInc = plane.colInc;
+                    mediaImage->mPlane[i].mRowInc = plane.rowInc;
+                    mediaImage->mPlane[i].mHorizSubsampling = plane.colSampling;
+                    mediaImage->mPlane[i].mVertSubsampling = plane.rowSampling;
+                }
+                mWrapped = new ABuffer(const_cast<uint8_t *>(minPtr),
+                                       maxPtr - minPtr + 1);
+                ALOGV("Converter: wrapped (capacity=%zu)", mWrapped->capacity());
+            }
         }
         mediaImage->mNumPlanes = layout.numPlanes;
-        mediaImage->mWidth = mWidth;
-        mediaImage->mHeight = mHeight;
+        mediaImage->mWidth = view.crop().width;
+        mediaImage->mHeight = view.crop().height;
         mediaImage->mBitDepth = bitDepth;
         mediaImage->mBitDepthAllocated = mAllocatedDepth;
 
@@ -411,12 +571,12 @@ public:
                 return;
             }
             if (plane.allocatedDepth != mAllocatedDepth || plane.bitDepth != bitDepth) {
-                ALOGV("different allocatedDepth/bitDepth per plane unsupported");
+                ALOGD("different allocatedDepth/bitDepth per plane unsupported");
                 mInitCheck = BAD_VALUE;
                 return;
             }
-            bufferSize += mStride * mVStride
-                    / plane.rowSampling / plane.colSampling;
+            // stride is in bytes
+            bufferSize += stride * vStride / plane.rowSampling / plane.colSampling;
         }
 
         mBackBufferSize = bufferSize;
@@ -457,6 +617,7 @@ public:
      * Copy C2GraphicView to MediaImage2.
      */
     status_t copyToMediaImage() {
+        ATRACE_CALL();
         if (mInitCheck != OK) {
             return mInitCheck;
         }
@@ -471,7 +632,8 @@ private:
     const C2GraphicView mView;
     uint32_t mWidth;
     uint32_t mHeight;
-    int32_t mColorFormat;  ///< SDK color format for MediaImage
+    int32_t mClientColorFormat;  ///< SDK color format for MediaImage
+    int32_t mComponentColorFormat;  ///< SDK color format from component
     sp<ABuffer> mWrapped;  ///< wrapped buffer (if we can map C2Buffer to an ABuffer)
     uint32_t mAllocatedDepth;
     uint32_t mBackBufferSize;
@@ -494,16 +656,15 @@ sp<GraphicBlockBuffer> GraphicBlockBuffer::Allocate(
         const sp<AMessage> &format,
         const std::shared_ptr<C2GraphicBlock> &block,
         std::function<sp<ABuffer>(size_t)> alloc) {
+    ATRACE_BEGIN("GraphicBlockBuffer::Allocate block->map()");
     C2GraphicView view(block->map().get());
+    ATRACE_END();
     if (view.error() != C2_OK) {
         ALOGD("C2GraphicBlock::map failed: %d", view.error());
         return nullptr;
     }
 
-    int32_t colorFormat = COLOR_FormatYUV420Flexible;
-    (void)format->findInt32("color-format", &colorFormat);
-
-    GraphicView2MediaImageConverter converter(view, colorFormat);
+    GraphicView2MediaImageConverter converter(view, format, false /* copy */);
     if (converter.initCheck() != OK) {
         ALOGD("Converter init failed: %d", converter.initCheck());
         return nullptr;
@@ -542,6 +703,7 @@ GraphicBlockBuffer::GraphicBlockBuffer(
 }
 
 std::shared_ptr<C2Buffer> GraphicBlockBuffer::asC2Buffer() {
+    ATRACE_CALL();
     uint32_t width = mView.width();
     uint32_t height = mView.height();
     if (!mWrapped) {
@@ -561,7 +723,26 @@ GraphicMetadataBuffer::GraphicMetadataBuffer(
 }
 
 std::shared_ptr<C2Buffer> GraphicMetadataBuffer::asC2Buffer() {
-#ifndef __LP64__
+#ifdef __LP64__
+    static std::once_flag s_checkOnce;
+    static bool s_is64bitOk {true};
+    std::call_once(s_checkOnce, [&](){
+        const std::string abi32list =
+        ::android::base::GetProperty("ro.product.cpu.abilist32", "");
+        if (!abi32list.empty()) {
+            int32_t inputSurfaceSetting =
+            ::android::base::GetIntProperty("debug.stagefright.c2inputsurface", int32_t(0));
+            s_is64bitOk = inputSurfaceSetting != 0;
+        }
+    });
+
+    if (!s_is64bitOk) {
+        ALOGE("GraphicMetadataBuffer does not work in 32+64 system if compiled as 64-bit object"\
+              "when debug.stagefright.c2inputsurface is set to 0");
+        return nullptr;
+    }
+#endif
+
     VideoNativeMetadata *meta = (VideoNativeMetadata *)base();
     ANativeWindowBuffer *buffer = (ANativeWindowBuffer *)meta->pBuffer;
     if (buffer == nullptr) {
@@ -581,18 +762,21 @@ std::shared_ptr<C2Buffer> GraphicMetadataBuffer::asC2Buffer() {
     c2_status_t err = mAlloc->priorGraphicAllocation(handle, &alloc);
     if (err != C2_OK) {
         ALOGD("Failed to wrap VideoNativeMetadata into C2GraphicAllocation");
+        native_handle_close(handle);
+        native_handle_delete(handle);
         return nullptr;
     }
     std::shared_ptr<C2GraphicBlock> block = _C2BlockFactory::CreateGraphicBlock(alloc);
 
     meta->pBuffer = 0;
-    // TODO: fence
+    // TODO: wrap this in C2Fence so that the component can wait when it
+    //       actually starts processing.
+    if (meta->nFenceFd >= 0) {
+        sp<Fence> fence(new Fence(meta->nFenceFd));
+        fence->waitForever(LOG_TAG);
+    }
     return C2Buffer::CreateGraphicBuffer(
             block->share(C2Rect(buffer->width, buffer->height), C2Fence()));
-#else
-    ALOGE("GraphicMetadataBuffer does not work on 64-bit arch");
-    return nullptr;
-#endif
 }
 
 // ConstGraphicBlockBuffer
@@ -608,14 +792,13 @@ sp<ConstGraphicBlockBuffer> ConstGraphicBlockBuffer::Allocate(
         ALOGD("C2Buffer precond fail");
         return nullptr;
     }
+    ATRACE_BEGIN("ConstGraphicBlockBuffer::Allocate block->map()");
     std::unique_ptr<const C2GraphicView> view(std::make_unique<const C2GraphicView>(
             buffer->data().graphicBlocks()[0].map().get()));
+    ATRACE_END();
     std::unique_ptr<const C2GraphicView> holder;
 
-    int32_t colorFormat = COLOR_FormatYUV420Flexible;
-    (void)format->findInt32("color-format", &colorFormat);
-
-    GraphicView2MediaImageConverter converter(*view, colorFormat);
+    GraphicView2MediaImageConverter converter(*view, format, false /* copy */);
     if (converter.initCheck() != OK) {
         ALOGD("Converter init failed: %d", converter.initCheck());
         return nullptr;
@@ -652,7 +835,14 @@ sp<ConstGraphicBlockBuffer> ConstGraphicBlockBuffer::AllocateEmpty(
         ALOGD("format had no width / height");
         return nullptr;
     }
-    sp<ABuffer> aBuffer(alloc(width * height * 4));
+    int32_t colorFormat = COLOR_FormatYUV420Flexible;
+    int32_t bpp = 12;  // 8(Y) + 2(U) + 2(V)
+    if (format->findInt32(KEY_COLOR_FORMAT, &colorFormat)) {
+        if (colorFormat == COLOR_FormatYUVP010) {
+            bpp = 24;  // 16(Y) + 4(U) + 4(V)
+        }
+    }
+    sp<ABuffer> aBuffer(alloc(align(width, 16) * align(height, 16) * bpp / 8));
     return new ConstGraphicBlockBuffer(
             format,
             aBuffer,
@@ -677,8 +867,12 @@ ConstGraphicBlockBuffer::ConstGraphicBlockBuffer(
 }
 
 std::shared_ptr<C2Buffer> ConstGraphicBlockBuffer::asC2Buffer() {
+    return mBufferRef;
+}
+
+void ConstGraphicBlockBuffer::clearC2BufferRefs() {
     mView.reset();
-    return std::move(mBufferRef);
+    mBufferRef.reset();
 }
 
 bool ConstGraphicBlockBuffer::canCopy(const std::shared_ptr<C2Buffer> &buffer) const {
@@ -702,12 +896,13 @@ bool ConstGraphicBlockBuffer::canCopy(const std::shared_ptr<C2Buffer> &buffer) c
         return false;
     }
 
-    int32_t colorFormat = COLOR_FormatYUV420Flexible;
-    // FIXME: format() is not const, but we cannot change it, so do a const cast here
-    const_cast<ConstGraphicBlockBuffer *>(this)->format()->findInt32("color-format", &colorFormat);
-
+    ATRACE_BEGIN("ConstGraphicBlockBuffer::canCopy block->map()");
     GraphicView2MediaImageConverter converter(
-            buffer->data().graphicBlocks()[0].map().get(), colorFormat);
+            buffer->data().graphicBlocks()[0].map().get(),
+            // FIXME: format() is not const, but we cannot change it, so do a const cast here
+            const_cast<ConstGraphicBlockBuffer *>(this)->format(),
+            true /* copy */);
+    ATRACE_END();
     if (converter.initCheck() != OK) {
         ALOGD("ConstGraphicBlockBuffer::canCopy: converter init failed: %d", converter.initCheck());
         return false;
@@ -725,11 +920,9 @@ bool ConstGraphicBlockBuffer::copy(const std::shared_ptr<C2Buffer> &buffer) {
         setRange(0, 0);
         return true;
     }
-    int32_t colorFormat = COLOR_FormatYUV420Flexible;
-    format()->findInt32("color-format", &colorFormat);
 
     GraphicView2MediaImageConverter converter(
-            buffer->data().graphicBlocks()[0].map().get(), colorFormat);
+            buffer->data().graphicBlocks()[0].map().get(), format(), true /* copy */);
     if (converter.initCheck() != OK) {
         ALOGD("ConstGraphicBlockBuffer::copy: converter init failed: %d", converter.initCheck());
         return false;
@@ -739,6 +932,7 @@ bool ConstGraphicBlockBuffer::copy(const std::shared_ptr<C2Buffer> &buffer) {
         ALOGD("ConstGraphicBlockBuffer::copy: set back buffer failed");
         return false;
     }
+    setRange(0, aBuffer->size());  // align size info
     converter.copyToMediaImage();
     setImageData(converter.imageData());
     mBufferRef = buffer;
@@ -752,7 +946,11 @@ EncryptedLinearBlockBuffer::EncryptedLinearBlockBuffer(
         const std::shared_ptr<C2LinearBlock> &block,
         const sp<IMemory> &memory,
         int32_t heapSeqNum)
-    : Codec2Buffer(format, new ABuffer(memory->pointer(), memory->size())),
+    // TODO: Using unsecurePointer() has some associated security pitfalls
+    //       (see declaration for details).
+    //       Either document why it is safe in this case or address the
+    //       issue (e.g. by copying).
+    : Codec2Buffer(format, new ABuffer(memory->unsecurePointer(), memory->size())),
       mBlock(block),
       mMemory(memory),
       mHeapSeqNum(heapSeqNum) {
@@ -763,9 +961,8 @@ std::shared_ptr<C2Buffer> EncryptedLinearBlockBuffer::asC2Buffer() {
 }
 
 void EncryptedLinearBlockBuffer::fillSourceBuffer(
-        ICrypto::SourceBuffer *source) {
-    source->mSharedMemory = mMemory;
-    source->mHeapSeqNum = mHeapSeqNum;
+        hardware::drm::V1_0::SharedBuffer *source) {
+    BufferChannelBase::IMemoryToSharedBuffer(mMemory, mHeapSeqNum, source);
 }
 
 void EncryptedLinearBlockBuffer::fillSourceBuffer(
@@ -788,7 +985,7 @@ bool EncryptedLinearBlockBuffer::copyDecryptedContent(
     if (view.size() < length) {
         return false;
     }
-    memcpy(view.data(), decrypted->pointer(), length);
+    memcpy(view.data(), decrypted->unsecurePointer(), length);
     return true;
 }
 
@@ -798,6 +995,266 @@ bool EncryptedLinearBlockBuffer::copyDecryptedContentFromMemory(size_t length) {
 
 native_handle_t *EncryptedLinearBlockBuffer::handle() const {
     return const_cast<native_handle_t *>(mBlock->handle());
+}
+
+using ::aidl::android::hardware::graphics::common::Cta861_3;
+using ::aidl::android::hardware::graphics::common::Dataspace;
+using ::aidl::android::hardware::graphics::common::Smpte2086;
+
+using ::android::gralloc4::MetadataType_Cta861_3;
+using ::android::gralloc4::MetadataType_Dataspace;
+using ::android::gralloc4::MetadataType_Smpte2086;
+using ::android::gralloc4::MetadataType_Smpte2094_40;
+
+using ::android::hardware::Return;
+using ::android::hardware::hidl_vec;
+
+using Error4 = ::android::hardware::graphics::mapper::V4_0::Error;
+using IMapper4 = ::android::hardware::graphics::mapper::V4_0::IMapper;
+
+namespace {
+
+sp<IMapper4> GetMapper4() {
+    static sp<IMapper4> sMapper = IMapper4::getService();
+    return sMapper;
+}
+
+class Gralloc4Buffer {
+public:
+    Gralloc4Buffer(const C2Handle *const handle) : mBuffer(nullptr) {
+        sp<IMapper4> mapper = GetMapper4();
+        if (!mapper) {
+            return;
+        }
+        // Unwrap raw buffer handle from the C2Handle
+        native_handle_t *nh = UnwrapNativeCodec2GrallocHandle(handle);
+        if (!nh) {
+            return;
+        }
+        // Import the raw handle so IMapper can use the buffer. The imported
+        // handle must be freed when the client is done with the buffer.
+        mapper->importBuffer(
+                hardware::hidl_handle(nh),
+                [&](const Error4 &error, void *buffer) {
+                    if (error == Error4::NONE) {
+                        mBuffer = buffer;
+                    }
+                });
+
+        // TRICKY: UnwrapNativeCodec2GrallocHandle creates a new handle but
+        //         does not clone the fds. Thus we need to delete the handle
+        //         without closing it.
+        native_handle_delete(nh);
+    }
+
+    ~Gralloc4Buffer() {
+        sp<IMapper4> mapper = GetMapper4();
+        if (mapper && mBuffer) {
+            // Free the imported buffer handle. This does not release the
+            // underlying buffer itself.
+            mapper->freeBuffer(mBuffer);
+        }
+    }
+
+    void *get() const { return mBuffer; }
+    operator bool() const { return (mBuffer != nullptr); }
+private:
+    void *mBuffer;
+};
+
+}  // namspace
+
+c2_status_t GetHdrMetadataFromGralloc4Handle(
+        const C2Handle *const handle,
+        std::shared_ptr<C2StreamHdrStaticMetadataInfo::input> *staticInfo,
+        std::shared_ptr<C2StreamHdrDynamicMetadataInfo::input> *dynamicInfo) {
+    c2_status_t err = C2_OK;
+    sp<IMapper4> mapper = GetMapper4();
+    Gralloc4Buffer buffer(handle);
+    if (!mapper || !buffer) {
+        // Gralloc4 not supported; nothing to do
+        return err;
+    }
+    Error4 mapperErr = Error4::NONE;
+    if (staticInfo) {
+        ALOGV("Grabbing static HDR info from gralloc4 metadata");
+        staticInfo->reset(new C2StreamHdrStaticMetadataInfo::input(0u));
+        memset(&(*staticInfo)->mastering, 0, sizeof((*staticInfo)->mastering));
+        (*staticInfo)->maxCll = 0;
+        (*staticInfo)->maxFall = 0;
+        IMapper4::get_cb cb = [&mapperErr, staticInfo](Error4 err, const hidl_vec<uint8_t> &vec) {
+            mapperErr = err;
+            if (err != Error4::NONE) {
+                return;
+            }
+
+            std::optional<Smpte2086> smpte2086;
+            gralloc4::decodeSmpte2086(vec, &smpte2086);
+            if (smpte2086) {
+                (*staticInfo)->mastering.red.x    = smpte2086->primaryRed.x;
+                (*staticInfo)->mastering.red.y    = smpte2086->primaryRed.y;
+                (*staticInfo)->mastering.green.x  = smpte2086->primaryGreen.x;
+                (*staticInfo)->mastering.green.y  = smpte2086->primaryGreen.y;
+                (*staticInfo)->mastering.blue.x   = smpte2086->primaryBlue.x;
+                (*staticInfo)->mastering.blue.y   = smpte2086->primaryBlue.y;
+                (*staticInfo)->mastering.white.x  = smpte2086->whitePoint.x;
+                (*staticInfo)->mastering.white.y  = smpte2086->whitePoint.y;
+
+                (*staticInfo)->mastering.maxLuminance = smpte2086->maxLuminance;
+                (*staticInfo)->mastering.minLuminance = smpte2086->minLuminance;
+            } else {
+                mapperErr = Error4::BAD_VALUE;
+            }
+        };
+        Return<void> ret = mapper->get(buffer.get(), MetadataType_Smpte2086, cb);
+        if (!ret.isOk()) {
+            err = C2_REFUSED;
+        } else if (mapperErr != Error4::NONE) {
+            err = C2_CORRUPTED;
+        }
+        cb = [&mapperErr, staticInfo](Error4 err, const hidl_vec<uint8_t> &vec) {
+            mapperErr = err;
+            if (err != Error4::NONE) {
+                return;
+            }
+
+            std::optional<Cta861_3> cta861_3;
+            gralloc4::decodeCta861_3(vec, &cta861_3);
+            if (cta861_3) {
+                (*staticInfo)->maxCll   = cta861_3->maxContentLightLevel;
+                (*staticInfo)->maxFall  = cta861_3->maxFrameAverageLightLevel;
+            } else {
+                mapperErr = Error4::BAD_VALUE;
+            }
+        };
+        ret = mapper->get(buffer.get(), MetadataType_Cta861_3, cb);
+        if (!ret.isOk()) {
+            err = C2_REFUSED;
+        } else if (mapperErr != Error4::NONE) {
+            err = C2_CORRUPTED;
+        }
+    }
+    if (dynamicInfo) {
+        ALOGV("Grabbing dynamic HDR info from gralloc4 metadata");
+        dynamicInfo->reset();
+        IMapper4::get_cb cb = [&mapperErr, dynamicInfo](Error4 err, const hidl_vec<uint8_t> &vec) {
+            mapperErr = err;
+            if (err != Error4::NONE) {
+                return;
+            }
+            if (!dynamicInfo) {
+                return;
+            }
+            *dynamicInfo = C2StreamHdrDynamicMetadataInfo::input::AllocShared(
+                    vec.size(), 0u, C2Config::HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_40);
+            memcpy((*dynamicInfo)->m.data, vec.data(), vec.size());
+        };
+        Return<void> ret = mapper->get(buffer.get(), MetadataType_Smpte2094_40, cb);
+        if (!ret.isOk() || mapperErr != Error4::NONE) {
+            dynamicInfo->reset();
+        }
+    }
+
+    return err;
+}
+
+c2_status_t SetMetadataToGralloc4Handle(
+        android_dataspace_t dataSpace,
+        const std::shared_ptr<const C2StreamHdrStaticMetadataInfo::output> &staticInfo,
+        const std::shared_ptr<const C2StreamHdrDynamicMetadataInfo::output> &dynamicInfo,
+        const C2Handle *const handle) {
+    c2_status_t err = C2_OK;
+    sp<IMapper4> mapper = GetMapper4();
+    Gralloc4Buffer buffer(handle);
+    if (!mapper || !buffer) {
+        // Gralloc4 not supported; nothing to do
+        return err;
+    }
+    {
+        hidl_vec<uint8_t> metadata;
+        if (gralloc4::encodeDataspace(static_cast<Dataspace>(dataSpace), &metadata) == OK) {
+            Return<Error4> ret = mapper->set(buffer.get(), MetadataType_Dataspace, metadata);
+            if (!ret.isOk()) {
+                err = C2_REFUSED;
+            } else if (ret != Error4::NONE) {
+                err = C2_CORRUPTED;
+            }
+        }
+    }
+    if (staticInfo && *staticInfo) {
+        ALOGV("Setting static HDR info as gralloc4 metadata");
+        std::optional<Smpte2086> smpte2086 = Smpte2086{
+            {staticInfo->mastering.red.x, staticInfo->mastering.red.y},
+            {staticInfo->mastering.green.x, staticInfo->mastering.green.y},
+            {staticInfo->mastering.blue.x, staticInfo->mastering.blue.y},
+            {staticInfo->mastering.white.x, staticInfo->mastering.white.y},
+            staticInfo->mastering.maxLuminance,
+            staticInfo->mastering.minLuminance,
+        };
+        hidl_vec<uint8_t> vec;
+        if (0.0 <= smpte2086->primaryRed.x && smpte2086->primaryRed.x <= 1.0
+                && 0.0 <= smpte2086->primaryRed.y && smpte2086->primaryRed.y <= 1.0
+                && 0.0 <= smpte2086->primaryGreen.x && smpte2086->primaryGreen.x <= 1.0
+                && 0.0 <= smpte2086->primaryGreen.y && smpte2086->primaryGreen.y <= 1.0
+                && 0.0 <= smpte2086->primaryBlue.x && smpte2086->primaryBlue.x <= 1.0
+                && 0.0 <= smpte2086->primaryBlue.y && smpte2086->primaryBlue.y <= 1.0
+                && 0.0 <= smpte2086->whitePoint.x && smpte2086->whitePoint.x <= 1.0
+                && 0.0 <= smpte2086->whitePoint.y && smpte2086->whitePoint.y <= 1.0
+                && 0.0 <= smpte2086->maxLuminance && 0.0 <= smpte2086->minLuminance
+                && gralloc4::encodeSmpte2086(smpte2086, &vec) == OK) {
+            Return<Error4> ret = mapper->set(buffer.get(), MetadataType_Smpte2086, vec);
+            if (!ret.isOk()) {
+                err = C2_REFUSED;
+            } else if (ret != Error4::NONE) {
+                err = C2_CORRUPTED;
+            }
+        }
+        std::optional<Cta861_3> cta861_3 = Cta861_3{
+            staticInfo->maxCll,
+            staticInfo->maxFall,
+        };
+        if (0.0 <= cta861_3->maxContentLightLevel && 0.0 <= cta861_3->maxFrameAverageLightLevel
+                && gralloc4::encodeCta861_3(cta861_3, &vec) == OK) {
+            Return<Error4> ret = mapper->set(buffer.get(), MetadataType_Cta861_3, vec);
+            if (!ret.isOk()) {
+                err = C2_REFUSED;
+            } else if (ret != Error4::NONE) {
+                err = C2_CORRUPTED;
+            }
+        }
+    }
+    if (dynamicInfo && *dynamicInfo && dynamicInfo->flexCount() > 0) {
+        ALOGV("Setting dynamic HDR info as gralloc4 metadata");
+        std::optional<IMapper4::MetadataType> metadataType;
+        switch (dynamicInfo->m.type_) {
+        case C2Config::HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_10:
+            // TODO
+            break;
+        case C2Config::HDR_DYNAMIC_METADATA_TYPE_SMPTE_2094_40:
+            metadataType = MetadataType_Smpte2094_40;
+            break;
+        }
+
+        if (metadataType) {
+            std::vector<uint8_t> smpte2094_40;
+            smpte2094_40.resize(dynamicInfo->flexCount());
+            memcpy(smpte2094_40.data(), dynamicInfo->m.data, dynamicInfo->flexCount());
+
+            hidl_vec<uint8_t> vec;
+            if (gralloc4::encodeSmpte2094_40({ smpte2094_40 }, &vec) == OK) {
+                Return<Error4> ret = mapper->set(buffer.get(), *metadataType, vec);
+                if (!ret.isOk()) {
+                    err = C2_REFUSED;
+                } else if (ret != Error4::NONE) {
+                    err = C2_CORRUPTED;
+                }
+            }
+        } else {
+            err = C2_BAD_VALUE;
+        }
+    }
+
+    return err;
 }
 
 }  // namespace android

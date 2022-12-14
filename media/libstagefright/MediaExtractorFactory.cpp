@@ -19,6 +19,7 @@
 #include <utils/Log.h>
 
 #include <android/dlext.h>
+#include <android-base/logging.h>
 #include <binder/IPCThreadState.h>
 #include <binder/PermissionCache.h>
 #include <binder/IServiceManager.h>
@@ -26,8 +27,8 @@
 #include <media/stagefright/InterfaceUtils.h>
 #include <media/stagefright/MediaExtractor.h>
 #include <media/stagefright/MediaExtractorFactory.h>
-#include <media/IMediaExtractor.h>
-#include <media/IMediaExtractorService.h>
+#include <android/IMediaExtractor.h>
+#include <android/IMediaExtractorService.h>
 #include <nativeloader/dlext_namespaces.h>
 #include <private/android_filesystem_config.h>
 #include <cutils/properties.h>
@@ -53,9 +54,13 @@ sp<IMediaExtractor> MediaExtractorFactory::Create(
         sp<IBinder> binder = defaultServiceManager()->getService(String16("media.extractor"));
 
         if (binder != 0) {
-            sp<IMediaExtractorService> mediaExService(interface_cast<IMediaExtractorService>(binder));
-            sp<IMediaExtractor> ex = mediaExService->makeExtractor(
-                    CreateIDataSourceFromDataSource(source), mime);
+            sp<IMediaExtractorService> mediaExService(
+                    interface_cast<IMediaExtractorService>(binder));
+            sp<IMediaExtractor> ex;
+            mediaExService->makeExtractor(
+                    CreateIDataSourceFromDataSource(source),
+                    mime ? std::optional<std::string>(mime) : std::nullopt,
+                    &ex);
             return ex;
         } else {
             ALOGE("extractor service not running");
@@ -69,11 +74,6 @@ sp<IMediaExtractor> MediaExtractorFactory::CreateFromService(
         const sp<DataSource> &source, const char *mime) {
 
     ALOGV("MediaExtractorFactory::CreateFromService %s", mime);
-
-    UpdateExtractors();
-
-    // initialize source decryption if needed
-    source->DrmInitialization(nullptr /* mime */);
 
     void *meta = nullptr;
     void *creator = NULL;
@@ -188,11 +188,11 @@ void MediaExtractorFactory::RegisterExtractor(const sp<ExtractorPlugin> &plugin,
     // sanity check check struct version, uuid, name
     if (plugin->def.def_version != EXTRACTORDEF_VERSION_NDK_V1 &&
             plugin->def.def_version != EXTRACTORDEF_VERSION_NDK_V2) {
-        ALOGE("don't understand extractor format %u, ignoring.", plugin->def.def_version);
+        ALOGW("don't understand extractor format %u, ignoring.", plugin->def.def_version);
         return;
     }
     if (memcmp(&plugin->def.extractor_uuid, "\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", 16) == 0) {
-        ALOGE("invalid UUID, ignoring");
+        ALOGW("invalid UUID, ignoring");
         return;
     }
     if (plugin->def.extractor_name == NULL || strlen(plugin->def.extractor_name) == 0) {
@@ -244,24 +244,26 @@ void MediaExtractorFactory::RegisterExtractors(
             void *libHandle = android_dlopen_ext(
                     libPath.string(),
                     RTLD_NOW | RTLD_LOCAL, dlextinfo);
-            if (libHandle) {
-                GetExtractorDef getDef =
-                    (GetExtractorDef) dlsym(libHandle, "GETEXTRACTORDEF");
-                if (getDef) {
-                    ALOGV("registering sniffer for %s", libPath.string());
-                    RegisterExtractor(
-                            new ExtractorPlugin(getDef(), libHandle, libPath), pluginList);
-                } else {
-                    ALOGW("%s does not contain sniffer", libPath.string());
-                    dlclose(libHandle);
-                }
-            } else {
-                ALOGW("couldn't dlopen(%s) %s", libPath.string(), strerror(errno));
+            if (libHandle == nullptr) {
+                ALOGI("dlopen(%s) reported error %s", libPath.string(), strerror(errno));
+                continue;
             }
+
+            GetExtractorDef getDef =
+                (GetExtractorDef) dlsym(libHandle, "GETEXTRACTORDEF");
+            if (getDef == nullptr) {
+                ALOGI("no sniffer found in %s", libPath.string());
+                dlclose(libHandle);
+                continue;
+            }
+
+            ALOGV("registering sniffer for %s", libPath.string());
+            RegisterExtractor(
+                    new ExtractorPlugin(getDef(), libHandle, libPath), pluginList);
         }
         closedir(libDir);
     } else {
-        ALOGE("couldn't opendir(%s)", libDirPath);
+        ALOGI("plugin directory not present (%s)", libDirPath);
     }
 }
 
@@ -269,10 +271,10 @@ static bool compareFunc(const sp<ExtractorPlugin>& first, const sp<ExtractorPlug
     return strcmp(first->def.extractor_name, second->def.extractor_name) < 0;
 }
 
-static std::unordered_set<std::string> gSupportedExtensions;
+static std::vector<std::string> gSupportedExtensions;
 
 // static
-void MediaExtractorFactory::UpdateExtractors() {
+void MediaExtractorFactory::LoadExtractors() {
     Mutex::Autolock autoLock(gPluginMutex);
 
     if (gPluginsRegistered) {
@@ -283,7 +285,7 @@ void MediaExtractorFactory::UpdateExtractors() {
 
     std::shared_ptr<std::list<sp<ExtractorPlugin>>> newList(new std::list<sp<ExtractorPlugin>>());
 
-    android_namespace_t *mediaNs = android_get_exported_namespace("media");
+    android_namespace_t *mediaNs = android_get_exported_namespace("com_android_media");
     if (mediaNs != NULL) {
         const android_dlextinfo dlextinfo = {
             .flags = ANDROID_DLEXT_USE_NAMESPACE,
@@ -305,6 +307,12 @@ void MediaExtractorFactory::UpdateExtractors() {
 #endif
             "/extractors", NULL, *newList);
 
+    RegisterExtractors("/system_ext/lib"
+#ifdef __LP64__
+            "64"
+#endif
+            "/extractors", NULL, *newList);
+
     newList->sort(compareFunc);
     gPlugins = newList;
 
@@ -315,7 +323,7 @@ void MediaExtractorFactory::UpdateExtractors() {
                 if (ext == nullptr) {
                     break;
                 }
-                gSupportedExtensions.insert(std::string(ext));
+                gSupportedExtensions.push_back(std::string(ext));
             }
         }
     }
@@ -324,7 +332,7 @@ void MediaExtractorFactory::UpdateExtractors() {
 }
 
 // static
-std::unordered_set<std::string> MediaExtractorFactory::getSupportedTypes() {
+std::vector<std::string> MediaExtractorFactory::getSupportedTypes() {
     if (getuid() == AID_MEDIA_EX) {
         return gSupportedExtensions;
     }
@@ -333,9 +341,11 @@ std::unordered_set<std::string> MediaExtractorFactory::getSupportedTypes() {
 
     if (binder != 0) {
         sp<IMediaExtractorService> mediaExService(interface_cast<IMediaExtractorService>(binder));
-        return mediaExService->getSupportedTypes();
+        std::vector<std::string> supportedTypes;
+        mediaExService->getSupportedTypes(&supportedTypes);
+        return supportedTypes;
     }
-    return std::unordered_set<std::string>();
+    return std::vector<std::string>();
 }
 
 status_t MediaExtractorFactory::dump(int fd, const Vector<String16>&) {

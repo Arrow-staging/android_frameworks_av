@@ -41,13 +41,16 @@ public:
 
 
     aaudio_result_t open(const AudioStreamBuilder & builder) override;
-    aaudio_result_t close() override;
+    aaudio_result_t release_l() override;
+    void close_l() override;
 
-    aaudio_result_t requestStart() override;
-    aaudio_result_t requestPause() override;
-    aaudio_result_t requestFlush() override;
-    aaudio_result_t requestStop() override;
+protected:
+    aaudio_result_t requestStart_l() REQUIRES(mStreamLock)  override;
+    aaudio_result_t requestPause_l() REQUIRES(mStreamLock) override;
+    aaudio_result_t requestFlush_l() REQUIRES(mStreamLock) override;
+    aaudio_result_t requestStop_l() REQUIRES(mStreamLock) override;
 
+public:
     bool isFlushSupported() const override {
         // Only implement FLUSH for OUTPUT streams.
         return true;
@@ -68,8 +71,6 @@ public:
 
     aaudio_result_t setBufferSize(int32_t requestedFrames) override;
     int32_t getBufferSize() const override;
-    int32_t getBufferCapacity() const override;
-    int32_t getFramesPerBurst()const  override;
     int32_t getXRunCount() const override;
 
     int64_t getFramesRead() override;
@@ -79,9 +80,6 @@ public:
     }
 
     aaudio_result_t updateStateMachine() override;
-
-    // This is public so it can be called from the C callback function.
-    void processCallback(int event, void *info) override;
 
     int64_t incrementClientFrameCounter(int32_t frames) override {
         return incrementFramesWritten(frames);
@@ -94,6 +92,12 @@ public:
             const android::media::VolumeShaper::Configuration& configuration,
             const android::media::VolumeShaper::Operation& operation) override;
 #endif
+
+protected:
+
+    int32_t getFramesPerBurstFromDevice() const override;
+    int32_t getBufferCapacityFromDevice() const override;
+    void onNewIAudioTrack() override;
 
 private:
 

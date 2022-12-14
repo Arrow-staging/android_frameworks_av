@@ -18,18 +18,53 @@
 #define LOG_TAG "CodecBase"
 
 #include <android/hardware/cas/native/1.0/IDescrambler.h>
-#include <media/ICrypto.h>
+#include <android/hardware/drm/1.0/types.h>
+#include <hidlmemory/FrameworkUtils.h>
+#include <mediadrm/ICrypto.h>
 #include <media/stagefright/CodecBase.h>
 #include <utils/Log.h>
 
 namespace android {
 
-void BufferChannelBase::setCrypto(const sp<ICrypto> &crypto) {
-    mCrypto = crypto;
+void BufferChannelBase::IMemoryToSharedBuffer(
+        const sp<IMemory> &memory,
+        int32_t heapSeqNum,
+        hardware::drm::V1_0::SharedBuffer *buf) {
+    ssize_t offset;
+    size_t size;
+
+    sp<hardware::HidlMemory> hidlMemory;
+    hidlMemory = hardware::fromHeap(memory->getMemory(&offset, &size));
+    buf->bufferId = static_cast<uint32_t>(heapSeqNum);
+    buf->offset = offset >= 0 ? offset : 0;
+    buf->size = size;
 }
 
-void BufferChannelBase::setDescrambler(const sp<IDescrambler> &descrambler) {
-    mDescrambler = descrambler;
+status_t CodecBase::querySupportedParameters(std::vector<std::string> *names) {
+    if (names == nullptr) {
+        return BAD_VALUE;
+    }
+    names->clear();
+    return OK;
 }
+
+status_t CodecBase::describeParameter(const std::string &, CodecParameterDescriptor *) {
+    return ERROR_UNSUPPORTED;
+}
+
+status_t CodecBase::subscribeToParameters(const std::vector<std::string> &names) {
+    if (names.empty()) {
+        return OK;
+    }
+    return ERROR_UNSUPPORTED;
+}
+
+status_t CodecBase::unsubscribeFromParameters(const std::vector<std::string> &names) {
+    if (names.empty()) {
+        return OK;
+    }
+    return ERROR_UNSUPPORTED;
+}
+
 
 } // namespace android

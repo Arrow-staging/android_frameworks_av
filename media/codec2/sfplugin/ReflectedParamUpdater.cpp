@@ -125,18 +125,6 @@ void ReflectedParamUpdater::addParamDesc(
         }
         addParamDesc(desc, *structDesc, reflector, true /* markVendor */);
     }
-
-    // TEMP: also add vendor parameters as non-vendor
-    for (const std::shared_ptr<C2ParamDescriptor> &desc : paramDescs) {
-        if (!desc->index().isVendor()) {
-            continue;
-        }
-        std::unique_ptr<C2StructDescriptor> structDesc = reflector->describe(
-                desc->index().coreIndex());
-        if (structDesc) {
-            addParamDesc(desc, *structDesc, reflector, false /* markVendor */);
-        }
-    }
 }
 
 void ReflectedParamUpdater::addParamStructDesc(
@@ -204,6 +192,13 @@ void ReflectedParamUpdater::addParamDesc(
         std::shared_ptr<C2ParamDescriptor> desc, const C2StructDescriptor &structDesc,
         const std::shared_ptr<C2ParamReflector> &reflector, bool markVendor) {
     C2String paramName = desc->name();
+
+    // Do not reflect requested parameters
+    // TODO: split these once aliases are introduced into '.actual' and '.requested' and alias
+    // the name to '.actual'.
+    if (desc->index() & C2Param::CoreIndex::IS_REQUEST_FLAG) {
+        return;
+    }
 
     // prefix vendor parameters
     if (desc->index().isVendor() && markVendor) {
@@ -277,6 +272,34 @@ void ReflectedParamUpdater::getParamIndicesForKeys(
     for (const C2Param::Index &index : indices) {
         vec->push_back(index);
     }
+}
+
+void ReflectedParamUpdater::getKeysForParamIndex(
+        const C2Param::Index &index,
+        std::vector<std::string> *keys /* nonnull */) const {
+    CHECK(keys != nullptr);
+    keys->clear();
+    for (const std::pair<const std::string, FieldDesc> &kv : mMap) {
+        const std::string &name = kv.first;
+        const FieldDesc &desc = kv.second;
+        if (desc.paramDesc->index() == index) {
+            keys->push_back(name);
+        }
+    }
+}
+
+C2FieldDescriptor::type_t ReflectedParamUpdater::getTypeForKey(
+        const std::string &key) const {
+    auto it = mMap.find(key);
+    if (it == mMap.end()) {
+        return C2FieldDescriptor::type_t(~0);
+    }
+
+    if (it->second.fieldDesc) {
+        return it->second.fieldDesc->type();
+    }
+    // whole param is exposed as a blob
+    return C2FieldDescriptor::BLOB;
 }
 
 void ReflectedParamUpdater::updateParamsFromMessage(

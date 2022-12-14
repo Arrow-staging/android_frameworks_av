@@ -66,6 +66,11 @@ enum {
     ENABLE_AUDIO_DEVICE_CALLBACK,
     GET_ACTIVE_MICROPHONES,
     GET_PORT_ID,
+    GET_RTP_DATA_USAGE,
+    SET_PREFERRED_MICROPHONE_DIRECTION,
+    SET_PREFERRED_MICROPHONE_FIELD_DIMENSION,
+    SET_PRIVACY_SENSITIVE,
+    GET_PRIVACY_SENSITIVE
 };
 
 class BpMediaRecorder: public BpInterface<IMediaRecorder>
@@ -147,6 +152,36 @@ public:
         data.writeInt32(as);
         remote()->transact(SET_AUDIO_SOURCE, data, &reply);
         return reply.readInt32();
+    }
+
+    status_t setPrivacySensitive(bool privacySensitive)
+    {
+        ALOGV("%s(%s)", __func__, privacySensitive ? "true" : "false");
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaRecorder::getInterfaceDescriptor());
+        data.writeInt32(privacySensitive ? 1 : 0);
+        status_t status = remote()->transact(SET_PRIVACY_SENSITIVE, data, &reply);
+        if (status != NO_ERROR) {
+            return status;
+        }
+        return reply.readInt32();
+    }
+
+    status_t isPrivacySensitive(bool *privacySensitive) const
+    {
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaRecorder::getInterfaceDescriptor());
+        *privacySensitive = false;
+        status_t status = remote()->transact(GET_PRIVACY_SENSITIVE, data, &reply);
+        if (status != NO_ERROR) {
+            return status;
+        }
+        status = reply.readInt32();
+        if (status == NO_ERROR) {
+            *privacySensitive = reply.readInt32() == 1;
+        }
+        ALOGV("%s status %d enabled: %s", __func__, status, *privacySensitive ? "true" : "false");
+        return status;
     }
 
     status_t setOutputFormat(int of)
@@ -407,6 +442,24 @@ public:
         return status;
     }
 
+    status_t setPreferredMicrophoneDirection(audio_microphone_direction_t direction) {
+        ALOGV("setPreferredMicrophoneDirection(%d)", direction);
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaRecorder::getInterfaceDescriptor());
+        data.writeInt32(direction);
+        status_t status = remote()->transact(SET_PREFERRED_MICROPHONE_DIRECTION, data, &reply);
+        return status == NO_ERROR ? (status_t)reply.readInt32() : status;
+    }
+
+    status_t setPreferredMicrophoneFieldDimension(float zoom) {
+        ALOGV("setPreferredMicrophoneFieldDimension(%f)", zoom);
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaRecorder::getInterfaceDescriptor());
+        data.writeFloat(zoom);
+        status_t status = remote()->transact(SET_PREFERRED_MICROPHONE_FIELD_DIMENSION, data, &reply);
+        return status == NO_ERROR ? (status_t)reply.readInt32() : status;
+    }
+
     status_t getPortId(audio_port_handle_t *portId)
     {
         ALOGV("getPortId");
@@ -423,6 +476,23 @@ public:
         }
         *portId = (audio_port_handle_t)reply.readInt32();
         return NO_ERROR;
+    }
+
+    status_t getRtpDataUsage(uint64_t *bytes)
+    {
+        ALOGV("getRtpDataUsage");
+        if (bytes == nullptr) {
+            return BAD_VALUE;
+        }
+        Parcel data, reply;
+        data.writeInterfaceToken(IMediaRecorder::getInterfaceDescriptor());
+        status_t status = remote()->transact(GET_RTP_DATA_USAGE, data, &reply);
+        if (status != OK
+                || (status = (status_t)reply.readInt32()) != NO_ERROR) {
+            *bytes = 0;
+            return status;
+        }
+        return reply.readUint64(bytes);
     }
 };
 
@@ -515,6 +585,24 @@ status_t BnMediaRecorder::onTransact(
             CHECK_INTERFACE(IMediaRecorder, data, reply);
             int as = data.readInt32();
             reply->writeInt32(setAudioSource(as));
+            return NO_ERROR;
+        } break;
+        case SET_PRIVACY_SENSITIVE: {
+            ALOGV("SET_PRIVACY_SENSITIVE");
+            CHECK_INTERFACE(IMediaRecorder, data, reply);
+            bool privacySensitive = data.readInt32() == 1;
+            reply->writeInt32(setPrivacySensitive(privacySensitive));
+            return NO_ERROR;
+        } break;
+        case GET_PRIVACY_SENSITIVE: {
+            ALOGV("GET_PRIVACY_SENSITIVE");
+            CHECK_INTERFACE(IMediaRecorder, data, reply);
+            bool privacySensitive = false;
+            status_t status = isPrivacySensitive(&privacySensitive);
+            reply->writeInt32(status);
+            if (status == NO_ERROR) {
+                reply->writeInt32(privacySensitive ? 1 : 0);
+            }
             return NO_ERROR;
         } break;
         case SET_OUTPUT_FORMAT: {
@@ -687,6 +775,34 @@ status_t BnMediaRecorder::onTransact(
             if (status == NO_ERROR) {
                 reply->writeInt32(portId);
             }
+            return NO_ERROR;
+        }
+        case GET_RTP_DATA_USAGE: {
+            ALOGV("GET_RTP_DATA_USAGE");
+            CHECK_INTERFACE(IMediaRecorder, data, reply);
+            uint64_t bytes;
+            status_t status = getRtpDataUsage(&bytes);
+            reply->writeInt32(status);
+            if (status == NO_ERROR) {
+                reply->writeUint64(bytes);
+            }
+            return NO_ERROR;
+        }
+        case SET_PREFERRED_MICROPHONE_DIRECTION: {
+            ALOGV("SET_PREFERRED_MICROPHONE_DIRECTION");
+            CHECK_INTERFACE(IMediaRecorder, data, reply);
+            int direction = data.readInt32();
+            status_t status = setPreferredMicrophoneDirection(
+                    static_cast<audio_microphone_direction_t>(direction));
+            reply->writeInt32(status);
+            return NO_ERROR;
+        }
+        case SET_PREFERRED_MICROPHONE_FIELD_DIMENSION: {
+            ALOGV("SET_MICROPHONE_FIELD_DIMENSION");
+            CHECK_INTERFACE(IMediaRecorder, data, reply);
+            float zoom = data.readFloat();
+            status_t status = setPreferredMicrophoneFieldDimension(zoom);
+            reply->writeInt32(status);
             return NO_ERROR;
         }
         default:

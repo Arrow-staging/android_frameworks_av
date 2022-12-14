@@ -30,7 +30,7 @@
 #include <sys/time.h>
 #include <utility>
 #include <json/json.h>
-#include <media/MediaAnalyticsItem.h>
+#include <media/MediaMetricsItem.h>
 #include <media/nblog/Events.h>
 #include <media/nblog/PerformanceAnalysis.h>
 #include <media/nblog/ReportPerformance.h>
@@ -92,8 +92,8 @@ void dumpJson(int fd, const std::map<int, PerformanceData>& threadDataMap)
         (*dataJson)["threadNum"] = item.first;
         root.append(*dataJson);
     }
-    Json::StyledWriter writer;
-    std::string rootStr = writer.write(root);
+    Json::StreamWriterBuilder factory;
+    std::string rootStr = Json::writeString(factory, root);
     write(fd, rootStr.c_str(), rootStr.size());
 }
 
@@ -168,7 +168,7 @@ bool sendToMediaMetrics(const PerformanceData& data)
         return false;
     }
 
-    std::unique_ptr<MediaAnalyticsItem> item(MediaAnalyticsItem::create("audiothread"));
+    std::unique_ptr<mediametrics::Item> item(mediametrics::Item::create("audiothread"));
 
     const Histogram &workHist = data.workHist;
     if (workHist.totalCount() > 0) {

@@ -25,7 +25,7 @@
 #include <binder/IPCThreadState.h>
 #include <binder/Parcel.h>
 #include <binder/PermissionCache.h>
-#include <media/IMediaExtractor.h>
+#include <android/IMediaExtractor.h>
 #include <media/stagefright/MetaData.h>
 
 namespace android {
@@ -38,7 +38,9 @@ enum {
     FLAGS,
     SETMEDIACAS,
     NAME,
-    GETMETRICS
+    GETMETRICS,
+    SETENTRYPOINT,
+    SETLOGSESSIONID
 };
 
 class BpMediaExtractor : public BpInterface<IMediaExtractor> {
@@ -107,8 +109,15 @@ public:
     }
 
     virtual uint32_t flags() const {
-        ALOGV("flags NOT IMPLEMENTED");
-        return 0;
+        ALOGV("flags");
+        Parcel data, reply;
+        data.writeInterfaceToken(BpMediaExtractor::getInterfaceDescriptor());
+        status_t ret = remote()->transact(FLAGS, data, &reply);
+        int flgs = 0;
+        if (ret == NO_ERROR) {
+            flgs = reply.readUint32();
+        }
+        return flgs;
     }
 
     virtual status_t setMediaCas(const HInterfaceToken &casToken) {
@@ -125,9 +134,29 @@ public:
         return reply.readInt32();
     }
 
-    virtual const char * name() {
-        ALOGV("name NOT IMPLEMENTED");
-        return NULL;
+    virtual String8 name() {
+        Parcel data, reply;
+        data.writeInterfaceToken(BpMediaExtractor::getInterfaceDescriptor());
+        status_t ret = remote()->transact(NAME, data, &reply);
+        String8 nm;
+        if (ret == NO_ERROR) {
+            nm = reply.readString8();
+        }
+        return nm;
+    }
+
+    virtual status_t setEntryPoint(EntryPoint entryPoint) {
+        Parcel data, reply;
+        data.writeInterfaceToken(BpMediaExtractor::getInterfaceDescriptor());
+        data.writeInt32(static_cast<int32_t>(entryPoint));
+        return remote()->transact(SETENTRYPOINT, data, &reply);
+    }
+
+    virtual status_t setLogSessionId(const String8& logSessionId) {
+        Parcel data, reply;
+        data.writeInterfaceToken(BpMediaExtractor::getInterfaceDescriptor());
+        data.writeString8(logSessionId);
+        return remote()->transact(SETLOGSESSIONID, data, &reply);
     }
 };
 
@@ -192,6 +221,12 @@ status_t BnMediaExtractor::onTransact(
             status_t ret = getMetrics(reply);
             return ret;
         }
+        case FLAGS: {
+            ALOGV("flags");
+            CHECK_INTERFACE(IMediaExtractor, data, reply);
+            reply->writeUint32(this->flags());
+            return NO_ERROR;
+        }
         case SETMEDIACAS: {
             ALOGV("setMediaCas");
             CHECK_INTERFACE(IMediaExtractor, data, reply);
@@ -205,6 +240,33 @@ status_t BnMediaExtractor::onTransact(
 
             reply->writeInt32(setMediaCas(casToken));
             return OK;
+        }
+        case NAME: {
+            ALOGV("name");
+            CHECK_INTERFACE(IMediaExtractor, data, reply);
+            String8 nm = name();
+            reply->writeString8(nm);
+            return NO_ERROR;
+        }
+        case SETENTRYPOINT: {
+            ALOGV("setEntryPoint");
+            CHECK_INTERFACE(IMediaExtractor, data, reply);
+            int32_t entryPoint;
+            status_t err = data.readInt32(&entryPoint);
+            if (err == OK) {
+                setEntryPoint(EntryPoint(entryPoint));
+            }
+            return err;
+        }
+        case SETLOGSESSIONID: {
+            ALOGV("setLogSessionId");
+            CHECK_INTERFACE(IMediaExtractor, data, reply);
+            String8 logSessionId;
+            status_t status = data.readString8(&logSessionId);
+            if (status == OK) {
+              setLogSessionId(logSessionId);
+            }
+            return status;
         }
         default:
             return BBinder::onTransact(code, data, reply, flags);

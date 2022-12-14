@@ -20,6 +20,7 @@
 
 #include "WAVExtractor.h"
 
+#include <android-base/properties.h>
 #include <android/binder_ibinder.h> // for AIBinder_getCallingUid
 #include <audio_utils/primitives.h>
 #include <media/stagefright/foundation/ADebug.h>
@@ -43,7 +44,8 @@ namespace android {
 // (Note: duplicated with FLACExtractor.cpp)
 static inline bool shouldExtractorOutputFloat(int bitsPerSample)
 {
-    return bitsPerSample > 16 && AIBinder_getCallingUid() == AID_MEDIA;
+    return bitsPerSample > 16 && AIBinder_getCallingUid() == AID_MEDIA
+                              && android::base::GetBoolProperty("media.extractor.float", true);
 }
 
 enum {
@@ -81,7 +83,7 @@ struct WAVSource : public MediaTrackHelper {
     virtual media_status_t read(
             MediaBufferHelper **buffer, const ReadOptions *options = NULL);
 
-    virtual bool supportNonblockingRead() { return true; }
+    bool supportsNonBlockingRead() override { return false; }
 
 protected:
     virtual ~WAVSource();
@@ -93,9 +95,9 @@ private:
     AMediaFormat *mMeta;
     uint16_t mWaveFormat;
     const bool mOutputFloat;
-    int32_t mSampleRate;
-    int32_t mNumChannels;
-    int32_t mBitsPerSample;
+    uint32_t mSampleRate;
+    uint32_t mNumChannels;
+    uint32_t mBitsPerSample;
     off64_t mOffset;
     size_t mSize;
     bool mStarted;
@@ -377,9 +379,9 @@ WAVSource::WAVSource(
       mOffset(offset),
       mSize(size),
       mStarted(false) {
-    CHECK(AMediaFormat_getInt32(mMeta, AMEDIAFORMAT_KEY_SAMPLE_RATE, &mSampleRate));
-    CHECK(AMediaFormat_getInt32(mMeta, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &mNumChannels));
-    CHECK(AMediaFormat_getInt32(mMeta, AMEDIAFORMAT_KEY_BITS_PER_SAMPLE, &mBitsPerSample));
+    CHECK(AMediaFormat_getInt32(mMeta, AMEDIAFORMAT_KEY_SAMPLE_RATE, (int32_t*) &mSampleRate));
+    CHECK(AMediaFormat_getInt32(mMeta, AMEDIAFORMAT_KEY_CHANNEL_COUNT, (int32_t*) &mNumChannels));
+    CHECK(AMediaFormat_getInt32(mMeta, AMEDIAFORMAT_KEY_BITS_PER_SAMPLE, (int32_t*) &mBitsPerSample));
 }
 
 WAVSource::~WAVSource() {
@@ -438,19 +440,22 @@ media_status_t WAVSource::read(
     int64_t seekTimeUs;
     ReadOptions::SeekMode mode;
     if (options != NULL && options->getSeekTo(&seekTimeUs, &mode)) {
-        int64_t pos = 0;
-
+        int64_t pos;
+        int64_t sampleNumber;
+        bool overflowed = __builtin_mul_overflow(seekTimeUs, mSampleRate, &sampleNumber);
+        sampleNumber /= 1000000;
         if (mWaveFormat == WAVE_FORMAT_MSGSM) {
             // 65 bytes decode to 320 8kHz samples
-            int64_t samplenumber = (seekTimeUs * mSampleRate) / 1000000;
-            int64_t framenumber = samplenumber / 320;
-            pos = framenumber * 65;
+            pos = sampleNumber / 320 * 65;
         } else {
-            pos = (seekTimeUs * mSampleRate) / 1000000 * mNumChannels * (mBitsPerSample >> 3);
+            int64_t bytesPerFrame;
+            overflowed |= __builtin_mul_overflow(mNumChannels, mBitsPerSample >> 3, &bytesPerFrame);
+            overflowed |= __builtin_mul_overflow(bytesPerFrame, sampleNumber, &pos);
         }
-        if (pos > (off64_t)mSize) {
-            pos = mSize;
+        if (overflowed) {
+          return AMEDIA_ERROR_MALFORMED;
         }
+        pos = std::clamp(pos, (int64_t) 0, (int64_t) mSize);
         mCurrentPos = pos + mOffset;
     }
 
@@ -461,7 +466,7 @@ media_status_t WAVSource::read(
     }
 
     // maxBytesToRead may be reduced so that in-place data conversion will fit in buffer size.
-    const size_t bufferSize = buffer->size();
+    const size_t bufferSize = std::min(buffer->size(), kMaxFrameSize);
     size_t maxBytesToRead;
     if (mOutputFloat) { // destination is float at 4 bytes per sample, source may be less.
         maxBytesToRead = (mBitsPerSample / 8) * (bufferSize / 4);
@@ -470,7 +475,7 @@ media_status_t WAVSource::read(
     }
 
     const size_t maxBytesAvailable =
-        (mCurrentPos - mOffset >= (off64_t)mSize)
+        (mCurrentPos < mOffset || mCurrentPos - mOffset >= (off64_t)mSize)
             ? 0 : mSize - (mCurrentPos - mOffset);
 
     if (maxBytesToRead > maxBytesAvailable) {
@@ -505,45 +510,40 @@ media_status_t WAVSource::read(
 
     // TODO: add capability to return data as float PCM instead of 16 bit PCM.
     if (mWaveFormat == WAVE_FORMAT_PCM) {
+        const size_t bytesPerFrame = (mBitsPerSample >> 3) * mNumChannels;
+        const size_t numFrames = n / bytesPerFrame;
+        const size_t numSamples = numFrames * mNumChannels;
         if (mOutputFloat) {
             float *fdest = (float *)buffer->data();
+            buffer->set_range(0, 4 * numSamples);
             switch (mBitsPerSample) {
             case 8: {
-                buffer->set_range(0, 4 * n);
-                memcpy_to_float_from_u8(fdest, (const uint8_t *)buffer->data(), n);
+                memcpy_to_float_from_u8(fdest, (const uint8_t *)buffer->data(), numSamples);
             } break;
             case 16: {
-                const size_t numSamples = n / 2;
-                buffer->set_range(0, 4 * numSamples);
                 memcpy_to_float_from_i16(fdest, (const int16_t *)buffer->data(), numSamples);
             } break;
             case 24: {
-                const size_t numSamples = n / 3;
-                buffer->set_range(0, 4 * numSamples);
                 memcpy_to_float_from_p24(fdest, (const uint8_t *)buffer->data(), numSamples);
             } break;
             case 32: { // buffer range is correct
-                const size_t numSamples = n / 4;
                 memcpy_to_float_from_i32(fdest, (const int32_t *)buffer->data(), numSamples);
             } break;
             }
         } else {
             int16_t *idest = (int16_t *)buffer->data();
+            buffer->set_range(0, 2 * numSamples);
             switch (mBitsPerSample) {
             case 8: {
-                buffer->set_range(0, 2 * n);
-                memcpy_to_i16_from_u8(idest, (const uint8_t *)buffer->data(), n);
+                memcpy_to_i16_from_u8(idest, (const uint8_t *)buffer->data(), numSamples);
             } break;
             case 16:
-                break; // no translation needed
+                // no conversion needed
+                break;
             case 24: {
-                const size_t numSamples = n / 3;
-                buffer->set_range(0, 2 * numSamples);
                 memcpy_to_i16_from_p24(idest, (const uint8_t *)buffer->data(), numSamples);
             } break;
             case 32: {
-                const size_t numSamples = n / 4;
-                buffer->set_range(0, 2 * numSamples);
                 memcpy_to_i16_from_i32(idest, (const int32_t *)buffer->data(), numSamples);
             } break;
             }

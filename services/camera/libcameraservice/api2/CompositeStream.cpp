@@ -28,26 +28,28 @@
 namespace android {
 namespace camera3 {
 
-CompositeStream::CompositeStream(wp<CameraDeviceBase> device,
+CompositeStream::CompositeStream(sp<CameraDeviceBase> device,
         wp<hardware::camera2::ICameraDeviceCallbacks> cb) :
         mDevice(device),
         mRemoteCallback(cb),
         mNumPartialResults(1),
         mErrorState(false) {
-    sp<CameraDeviceBase> cameraDevice = device.promote();
-    if (cameraDevice.get() != nullptr) {
-        CameraMetadata staticInfo = cameraDevice->info();
+    if (device != nullptr) {
+        CameraMetadata staticInfo = device->info();
         camera_metadata_entry_t entry = staticInfo.find(ANDROID_REQUEST_PARTIAL_RESULT_COUNT);
         if (entry.count > 0) {
             mNumPartialResults = entry.data.i32[0];
         }
+        mStatusTracker = device->getStatusTracker();
     }
 }
 
 status_t CompositeStream::createStream(const std::vector<sp<Surface>>& consumers,
         bool hasDeferredConsumer, uint32_t width, uint32_t height, int format,
-        camera3_stream_rotation_t rotation, int * id, const String8& physicalCameraId,
-        std::vector<int> * surfaceIds, int streamSetId, bool isShared) {
+        camera_stream_rotation_t rotation, int * id, const String8& physicalCameraId,
+        const std::unordered_set<int32_t> &sensorPixelModesUsed,
+        std::vector<int> * surfaceIds,
+        int streamSetId, bool isShared, bool isMultiResolution) {
     if (hasDeferredConsumer) {
         ALOGE("%s: Deferred consumers not supported in case of composite streams!",
                 __FUNCTION__);
@@ -66,8 +68,14 @@ status_t CompositeStream::createStream(const std::vector<sp<Surface>>& consumers
         return BAD_VALUE;
     }
 
-    return createInternalStreams(consumers, hasDeferredConsumer, width, height, format, rotation, id,
-            physicalCameraId, surfaceIds, streamSetId, isShared);
+    if (isMultiResolution) {
+        ALOGE("%s: Multi-resolution output not supported in case of composite streams!",
+                __FUNCTION__);
+        return BAD_VALUE;
+    }
+
+    return createInternalStreams(consumers, hasDeferredConsumer, width, height, format, rotation,
+            id, physicalCameraId, sensorPixelModesUsed, surfaceIds, streamSetId, isShared);
 }
 
 status_t CompositeStream::deleteStream() {
@@ -174,7 +182,7 @@ bool CompositeStream::onError(int32_t errorCode, const CaptureResultExtras& resu
             ret = onStreamBufferError(resultExtras);
             break;
         case hardware::camera2::ICameraDeviceCallbacks::ERROR_CAMERA_REQUEST:
-            // Invalid request, this shouldn't affect composite streams.
+            onRequestError(resultExtras);
             break;
         default:
             ALOGE("%s: Unrecoverable error: %d detected!", __FUNCTION__, errorCode);
@@ -186,7 +194,7 @@ bool CompositeStream::onError(int32_t errorCode, const CaptureResultExtras& resu
     return ret;
 }
 
-void CompositeStream::notifyError(int64_t frameNumber) {
+void CompositeStream::notifyError(int64_t frameNumber, int32_t requestId) {
     sp<hardware::camera2::ICameraDeviceCallbacks> remoteCb =
         mRemoteCallback.promote();
 
@@ -194,10 +202,16 @@ void CompositeStream::notifyError(int64_t frameNumber) {
         CaptureResultExtras extras;
         extras.errorStreamId = getStreamId();
         extras.frameNumber = frameNumber;
+        extras.requestId = requestId;
         remoteCb->onDeviceError(
                 hardware::camera2::ICameraDeviceCallbacks::ERROR_CAMERA_BUFFER,
                 extras);
     }
+}
+
+void CompositeStream::switchToOffline() {
+    Mutex::Autolock l(mMutex);
+    mDevice.clear();
 }
 
 }; // namespace camera3

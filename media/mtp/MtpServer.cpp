@@ -42,8 +42,10 @@
 #include "MtpServer.h"
 #include "MtpStorage.h"
 #include "MtpStringBuffer.h"
+#include "android-base/strings.h"
 
 namespace android {
+static const int SN_EVENT_LOG_ID = 0x534e4554;
 
 static const MtpOperationCode kSupportedOperationCodes[] = {
     MTP_OPERATION_GET_DEVICE_INFO,
@@ -82,8 +84,8 @@ static const MtpOperationCode kSupportedOperationCodes[] = {
 //    MTP_OPERATION_SET_OBJECT_PROP_LIST,
 //    MTP_OPERATION_GET_INTERDEPENDENT_PROP_DESC,
 //    MTP_OPERATION_SEND_OBJECT_PROP_LIST,
-    MTP_OPERATION_GET_OBJECT_REFERENCES,
-    MTP_OPERATION_SET_OBJECT_REFERENCES,
+//    MTP_OPERATION_GET_OBJECT_REFERENCES,
+//    MTP_OPERATION_SET_OBJECT_REFERENCES,
 //    MTP_OPERATION_SKIP,
     // Android extension for direct file IO
     MTP_OPERATION_GET_PARTIAL_OBJECT_64,
@@ -788,11 +790,40 @@ MtpResponseCode MtpServer::doGetObject() {
     auto start = std::chrono::steady_clock::now();
 
     const char* filePath = (const char *)pathBuf;
-    mtp_file_range  mfr;
-    mfr.fd = open(filePath, O_RDONLY);
-    if (mfr.fd < 0) {
-        return MTP_RESPONSE_GENERAL_ERROR;
+    mtp_file_range mfr;
+    struct stat sstat;
+    uint64_t finalsize;
+    bool transcode = android::base::GetBoolProperty("sys.fuse.transcode_mtp", false);
+    bool filePathAccess = true;
+    ALOGD("Mtp transcode = %d", transcode);
+
+    // For performance reasons, only attempt a ContentResolver open when transcode is required.
+    // This is fine as long as we don't transcode by default on the device. If we suddenly
+    // transcode by default, we'll need to ensure that MTP doesn't transcode by default and we
+    // might need to make a binder call to avoid transcoding or come up with a better strategy.
+    if (transcode) {
+        mfr.fd = mDatabase->openFilePath(filePath, true);
+        fstat(mfr.fd, &sstat);
+        finalsize = sstat.st_size;
+        fileLength = finalsize;
+        if (mfr.fd < 0) {
+            ALOGW("Mtp open via IMtpDatabase failed for %s. Falling back to the original",
+                  filePath);
+            filePathAccess = true;
+        } else {
+            filePathAccess = false;
+        }
     }
+
+    if (filePathAccess) {
+        mfr.fd = open(filePath, O_RDONLY);
+        if (mfr.fd < 0) {
+            return MTP_RESPONSE_GENERAL_ERROR;
+        }
+        fstat(mfr.fd, &sstat);
+        finalsize = sstat.st_size;
+    }
+
     mfr.offset = 0;
     mfr.length = fileLength;
     mfr.command = mRequest.getOperationCode();
@@ -813,9 +844,6 @@ MtpResponseCode MtpServer::doGetObject() {
 
     auto end = std::chrono::steady_clock::now();
     std::chrono::duration<double> diff = end - start;
-    struct stat sstat;
-    fstat(mfr.fd, &sstat);
-    uint64_t finalsize = sstat.st_size;
     ALOGV("Sent a file over MTP. Time: %f s, Size: %" PRIu64 ", Rate: %f bytes/s",
             diff.count(), finalsize, ((double) finalsize) / diff.count());
     closeObjFd(mfr.fd, filePath);
@@ -955,12 +983,28 @@ MtpResponseCode MtpServer::doSendObjectInfo() {
     if (!mData.getString(modified)) return MTP_RESPONSE_INVALID_PARAMETER;     // date modified
     // keywords follow
 
+    int type = storage->getType();
+    if (type == MTP_STORAGE_REMOVABLE_RAM) {
+        std::string str = android::base::Trim((const char*)name);
+        name.set(str.c_str());
+    }
     ALOGV("name: %s format: 0x%04X (%s)\n", (const char*)name, format,
           MtpDebug::getFormatCodeName(format));
     time_t modifiedTime;
     if (!parseDateTime(modified, modifiedTime))
         modifiedTime = 0;
 
+    if ((strcmp(name, ".") == 0) || (strcmp(name, "..") == 0) ||
+        (strchr(name, '/') != NULL)) {
+        char errMsg[80];
+
+        snprintf(errMsg, sizeof(errMsg), "Invalid name: %s", (const char *) name);
+        ALOGE("%s (b/130656917)", errMsg);
+        android_errorWriteWithInfoLog(SN_EVENT_LOG_ID, "130656917", -1, errMsg,
+                                      strlen(errMsg));
+
+        return MTP_RESPONSE_INVALID_PARAMETER;
+    }
     if (path[path.size() - 1] != '/')
         path.append("/");
     path.append(name);

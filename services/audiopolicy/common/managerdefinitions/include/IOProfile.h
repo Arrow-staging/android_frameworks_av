@@ -16,8 +16,10 @@
 
 #pragma once
 
-#include "AudioPort.h"
 #include "DeviceDescriptor.h"
+#include "PolicyAudioPort.h"
+#include "policy.h"
+#include <media/AudioContainers.h>
 #include <utils/String8.h>
 #include <system/audio.h>
 
@@ -30,23 +32,32 @@ class HwModule;
 // It is used by the policy manager to determine if an output or input is suitable for
 // a given use case,  open/close it accordingly and connect/disconnect audio tracks
 // to/from it.
-class IOProfile : public AudioPort
+class IOProfile : public AudioPort, public PolicyAudioPort
 {
 public:
-    IOProfile(const String8 &name, audio_port_role_t role)
+    IOProfile(const std::string &name, audio_port_role_t role)
         : AudioPort(name, AUDIO_PORT_TYPE_MIX, role),
-          maxOpenCount(1),
           curOpenCount(0),
-          maxActiveCount(1),
           curActiveCount(0) {}
 
+    virtual ~IOProfile() = default;
+
     // For a Profile aka MixPort, tag name and name are equivalent.
-    virtual const String8 getTagName() const { return getName(); }
+    virtual const std::string getTagName() const { return getName(); }
+
+    virtual void addAudioProfile(const sp<AudioProfile> &profile) {
+        addAudioProfileAndSort(mProfiles, profile);
+    }
+
+    virtual sp<AudioPort> asAudioPort() const {
+        return static_cast<AudioPort*>(const_cast<IOProfile*>(this));
+    }
 
     // FIXME: this is needed because shared MMAP stream clients use the same audio session.
     // Once capture clients are tracked individually and not per session this can be removed
     // MMAP no IRQ input streams do not have the default limitation of one active client
     // max as they can be used in shared mode by the same application.
+    // NOTE: Please consider moving to AudioPort when addressing the FIXME
     // NOTE: this works for explicit values set in audio_policy_configuration.xml because
     // flags are parsed before maxActiveCount by the serializer.
     void setFlags(uint32_t flags) override
@@ -86,20 +97,30 @@ public:
                              uint32_t flags,
                              bool exactMatchRequiredForInputFlags = false) const;
 
-    void dump(String8 *dst) const;
+    void dump(String8 *dst, int spaces) const;
     void log();
 
     bool hasSupportedDevices() const { return !mSupportedDevices.isEmpty(); }
 
-    bool supportsDeviceTypes(audio_devices_t device) const
+    bool supportsDeviceTypes(const DeviceTypeSet& deviceTypes) const
     {
-        if (audio_is_output_devices(device)) {
-            if (deviceSupportsEncodedFormats(device)) {
-                return mSupportedDevices.types() & device;
-            }
-            return false;
+        const bool areOutputDevices = Intersection(deviceTypes, getAudioDeviceInAllSet()).empty();
+        const bool devicesSupported = !mSupportedDevices.getDevicesFromTypes(deviceTypes).empty();
+        return devicesSupported &&
+               (!areOutputDevices || devicesSupportEncodedFormats(deviceTypes));
+    }
+
+    /**
+     * @brief getTag
+     * @param deviceTypes to be considered
+     * @return tagName of first matching device for the considered types, empty string otherwise.
+     */
+    std::string getTag(const DeviceTypeSet& deviceTypes) const
+    {
+        if (supportsDeviceTypes(deviceTypes)) {
+            return mSupportedDevices.getDevicesFromTypes(deviceTypes).itemAt(0)->getTagName();
         }
-        return mSupportedDevices.types() & (device & ~AUDIO_DEVICE_BIT_IN);
+        return {};
     }
 
     /**
@@ -114,23 +135,27 @@ public:
     bool supportsDevice(const sp<DeviceDescriptor> &device, bool forceCheckOnAddress = false) const
     {
         if (!device_distinguishes_on_address(device->type()) && !forceCheckOnAddress) {
-            return supportsDeviceTypes(device->type());
+            return supportsDeviceTypes(DeviceTypeSet({device->type()}));
         }
         return mSupportedDevices.contains(device);
     }
 
-    bool deviceSupportsEncodedFormats(audio_devices_t device) const
+    bool devicesSupportEncodedFormats(DeviceTypeSet deviceTypes) const
     {
-        if (device == AUDIO_DEVICE_NONE) {
-            return true; // required for isOffloadSupported() check
+        if (deviceTypes.empty()) {
+            return true; // required for getOffloadSupport() check
         }
         DeviceVector deviceList =
-            mSupportedDevices.getDevicesFromTypeMask(device);
-        if (!deviceList.empty()) {
-            return deviceList.itemAt(0)->hasCurrentEncodedFormat();
+            mSupportedDevices.getDevicesFromTypes(deviceTypes);
+        for (const auto& device : deviceList) {
+            if (device->hasCurrentEncodedFormat()) {
+                return true;
+            }
         }
         return false;
     }
+
+    bool containsSingleDeviceSupportingEncodedFormats(const sp<DeviceDescriptor>& device) const;
 
     void clearSupportedDevices() { mSupportedDevices.clear(); }
     void addSupportedDevice(const sp<DeviceDescriptor> &device)
@@ -139,6 +164,12 @@ public:
     }
     void removeSupportedDevice(const sp<DeviceDescriptor> &device)
     {
+        ssize_t ret = mSupportedDevices.indexOf(device);
+        if (ret >= 0 && !mSupportedDevices.itemAt(ret)->isDynamic()) {
+            // devices equality checks only type, address, name and format
+            // Prevents from removing non dynamically added devices
+            return;
+        }
         mSupportedDevices.remove(device);
     }
     void setSupportedDevices(const DeviceVector &devices)
@@ -162,16 +193,8 @@ public:
         return false;
     }
 
-    // Maximum number of input or output streams that can be simultaneously opened for this profile.
-    // By convention 0 means no limit. To respect legacy behavior, initialized to 1 for output
-    // profiles and 0 for input profiles
-    uint32_t     maxOpenCount;
     // Number of streams currently opened for this profile.
     uint32_t     curOpenCount;
-    // Maximum number of input or output streams that can be simultaneously active for this profile.
-    // By convention 0 means no limit. To respect legacy behavior, initialized to 0 for output
-    // profiles and 1 for input profiles
-    uint32_t     maxActiveCount;
     // Number of streams currently active for this profile. This is not the number of active clients
     // (AudioTrack or AudioRecord) but the number of active HAL streams.
     uint32_t     curActiveCount;
@@ -183,13 +206,13 @@ private:
 class InputProfile : public IOProfile
 {
 public:
-    explicit InputProfile(const String8 &name) : IOProfile(name, AUDIO_PORT_ROLE_SINK) {}
+    explicit InputProfile(const std::string &name) : IOProfile(name, AUDIO_PORT_ROLE_SINK) {}
 };
 
 class OutputProfile : public IOProfile
 {
 public:
-    explicit OutputProfile(const String8 &name) : IOProfile(name, AUDIO_PORT_ROLE_SOURCE) {}
+    explicit OutputProfile(const std::string &name) : IOProfile(name, AUDIO_PORT_ROLE_SOURCE) {}
 };
 
 } // namespace android

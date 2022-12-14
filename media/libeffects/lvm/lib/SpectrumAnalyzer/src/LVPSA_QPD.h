@@ -20,57 +20,39 @@
 
 #include "LVM_Types.h"
 
+typedef struct {
+    LVM_INT32* pDelay;  /* pointer to the delayed samples (data of 32 bits)   */
+    LVM_INT32 Coefs[2]; /* pointer to the filter coefficients */
+} QPD_State_t, *pQPD_State_t;
 
-#ifdef __cplusplus
-extern "C" {
-#endif /* __cplusplus */
-
-typedef struct
-{
-  LVM_INT32                            *pDelay;        /* pointer to the delayed samples (data of 32 bits)   */
-  LVM_INT32                            Coefs[2];       /* pointer to the filter coefficients */
-}QPD_State_t, *pQPD_State_t;
-
-#ifdef BUILD_FLOAT
-typedef struct
-{
+typedef struct {
     /* pointer to the delayed samples (data of 32 bits)   */
-    LVM_FLOAT                            *pDelay;
-    LVM_FLOAT                            Coefs[2];       /* pointer to the filter coefficients */
-}QPD_FLOAT_State_t, *pQPD_FLOAT_State_t;
-#endif
+    LVM_FLOAT* pDelay;
+    LVM_FLOAT Coefs[2]; /* pointer to the filter coefficients */
+} QPD_FLOAT_State_t, *pQPD_FLOAT_State_t;
 
-typedef struct
-{
-    LVM_INT32 KP;    /*should store a0*/
-    LVM_INT32 KM;    /*should store b2*/
+typedef struct {
+    LVM_INT32 KP; /*should store a0*/
+    LVM_INT32 KM; /*should store b2*/
 
 } QPD_C32_Coefs, *PQPD_C32_Coefs;
 
-#ifdef BUILD_FLOAT
-typedef struct
-{
-    LVM_FLOAT KP;    /*should store a0*/
-    LVM_FLOAT KM;    /*should store b2*/
+typedef struct {
+    LVM_FLOAT KP; /*should store a0*/
+    LVM_FLOAT KM; /*should store b2*/
 
 } QPD_FLOAT_Coefs, *PQPD_FLOAT_Coefs;
-#endif
 
-
-typedef struct
-{
+typedef struct {
     LVM_INT32 Storage[1];
 
 } QPD_Taps_t, *pQPD_Taps_t;
 
-#ifdef BUILD_FLOAT
-typedef struct
-{
+typedef struct {
     LVM_FLOAT Storage[1];
 
 } QPD_FLOAT_Taps_t, *pQPD_FLOAT_Taps_t;
 
-#endif
 /************************************************************************************/
 /*                                                                                  */
 /* FUNCTION:            LVPSA_QPD_Process                                           */
@@ -84,17 +66,11 @@ typedef struct
 /* RETURNS:             void                                                        */
 /*                                                                                  */
 /************************************************************************************/
-void LVPSA_QPD_Process (            void                               *hInstance,
-                                    LVM_INT16                          *pInSamps,
-                                    LVM_INT16                           numSamples,
-                                    LVM_INT16                           BandIndex);
+void LVPSA_QPD_Process(void* hInstance, LVM_INT16* pInSamps, LVM_INT16 numSamples,
+                       LVM_INT16 BandIndex);
 
-#ifdef BUILD_FLOAT
-void LVPSA_QPD_Process_Float (      void                               *hInstance,
-                                    LVM_FLOAT                          *pInSamps,
-                                    LVM_INT16                           numSamples,
-                                    LVM_INT16                           BandIndex);
-#endif
+void LVPSA_QPD_Process_Float(void* hInstance, LVM_FLOAT* pInSamps, LVM_INT16 numSamples,
+                             LVM_INT16 BandIndex);
 /************************************************************************************/
 /*                                                                                  */
 /* FUNCTION:            LVPSA_QPD_Init                                              */
@@ -110,18 +86,9 @@ void LVPSA_QPD_Process_Float (      void                               *hInstanc
 /* RETURNS:     void                                                                */
 /*                                                                                  */
 /************************************************************************************/
-void LVPSA_QPD_Init (   QPD_State_t       *pInstance,
-                        QPD_Taps_t        *pTaps,
-                        QPD_C32_Coefs     *pCoef     );
-#ifdef BUILD_FLOAT
+void LVPSA_QPD_Init(QPD_State_t* pInstance, QPD_Taps_t* pTaps, QPD_C32_Coefs* pCoef);
 
-void LVPSA_QPD_Init_Float (   QPD_FLOAT_State_t       *pInstance,
-                              QPD_FLOAT_Taps_t        *pTaps,
-                              QPD_FLOAT_Coefs         *pCoef     );
-#endif
-#ifdef __cplusplus
-}
-#endif /* __cplusplus */
+void LVPSA_QPD_Init_Float(QPD_FLOAT_State_t* pInstance, QPD_FLOAT_Taps_t* pTaps,
+                          QPD_FLOAT_Coefs* pCoef);
 
 #endif
-

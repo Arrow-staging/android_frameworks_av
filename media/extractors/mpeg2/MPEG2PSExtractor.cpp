@@ -20,10 +20,6 @@
 
 #include "MPEG2PSExtractor.h"
 
-#include "mpeg2ts/AnotherPacketSource.h"
-#include "mpeg2ts/ESQueue.h"
-
-#include <media/DataSourceBase.h>
 #include <media/stagefright/foundation/ABitReader.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
@@ -34,6 +30,8 @@
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/Utils.h>
+#include <mpeg2ts/AnotherPacketSource.h>
+#include <mpeg2ts/ESQueue.h>
 #include <utils/String8.h>
 
 #include <inttypes.h>
@@ -111,8 +109,10 @@ MPEG2PSExtractor::MPEG2PSExtractor(DataSourceHelper *source)
     AMediaFormat *meta = AMediaFormat_new();
     for (size_t i = mTracks.size(); i > 0;) {
         i--;
-        if (mTracks.valueAt(i)->getFormat(meta) != AMEDIA_OK) {
+        Track *track = mTracks.valueAt(i);
+        if (track->getFormat(meta) != AMEDIA_OK) {
             mTracks.removeItemsAt(i);
+            delete track;
         }
     }
     AMediaFormat_delete(meta);
@@ -122,6 +122,10 @@ MPEG2PSExtractor::MPEG2PSExtractor(DataSourceHelper *source)
 
 MPEG2PSExtractor::~MPEG2PSExtractor() {
     delete mDataSource;
+    for (size_t i = mTracks.size(); i > 0;) {
+        i--;
+        delete mTracks.valueAt(i);
+    }
 }
 
 size_t MPEG2PSExtractor::countTracks() {
@@ -793,7 +797,9 @@ MPEG2PSExtractor::WrappedTrack::~WrappedTrack() {
 }
 
 media_status_t MPEG2PSExtractor::WrappedTrack::start() {
+    delete mTrack->mBufferGroup;
     mTrack->mBufferGroup = mBufferGroup;
+    mBufferGroup = nullptr;
     return mTrack->start();
 }
 

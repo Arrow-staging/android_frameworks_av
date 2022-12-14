@@ -39,51 +39,45 @@
 
 namespace android {
 
+namespace {
+
 #ifdef MPEG4
 constexpr char COMPONENT_NAME[] = "c2.android.mpeg4.encoder";
+const char *MEDIA_MIMETYPE_VIDEO = MEDIA_MIMETYPE_VIDEO_MPEG4;
 #else
 constexpr char COMPONENT_NAME[] = "c2.android.h263.encoder";
+const char *MEDIA_MIMETYPE_VIDEO = MEDIA_MIMETYPE_VIDEO_H263;
 #endif
 
-class C2SoftMpeg4Enc::IntfImpl : public C2InterfaceHelper {
+} // namepsace
+
+class C2SoftMpeg4Enc::IntfImpl : public SimpleInterface<void>::BaseParams {
    public:
-    explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper>& helper)
-        : C2InterfaceHelper(helper) {
+    explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
+        : SimpleInterface<void>::BaseParams(
+                helper,
+                COMPONENT_NAME,
+                C2Component::KIND_ENCODER,
+                C2Component::DOMAIN_VIDEO,
+                MEDIA_MIMETYPE_VIDEO) {
+        noPrivateBuffers(); // TODO: account for our buffers here
+        noInputReferences();
+        noOutputReferences();
+        noInputLatency();
+        noTimeStretch();
         setDerivedInstance(this);
 
         addParameter(
-            DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(
-                    new C2StreamBufferTypeSetting::input(0u, C2BufferData::GRAPHIC))
+                DefineParam(mAttrib, C2_PARAMKEY_COMPONENT_ATTRIBUTES)
+                .withConstValue(new C2ComponentAttributesSetting(
+                    C2Component::ATTRIB_IS_TEMPORAL))
                 .build());
 
         addParameter(
-            DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(
-                    new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
+                DefineParam(mUsage, C2_PARAMKEY_INPUT_STREAM_USAGE)
+                .withConstValue(new C2StreamUsageTuning::input(
+                        0u, (uint64_t)C2MemoryUsage::CPU_READ))
                 .build());
-
-        addParameter(
-            DefineParam(mInputMediaType, C2_PARAMKEY_INPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::input>(
-                    MEDIA_MIMETYPE_VIDEO_RAW))
-                .build());
-
-        addParameter(
-            DefineParam(mOutputMediaType, C2_PARAMKEY_OUTPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::output>(
-#ifdef MPEG4
-                    MEDIA_MIMETYPE_VIDEO_MPEG4
-#else
-                    MEDIA_MIMETYPE_VIDEO_H263
-#endif
-                    ))
-                .build());
-
-        addParameter(DefineParam(mUsage, C2_PARAMKEY_INPUT_STREAM_USAGE)
-                         .withConstValue(new C2StreamUsageTuning::input(
-                             0u, (uint64_t)C2MemoryUsage::CPU_READ))
-                         .build());
 
         addParameter(
             DefineParam(mSize, C2_PARAMKEY_PICTURE_SIZE)
@@ -217,10 +211,6 @@ class C2SoftMpeg4Enc::IntfImpl : public C2InterfaceHelper {
     }
 
    private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
     std::shared_ptr<C2StreamUsageTuning::input> mUsage;
     std::shared_ptr<C2StreamPictureSizeInfo::input> mSize;
     std::shared_ptr<C2StreamFrameRateInfo::output> mFrameRate;
@@ -446,16 +436,32 @@ void C2SoftMpeg4Enc::process(
         }
 
         ++mNumInputFrames;
-        std::unique_ptr<C2StreamInitDataInfo::output> csd =
-            C2StreamInitDataInfo::output::AllocUnique(outputSize, 0u);
-        if (!csd) {
-            ALOGE("CSD allocation failed");
-            mSignalledError = true;
-            work->result = C2_NO_MEMORY;
-            return;
+        if (outputSize) {
+            std::unique_ptr<C2StreamInitDataInfo::output> csd =
+                C2StreamInitDataInfo::output::AllocUnique(outputSize, 0u);
+            if (!csd) {
+                ALOGE("CSD allocation failed");
+                mSignalledError = true;
+                work->result = C2_NO_MEMORY;
+                return;
+            }
+            memcpy(csd->m.value, outPtr, outputSize);
+            work->worklets.front()->output.configUpdate.push_back(std::move(csd));
         }
-        memcpy(csd->m.value, outPtr, outputSize);
-        work->worklets.front()->output.configUpdate.push_back(std::move(csd));
+    }
+
+    // handle dynamic bitrate change
+    {
+        IntfImpl::Lock lock = mIntf->lock();
+        std::shared_ptr<C2StreamBitrateInfo::output> bitrate = mIntf->getBitrate_l();
+        lock.unlock();
+
+        if (bitrate != mBitrate) {
+            mBitrate = bitrate;
+            int layerBitrate[2] = {static_cast<int>(mBitrate->value), 0};
+            ALOGV("Calling PVUpdateBitRate %d", layerBitrate[0]);
+            PVUpdateBitRate(mHandle, layerBitrate);
+        }
     }
 
     std::shared_ptr<const C2GraphicView> rView;
@@ -527,9 +533,11 @@ void C2SoftMpeg4Enc::process(
             if (layout.planes[layout.PLANE_Y].colInc == 1
                     && layout.planes[layout.PLANE_U].colInc == 1
                     && layout.planes[layout.PLANE_V].colInc == 1
+                    && yStride == align(width, 16)
                     && uStride == vStride
                     && yStride == 2 * vStride) {
-                // I420 compatible - planes are already set up above
+                // I420 compatible with yStride being equal to aligned width
+                // planes are already set up above
                 break;
             }
 
@@ -660,11 +668,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftMpeg4EncFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

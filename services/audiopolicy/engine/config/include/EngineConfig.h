@@ -31,9 +31,6 @@ namespace engineConfig {
 /** Default path of audio policy usages configuration file. */
 constexpr char DEFAULT_PATH[] = "/vendor/etc/audio_policy_engine_configuration.xml";
 
-/** Directories where the effect libraries will be search for. */
-constexpr const char* POLICY_USAGE_LIBRARY_PATH[] = {"/odm/etc/", "/vendor/etc/", "/system/etc/"};
-
 using AttributesVector = std::vector<audio_attributes_t>;
 using StreamVector = std::vector<audio_stream_type_t>;
 
@@ -73,7 +70,7 @@ struct ProductStrategy {
 
 using ProductStrategies = std::vector<ProductStrategy>;
 
-using ValuePair = std::pair<uint32_t, std::string>;
+using ValuePair = std::tuple<uint64_t, uint32_t, std::string>;
 using ValuePairs = std::vector<ValuePair>;
 
 struct CriterionType
@@ -114,6 +111,8 @@ struct ParsingResult {
  */
 ParsingResult parse(const char* path = DEFAULT_PATH);
 android::status_t parseLegacyVolumes(VolumeGroups &volumeGroups);
+// Exposed for testing.
+android::status_t parseLegacyVolumeFile(const char* path, VolumeGroups &volumeGroups);
 
 } // namespace engineConfig
 } // namespace android

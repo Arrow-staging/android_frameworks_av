@@ -40,7 +40,6 @@
 
 __BEGIN_DECLS
 
-#if __ANDROID_API__ >= 24
 
 typedef enum acamera_metadata_section {
     ACAMERA_COLOR_CORRECTION,
@@ -73,6 +72,8 @@ typedef enum acamera_metadata_section {
     ACAMERA_DISTORTION_CORRECTION,
     ACAMERA_HEIC,
     ACAMERA_HEIC_INFO,
+    ACAMERA_AUTOMOTIVE,
+    ACAMERA_AUTOMOTIVE_LENS,
     ACAMERA_SECTION_COUNT,
 
     ACAMERA_VENDOR = 0x8000
@@ -116,6 +117,8 @@ typedef enum acamera_metadata_section_start {
                                                                 << 16,
     ACAMERA_HEIC_START             = ACAMERA_HEIC              << 16,
     ACAMERA_HEIC_INFO_START        = ACAMERA_HEIC_INFO         << 16,
+    ACAMERA_AUTOMOTIVE_START       = ACAMERA_AUTOMOTIVE        << 16,
+    ACAMERA_AUTOMOTIVE_LENS_START  = ACAMERA_AUTOMOTIVE_LENS   << 16,
     ACAMERA_VENDOR_START           = ACAMERA_VENDOR            << 16
 } acamera_metadata_section_start_t;
 
@@ -140,7 +143,7 @@ typedef enum acamera_metadata_tag {
      * application controls how the color mapping is performed.</p>
      * <p>We define the expected processing pipeline below. For consistency
      * across devices, this is always the case with TRANSFORM_MATRIX.</p>
-     * <p>When either FULL or HIGH_QUALITY is used, the camera device may
+     * <p>When either FAST or HIGH_QUALITY is used, the camera device may
      * do additional processing but ACAMERA_COLOR_CORRECTION_GAINS and
      * ACAMERA_COLOR_CORRECTION_TRANSFORM will still be provided by the
      * camera device (in the results) and be roughly correct.</p>
@@ -518,15 +521,44 @@ typedef enum acamera_metadata_tag {
      * region and output only the intersection rectangle as the metering region in the result
      * metadata.  If the region is entirely outside the crop region, it will be ignored and
      * not reported in the result metadata.</p>
+     * <p>When setting the AE metering regions, the application must consider the additional
+     * crop resulted from the aspect ratio differences between the preview stream and
+     * ACAMERA_SCALER_CROP_REGION. For example, if the ACAMERA_SCALER_CROP_REGION is the full
+     * active array size with 4:3 aspect ratio, and the preview stream is 16:9,
+     * the boundary of AE regions will be [0, y_crop] and
+     * [active_width, active_height - 2 * y_crop] rather than [0, 0] and
+     * [active_width, active_height], where y_crop is the additional crop due to aspect ratio
+     * mismatch.</p>
+     * <p>Starting from API level 30, the coordinate system of activeArraySize or
+     * preCorrectionActiveArraySize is used to represent post-zoomRatio field of view, not
+     * pre-zoom field of view. This means that the same aeRegions values at different
+     * ACAMERA_CONTROL_ZOOM_RATIO represent different parts of the scene. The aeRegions
+     * coordinates are relative to the activeArray/preCorrectionActiveArray representing the
+     * zoomed field of view. If ACAMERA_CONTROL_ZOOM_RATIO is set to 1.0 (default), the same
+     * aeRegions at different ACAMERA_SCALER_CROP_REGION still represent the same parts of the
+     * scene as they do before. See ACAMERA_CONTROL_ZOOM_RATIO for details. Whether to use
+     * activeArraySize or preCorrectionActiveArraySize still depends on distortion correction
+     * mode.</p>
+     * <p>For camera devices with the
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability,
+     * ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION /
+     * ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION must be used as the
+     * coordinate system for requests where ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
      * <p>The data representation is <code>int[5 * area_count]</code>.
      * Every five elements represent a metering region of <code>(xmin, ymin, xmax, ymax, weight)</code>.
      * The rectangle is defined to be inclusive on xmin and ymin, but exclusive on xmax and
      * ymax.</p>
      *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
      * @see ACAMERA_DISTORTION_CORRECTION_MODE
      * @see ACAMERA_SCALER_CROP_REGION
      * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION
      * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION
+     * @see ACAMERA_SENSOR_PIXEL_MODE
      */
     ACAMERA_CONTROL_AE_REGIONS =                                // int32[5*area_count]
             ACAMERA_CONTROL_START + 4,
@@ -698,15 +730,43 @@ typedef enum acamera_metadata_tag {
      * region and output only the intersection rectangle as the metering region in the result
      * metadata. If the region is entirely outside the crop region, it will be ignored and
      * not reported in the result metadata.</p>
+     * <p>When setting the AF metering regions, the application must consider the additional
+     * crop resulted from the aspect ratio differences between the preview stream and
+     * ACAMERA_SCALER_CROP_REGION. For example, if the ACAMERA_SCALER_CROP_REGION is the full
+     * active array size with 4:3 aspect ratio, and the preview stream is 16:9,
+     * the boundary of AF regions will be [0, y_crop] and
+     * [active_width, active_height - 2 * y_crop] rather than [0, 0] and
+     * [active_width, active_height], where y_crop is the additional crop due to aspect ratio
+     * mismatch.</p>
+     * <p>Starting from API level 30, the coordinate system of activeArraySize or
+     * preCorrectionActiveArraySize is used to represent post-zoomRatio field of view, not
+     * pre-zoom field of view. This means that the same afRegions values at different
+     * ACAMERA_CONTROL_ZOOM_RATIO represent different parts of the scene. The afRegions
+     * coordinates are relative to the activeArray/preCorrectionActiveArray representing the
+     * zoomed field of view. If ACAMERA_CONTROL_ZOOM_RATIO is set to 1.0 (default), the same
+     * afRegions at different ACAMERA_SCALER_CROP_REGION still represent the same parts of the
+     * scene as they do before. See ACAMERA_CONTROL_ZOOM_RATIO for details. Whether to use
+     * activeArraySize or preCorrectionActiveArraySize still depends on distortion correction
+     * mode.</p>
+     * <p>For camera devices with the
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION /
+     * ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION must be used as the
+     * coordinate system for requests where ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
      * <p>The data representation is <code>int[5 * area_count]</code>.
      * Every five elements represent a metering region of <code>(xmin, ymin, xmax, ymax, weight)</code>.
      * The rectangle is defined to be inclusive on xmin and ymin, but exclusive on xmax and
      * ymax.</p>
      *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
      * @see ACAMERA_DISTORTION_CORRECTION_MODE
      * @see ACAMERA_SCALER_CROP_REGION
      * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION
      * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION
+     * @see ACAMERA_SENSOR_PIXEL_MODE
      */
     ACAMERA_CONTROL_AF_REGIONS =                                // int32[5*area_count]
             ACAMERA_CONTROL_START + 8,
@@ -794,11 +854,11 @@ typedef enum acamera_metadata_tag {
      * </ul></p>
      *
      * <p>This control is only effective if ACAMERA_CONTROL_MODE is AUTO.</p>
-     * <p>When set to the ON mode, the camera device's auto-white balance
+     * <p>When set to the AUTO mode, the camera device's auto-white balance
      * routine is enabled, overriding the application's selected
      * ACAMERA_COLOR_CORRECTION_TRANSFORM, ACAMERA_COLOR_CORRECTION_GAINS and
      * ACAMERA_COLOR_CORRECTION_MODE. Note that when ACAMERA_CONTROL_AE_MODE
-     * is OFF, the behavior of AWB is device dependent. It is recommened to
+     * is OFF, the behavior of AWB is device dependent. It is recommended to
      * also set AWB mode to OFF or lock AWB by using ACAMERA_CONTROL_AWB_LOCK before
      * setting AE mode to OFF.</p>
      * <p>When set to the OFF mode, the camera device's auto-white balance
@@ -873,15 +933,43 @@ typedef enum acamera_metadata_tag {
      * region and output only the intersection rectangle as the metering region in the result
      * metadata.  If the region is entirely outside the crop region, it will be ignored and
      * not reported in the result metadata.</p>
+     * <p>When setting the AWB metering regions, the application must consider the additional
+     * crop resulted from the aspect ratio differences between the preview stream and
+     * ACAMERA_SCALER_CROP_REGION. For example, if the ACAMERA_SCALER_CROP_REGION is the full
+     * active array size with 4:3 aspect ratio, and the preview stream is 16:9,
+     * the boundary of AWB regions will be [0, y_crop] and
+     * [active_width, active_height - 2 * y_crop] rather than [0, 0] and
+     * [active_width, active_height], where y_crop is the additional crop due to aspect ratio
+     * mismatch.</p>
+     * <p>Starting from API level 30, the coordinate system of activeArraySize or
+     * preCorrectionActiveArraySize is used to represent post-zoomRatio field of view, not
+     * pre-zoom field of view. This means that the same awbRegions values at different
+     * ACAMERA_CONTROL_ZOOM_RATIO represent different parts of the scene. The awbRegions
+     * coordinates are relative to the activeArray/preCorrectionActiveArray representing the
+     * zoomed field of view. If ACAMERA_CONTROL_ZOOM_RATIO is set to 1.0 (default), the same
+     * awbRegions at different ACAMERA_SCALER_CROP_REGION still represent the same parts of
+     * the scene as they do before. See ACAMERA_CONTROL_ZOOM_RATIO for details. Whether to use
+     * activeArraySize or preCorrectionActiveArraySize still depends on distortion correction
+     * mode.</p>
+     * <p>For camera devices with the
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION /
+     * ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION must be used as the
+     * coordinate system for requests where ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
      * <p>The data representation is <code>int[5 * area_count]</code>.
      * Every five elements represent a metering region of <code>(xmin, ymin, xmax, ymax, weight)</code>.
      * The rectangle is defined to be inclusive on xmin and ymin, but exclusive on xmax and
      * ymax.</p>
      *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
      * @see ACAMERA_DISTORTION_CORRECTION_MODE
      * @see ACAMERA_SCALER_CROP_REGION
      * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION
      * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION
+     * @see ACAMERA_SENSOR_PIXEL_MODE
      */
     ACAMERA_CONTROL_AWB_REGIONS =                               // int32[5*area_count]
             ACAMERA_CONTROL_START + 12,
@@ -901,13 +989,15 @@ typedef enum acamera_metadata_tag {
      *
      * <p>This control (except for MANUAL) is only effective if
      * <code>ACAMERA_CONTROL_MODE != OFF</code> and any 3A routine is active.</p>
-     * <p>All intents are supported by all devices, except that:
-     *   * ZERO_SHUTTER_LAG will be supported if ACAMERA_REQUEST_AVAILABLE_CAPABILITIES contains
-     * PRIVATE_REPROCESSING or YUV_REPROCESSING.
-     *   * MANUAL will be supported if ACAMERA_REQUEST_AVAILABLE_CAPABILITIES contains
-     * MANUAL_SENSOR.
-     *   * MOTION_TRACKING will be supported if ACAMERA_REQUEST_AVAILABLE_CAPABILITIES contains
-     * MOTION_TRACKING.</p>
+     * <p>All intents are supported by all devices, except that:</p>
+     * <ul>
+     * <li>ZERO_SHUTTER_LAG will be supported if ACAMERA_REQUEST_AVAILABLE_CAPABILITIES contains
+     * PRIVATE_REPROCESSING or YUV_REPROCESSING.</li>
+     * <li>MANUAL will be supported if ACAMERA_REQUEST_AVAILABLE_CAPABILITIES contains
+     * MANUAL_SENSOR.</li>
+     * <li>MOTION_TRACKING will be supported if ACAMERA_REQUEST_AVAILABLE_CAPABILITIES contains
+     * MOTION_TRACKING.</li>
+     * </ul>
      *
      * @see ACAMERA_CONTROL_MODE
      * @see ACAMERA_REQUEST_AVAILABLE_CAPABILITIES
@@ -951,10 +1041,10 @@ typedef enum acamera_metadata_tag {
      * capture parameters itself.</p>
      * <p>When set to AUTO, the individual algorithm controls in
      * ACAMERA_CONTROL_* are in effect, such as ACAMERA_CONTROL_AF_MODE.</p>
-     * <p>When set to USE_SCENE_MODE, the individual controls in
+     * <p>When set to USE_SCENE_MODE or USE_EXTENDED_SCENE_MODE, the individual controls in
      * ACAMERA_CONTROL_* are mostly disabled, and the camera device
-     * implements one of the scene mode settings (such as ACTION,
-     * SUNSET, or PARTY) as it wishes. The camera device scene mode
+     * implements one of the scene mode or extended scene mode settings (such as ACTION,
+     * SUNSET, PARTY, or BOKEH) as it wishes. The camera device scene mode
      * 3A settings are provided by {@link ACameraCaptureSession_captureCallback_result capture results}.</p>
      * <p>When set to OFF_KEEP_STATE, it is similar to OFF mode, the only difference
      * is that this frame will not be used by camera device background 3A statistics
@@ -1030,6 +1120,15 @@ typedef enum acamera_metadata_tag {
      * (ACAMERA_LENS_OPTICAL_STABILIZATION_MODE), turning both modes on may
      * produce undesirable interaction, so it is recommended not to enable
      * both at the same time.</p>
+     * <p>If video stabilization is set to "PREVIEW_STABILIZATION",
+     * ACAMERA_LENS_OPTICAL_STABILIZATION_MODE is overridden. The camera sub-system may choose
+     * to turn on hardware based image stabilization in addition to software based stabilization
+     * if it deems that appropriate.
+     * This key may be a part of the available session keys, which camera clients may
+     * query via
+     * {@link ACameraManager_getCameraCharacteristics }.
+     * If this is the case, changing this key over the life-time of a capture session may
+     * cause delays / glitches.</p>
      *
      * @see ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE
      * @see ACAMERA_LENS_OPTICAL_STABILIZATION_MODE
@@ -1126,10 +1225,17 @@ typedef enum acamera_metadata_tag {
      * </ul>
      * <p>For devices at the LIMITED level or above:</p>
      * <ul>
-     * <li>For YUV_420_888 burst capture use case, this list will always include (<code>min</code>, <code>max</code>)
-     * and (<code>max</code>, <code>max</code>) where <code>min</code> &lt;= 15 and <code>max</code> = the maximum output frame rate of the
+     * <li>For devices that advertise NIR color filter arrangement in
+     * ACAMERA_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT, this list will always include
+     * (<code>max</code>, <code>max</code>) where <code>max</code> = the maximum output frame rate of the maximum YUV_420_888
+     * output size.</li>
+     * <li>For devices advertising any color filter arrangement other than NIR, or devices not
+     * advertising color filter arrangement, this list will always include (<code>min</code>, <code>max</code>) and
+     * (<code>max</code>, <code>max</code>) where <code>min</code> &lt;= 15 and <code>max</code> = the maximum output frame rate of the
      * maximum YUV_420_888 output size.</li>
      * </ul>
+     *
+     * @see ACAMERA_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT
      */
     ACAMERA_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES =            // int32[2*n]
             ACAMERA_CONTROL_START + 20,
@@ -1304,7 +1410,7 @@ typedef enum acamera_metadata_tag {
     /**
      * <p>List of the maximum number of regions that can be used for metering in
      * auto-exposure (AE), auto-white balance (AWB), and auto-focus (AF);
-     * this corresponds to the the maximum number of elements in
+     * this corresponds to the maximum number of elements in
      * ACAMERA_CONTROL_AE_REGIONS, ACAMERA_CONTROL_AWB_REGIONS,
      * and ACAMERA_CONTROL_AF_REGIONS.</p>
      *
@@ -1382,7 +1488,7 @@ typedef enum acamera_metadata_tag {
      * Any state (excluding LOCKED) | ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER is START, sequence done | FLASH_REQUIRED | Converged but too dark w/o flash after a precapture sequence, transient states are skipped by camera device.
      * Any state (excluding LOCKED) | ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER is START, sequence done | CONVERGED      | Converged after a precapture sequence, transient states are skipped by camera device.
      * Any state (excluding LOCKED) | ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER is CANCEL, converged    | FLASH_REQUIRED | Converged but too dark w/o flash after a precapture sequence is canceled, transient states are skipped by camera device.
-     * Any state (excluding LOCKED) | ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER is CANCEL, converged    | CONVERGED      | Converged after a precapture sequenceis canceled, transient states are skipped by camera device.
+     * Any state (excluding LOCKED) | ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER is CANCEL, converged    | CONVERGED      | Converged after a precapture sequences canceled, transient states are skipped by camera device.
      * CONVERGED      | Camera device finished AE scan                              | FLASH_REQUIRED | Converged but too dark w/o flash after a new scan, transient states are skipped by camera device.
      * FLASH_REQUIRED | Camera device finished AE scan                              | CONVERGED      | Converged after a new scan, transient states are skipped by camera device.</p>
      *
@@ -1618,7 +1724,7 @@ typedef enum acamera_metadata_tag {
      * </ul></p>
      *
      * <p>Devices support post RAW sensitivity boost  will advertise
-     * ACAMERA_CONTROL_POST_RAW_SENSITIVITY_BOOST key for controling
+     * ACAMERA_CONTROL_POST_RAW_SENSITIVITY_BOOST key for controlling
      * post RAW sensitivity boost.</p>
      * <p>This key will be <code>null</code> for devices that do not support any RAW format
      * outputs. For devices that do support RAW format outputs, this key will always
@@ -1727,6 +1833,217 @@ typedef enum acamera_metadata_tag {
      */
     ACAMERA_CONTROL_AF_SCENE_CHANGE =                           // byte (acamera_metadata_enum_android_control_af_scene_change_t)
             ACAMERA_CONTROL_START + 42,
+    /**
+     * <p>The list of extended scene modes for ACAMERA_CONTROL_EXTENDED_SCENE_MODE that are supported
+     * by this camera device, and each extended scene mode's maximum streaming (non-stall) size
+     * with  effect.</p>
+     *
+     * @see ACAMERA_CONTROL_EXTENDED_SCENE_MODE
+     *
+     * <p>Type: int32[3*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>For DISABLED mode, the camera behaves normally with no extended scene mode enabled.</p>
+     * <p>For BOKEH_STILL_CAPTURE mode, the maximum streaming dimension specifies the limit
+     * under which bokeh is effective when capture intent is PREVIEW. Note that when capture
+     * intent is PREVIEW, the bokeh effect may not be as high in quality compared to
+     * STILL_CAPTURE intent in order to maintain reasonable frame rate. The maximum streaming
+     * dimension must be one of the YUV_420_888 or PRIVATE resolutions in
+     * availableStreamConfigurations, or (0, 0) if preview bokeh is not supported. If the
+     * application configures a stream larger than the maximum streaming dimension, bokeh
+     * effect may not be applied for this stream for PREVIEW intent.</p>
+     * <p>For BOKEH_CONTINUOUS mode, the maximum streaming dimension specifies the limit under
+     * which bokeh is effective. This dimension must be one of the YUV_420_888 or PRIVATE
+     * resolutions in availableStreamConfigurations, and if the sensor maximum resolution is
+     * larger than or equal to 1080p, the maximum streaming dimension must be at least 1080p.
+     * If the application configures a stream with larger dimension, the stream may not have
+     * bokeh effect applied.</p>
+     */
+    ACAMERA_CONTROL_AVAILABLE_EXTENDED_SCENE_MODE_MAX_SIZES =   // int32[3*n]
+            ACAMERA_CONTROL_START + 43,
+    /**
+     * <p>The ranges of supported zoom ratio for non-DISABLED ACAMERA_CONTROL_EXTENDED_SCENE_MODE.</p>
+     *
+     * @see ACAMERA_CONTROL_EXTENDED_SCENE_MODE
+     *
+     * <p>Type: float[2*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>When extended scene mode is set, the camera device may have limited range of zoom ratios
+     * compared to when extended scene mode is DISABLED. This tag lists the zoom ratio ranges
+     * for all supported non-DISABLED extended scene modes, in the same order as in
+     * android.control.availableExtended.</p>
+     * <p>Range [1.0, 1.0] means that no zoom (optical or digital) is supported.</p>
+     */
+    ACAMERA_CONTROL_AVAILABLE_EXTENDED_SCENE_MODE_ZOOM_RATIO_RANGES = 
+                                                                // float[2*n]
+            ACAMERA_CONTROL_START + 44,
+    /**
+     * <p>Whether extended scene mode is enabled for a particular capture request.</p>
+     *
+     * <p>Type: byte (acamera_metadata_enum_android_control_extended_scene_mode_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraCaptureSession_captureCallback_result callbacks</li>
+     *   <li>ACaptureRequest</li>
+     * </ul></p>
+     *
+     * <p>With bokeh mode, the camera device may blur out the parts of scene that are not in
+     * focus, creating a bokeh (or shallow depth of field) effect for people or objects.</p>
+     * <p>When set to BOKEH_STILL_CAPTURE mode with STILL_CAPTURE capture intent, due to the extra
+     * processing needed for high quality bokeh effect, the stall may be longer than when
+     * capture intent is not STILL_CAPTURE.</p>
+     * <p>When set to BOKEH_STILL_CAPTURE mode with PREVIEW capture intent,</p>
+     * <ul>
+     * <li>If the camera device has BURST_CAPTURE capability, the frame rate requirement of
+     * BURST_CAPTURE must still be met.</li>
+     * <li>All streams not larger than the maximum streaming dimension for BOKEH_STILL_CAPTURE mode
+     * (queried via {@link ACAMERA_CONTROL_AVAILABLE_EXTENDED_SCENE_MODE_MAX_SIZES })
+     * will have preview bokeh effect applied.</li>
+     * </ul>
+     * <p>When set to BOKEH_CONTINUOUS mode, configured streams dimension should not exceed this mode's
+     * maximum streaming dimension in order to have bokeh effect applied. Bokeh effect may not
+     * be available for streams larger than the maximum streaming dimension.</p>
+     * <p>Switching between different extended scene modes may involve reconfiguration of the camera
+     * pipeline, resulting in long latency. The application should check this key against the
+     * available session keys queried via
+     * {@link ACameraManager_getCameraCharacteristics }.</p>
+     * <p>For a logical multi-camera, bokeh may be implemented by stereo vision from sub-cameras
+     * with different field of view. As a result, when bokeh mode is enabled, the camera device
+     * may override ACAMERA_SCALER_CROP_REGION or ACAMERA_CONTROL_ZOOM_RATIO, and the field of
+     * view may be smaller than when bokeh mode is off.</p>
+     *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
+     * @see ACAMERA_SCALER_CROP_REGION
+     */
+    ACAMERA_CONTROL_EXTENDED_SCENE_MODE =                       // byte (acamera_metadata_enum_android_control_extended_scene_mode_t)
+            ACAMERA_CONTROL_START + 45,
+    /**
+     * <p>Minimum and maximum zoom ratios supported by this camera device.</p>
+     *
+     * <p>Type: float[2]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>If the camera device supports zoom-out from 1x zoom, minZoom will be less than 1.0, and
+     * setting ACAMERA_CONTROL_ZOOM_RATIO to values less than 1.0 increases the camera's field
+     * of view.</p>
+     *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
+     */
+    ACAMERA_CONTROL_ZOOM_RATIO_RANGE =                          // float[2]
+            ACAMERA_CONTROL_START + 46,
+    /**
+     * <p>The desired zoom ratio</p>
+     *
+     * <p>Type: float</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraCaptureSession_captureCallback_result callbacks</li>
+     *   <li>ACaptureRequest</li>
+     * </ul></p>
+     *
+     * <p>Instead of using ACAMERA_SCALER_CROP_REGION for zoom, the application can now choose to
+     * use this tag to specify the desired zoom level.</p>
+     * <p>By using this control, the application gains a simpler way to control zoom, which can
+     * be a combination of optical and digital zoom. For example, a multi-camera system may
+     * contain more than one lens with different focal lengths, and the user can use optical
+     * zoom by switching between lenses. Using zoomRatio has benefits in the scenarios below:</p>
+     * <ul>
+     * <li>Zooming in from a wide-angle lens to a telephoto lens: A floating-point ratio provides
+     *   better precision compared to an integer value of ACAMERA_SCALER_CROP_REGION.</li>
+     * <li>Zooming out from a wide lens to an ultrawide lens: zoomRatio supports zoom-out whereas
+     *   ACAMERA_SCALER_CROP_REGION doesn't.</li>
+     * </ul>
+     * <p>To illustrate, here are several scenarios of different zoom ratios, crop regions,
+     * and output streams, for a hypothetical camera device with an active array of size
+     * <code>(2000,1500)</code>.</p>
+     * <ul>
+     * <li>Camera Configuration:<ul>
+     * <li>Active array size: <code>2000x1500</code> (3 MP, 4:3 aspect ratio)</li>
+     * <li>Output stream #1: <code>640x480</code> (VGA, 4:3 aspect ratio)</li>
+     * <li>Output stream #2: <code>1280x720</code> (720p, 16:9 aspect ratio)</li>
+     * </ul>
+     * </li>
+     * <li>Case #1: 4:3 crop region with 2.0x zoom ratio<ul>
+     * <li>Zoomed field of view: 1/4 of original field of view</li>
+     * <li>Crop region: <code>Rect(0, 0, 2000, 1500) // (left, top, right, bottom)</code> (post zoom)</li>
+     * </ul>
+     * </li>
+     * <li><img alt="4:3 aspect ratio crop diagram" src="../images/camera2/metadata/android.control.zoomRatio/zoom-ratio-2-crop-43.png" /><ul>
+     * <li><code>640x480</code> stream source area: <code>(0, 0, 2000, 1500)</code> (equal to crop region)</li>
+     * <li><code>1280x720</code> stream source area: <code>(0, 187, 2000, 1312)</code> (letterboxed)</li>
+     * </ul>
+     * </li>
+     * <li>Case #2: 16:9 crop region with 2.0x zoom.<ul>
+     * <li>Zoomed field of view: 1/4 of original field of view</li>
+     * <li>Crop region: <code>Rect(0, 187, 2000, 1312)</code></li>
+     * <li><img alt="16:9 aspect ratio crop diagram" src="../images/camera2/metadata/android.control.zoomRatio/zoom-ratio-2-crop-169.png" /></li>
+     * <li><code>640x480</code> stream source area: <code>(250, 187, 1750, 1312)</code> (pillarboxed)</li>
+     * <li><code>1280x720</code> stream source area: <code>(0, 187, 2000, 1312)</code> (equal to crop region)</li>
+     * </ul>
+     * </li>
+     * <li>Case #3: 1:1 crop region with 0.5x zoom out to ultrawide lens.<ul>
+     * <li>Zoomed field of view: 4x of original field of view (switched from wide lens to ultrawide lens)</li>
+     * <li>Crop region: <code>Rect(250, 0, 1750, 1500)</code></li>
+     * <li><img alt="1:1 aspect ratio crop diagram" src="../images/camera2/metadata/android.control.zoomRatio/zoom-ratio-0.5-crop-11.png" /></li>
+     * <li><code>640x480</code> stream source area: <code>(250, 187, 1750, 1312)</code> (letterboxed)</li>
+     * <li><code>1280x720</code> stream source area: <code>(250, 328, 1750, 1172)</code> (letterboxed)</li>
+     * </ul>
+     * </li>
+     * </ul>
+     * <p>As seen from the graphs above, the coordinate system of cropRegion now changes to the
+     * effective after-zoom field-of-view, and is represented by the rectangle of (0, 0,
+     * activeArrayWith, activeArrayHeight). The same applies to AE/AWB/AF regions, and faces.
+     * This coordinate system change isn't applicable to RAW capture and its related
+     * metadata such as intrinsicCalibration and lensShadingMap.</p>
+     * <p>Using the same hypothetical example above, and assuming output stream #1 (640x480) is
+     * the viewfinder stream, the application can achieve 2.0x zoom in one of two ways:</p>
+     * <ul>
+     * <li>zoomRatio = 2.0, scaler.cropRegion = (0, 0, 2000, 1500)</li>
+     * <li>zoomRatio = 1.0 (default), scaler.cropRegion = (500, 375, 1500, 1125)</li>
+     * </ul>
+     * <p>If the application intends to set aeRegions to be top-left quarter of the viewfinder
+     * field-of-view, the ACAMERA_CONTROL_AE_REGIONS should be set to (0, 0, 1000, 750) with
+     * zoomRatio set to 2.0. Alternatively, the application can set aeRegions to the equivalent
+     * region of (500, 375, 1000, 750) for zoomRatio of 1.0. If the application doesn't
+     * explicitly set ACAMERA_CONTROL_ZOOM_RATIO, its value defaults to 1.0.</p>
+     * <p>One limitation of controlling zoom using zoomRatio is that the ACAMERA_SCALER_CROP_REGION
+     * must only be used for letterboxing or pillarboxing of the sensor active array, and no
+     * FREEFORM cropping can be used with ACAMERA_CONTROL_ZOOM_RATIO other than 1.0. If
+     * ACAMERA_CONTROL_ZOOM_RATIO is not 1.0, and ACAMERA_SCALER_CROP_REGION is set to be
+     * windowboxing, the camera framework will override the ACAMERA_SCALER_CROP_REGION to be
+     * the active array.</p>
+     * <p>In the capture request, if the application sets ACAMERA_CONTROL_ZOOM_RATIO to a
+     * value != 1.0, the ACAMERA_CONTROL_ZOOM_RATIO tag in the capture result reflects the
+     * effective zoom ratio achieved by the camera device, and the ACAMERA_SCALER_CROP_REGION
+     * adjusts for additional crops that are not zoom related. Otherwise, if the application
+     * sets ACAMERA_CONTROL_ZOOM_RATIO to 1.0, or does not set it at all, the
+     * ACAMERA_CONTROL_ZOOM_RATIO tag in the result metadata will also be 1.0.</p>
+     * <p>When the application requests a physical stream for a logical multi-camera, the
+     * ACAMERA_CONTROL_ZOOM_RATIO in the physical camera result metadata will be 1.0, and
+     * the ACAMERA_SCALER_CROP_REGION tag reflects the amount of zoom and crop done by the
+     * physical camera device.</p>
+     *
+     * @see ACAMERA_CONTROL_AE_REGIONS
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
+     * @see ACAMERA_SCALER_CROP_REGION
+     */
+    ACAMERA_CONTROL_ZOOM_RATIO =                                // float
+            ACAMERA_CONTROL_START + 47,
     ACAMERA_CONTROL_END,
 
     /**
@@ -1866,6 +2183,55 @@ typedef enum acamera_metadata_tag {
      */
     ACAMERA_FLASH_INFO_AVAILABLE =                              // byte (acamera_metadata_enum_android_flash_info_available_t)
             ACAMERA_FLASH_INFO_START,
+    /**
+     * <p>Maximum flashlight brightness level.</p>
+     *
+     * <p>Type: int32</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>If this value is greater than 1, then the device supports controlling the
+     * flashlight brightness level via
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraManager.html#turnOnTorchWithStrengthLevel">CameraManager#turnOnTorchWithStrengthLevel</a>.
+     * If this value is equal to 1, flashlight brightness control is not supported.
+     * The value for this key will be null for devices with no flash unit.</p>
+     * <p>The maximum value is guaranteed to be safe to use for an indefinite duration in
+     * terms of device flashlight lifespan, but may be too bright for comfort for many
+     * use cases. Use the default torch brightness value to avoid problems with an
+     * over-bright flashlight.</p>
+     */
+    ACAMERA_FLASH_INFO_STRENGTH_MAXIMUM_LEVEL =                 // int32
+            ACAMERA_FLASH_INFO_START + 2,
+    /**
+     * <p>Default flashlight brightness level to be set via
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraManager.html#turnOnTorchWithStrengthLevel">CameraManager#turnOnTorchWithStrengthLevel</a>.</p>
+     *
+     * <p>Type: int32</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>If flash unit is available this will be greater than or equal to 1 and less
+     * or equal to <code>ACAMERA_FLASH_INFO_STRENGTH_MAXIMUM_LEVEL</code>.</p>
+     * <p>Setting flashlight brightness above the default level
+     * (i.e.<code>ACAMERA_FLASH_INFO_STRENGTH_DEFAULT_LEVEL</code>) may make the device more
+     * likely to reach thermal throttling conditions and slow down, or drain the
+     * battery quicker than normal. To minimize such issues, it is recommended to
+     * start the flashlight at this default brightness until a user explicitly requests
+     * a brighter level.
+     * Note that the value for this key will be null for devices with no flash unit.
+     * The default level should always be &gt; 0.</p>
+     *
+     * @see ACAMERA_FLASH_INFO_STRENGTH_DEFAULT_LEVEL
+     * @see ACAMERA_FLASH_INFO_STRENGTH_MAXIMUM_LEVEL
+     */
+    ACAMERA_FLASH_INFO_STRENGTH_DEFAULT_LEVEL =                 // int32
+            ACAMERA_FLASH_INFO_START + 3,
     ACAMERA_FLASH_INFO_END,
 
     /**
@@ -2063,7 +2429,7 @@ typedef enum acamera_metadata_tag {
      *   and keep jpeg and thumbnail image data unrotated.</li>
      * <li>Rotate the jpeg and thumbnail image data and not set
      *   <a href="https://developer.android.com/reference/android/media/ExifInterface.html#TAG_ORIENTATION">EXIF orientation flag</a>. In this
-     *   case, LIMITED or FULL hardware level devices will report rotated thumnail size in
+     *   case, LIMITED or FULL hardware level devices will report rotated thumbnail size in
      *   capture result, so the width and height will be interchanged if 90 or 270 degree
      *   orientation is requested. LEGACY device will always report unrotated thumbnail
      *   size.</li>
@@ -2092,7 +2458,7 @@ typedef enum acamera_metadata_tag {
      *
      * <p>This list will include at least one non-zero resolution, plus <code>(0,0)</code> for indicating no
      * thumbnail should be generated.</p>
-     * <p>Below condiditions will be satisfied for this size list:</p>
+     * <p>Below conditions will be satisfied for this size list:</p>
      * <ul>
      * <li>The sizes will be sorted by increasing pixel area (width x height).
      * If several resolutions have the same area, they will be sorted by increasing width.</li>
@@ -2195,8 +2561,11 @@ typedef enum acamera_metadata_tag {
      * frames before the lens can change to the requested focal length.
      * While the focal length is still changing, ACAMERA_LENS_STATE will
      * be set to MOVING.</p>
-     * <p>Optical zoom will not be supported on most devices.</p>
+     * <p>Optical zoom via this control will not be supported on most devices. Starting from API
+     * level 30, the camera device may combine optical and digital zoom through the
+     * ACAMERA_CONTROL_ZOOM_RATIO control.</p>
      *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
      * @see ACAMERA_LENS_APERTURE
      * @see ACAMERA_LENS_FOCUS_DISTANCE
      * @see ACAMERA_LENS_STATE
@@ -2245,12 +2614,18 @@ typedef enum acamera_metadata_tag {
      * <p>If a camera device supports both OIS and digital image stabilization
      * (ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE), turning both modes on may produce undesirable
      * interaction, so it is recommended not to enable both at the same time.</p>
+     * <p>If ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE is set to "PREVIEW_STABILIZATION",
+     * ACAMERA_LENS_OPTICAL_STABILIZATION_MODE is overridden. The camera sub-system may choose
+     * to turn on hardware based image stabilization in addition to software based stabilization
+     * if it deems that appropriate. This key's value in the capture result will reflect which
+     * OIS mode was chosen.</p>
      * <p>Not all devices will support OIS; see
      * ACAMERA_LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION for
      * available controls.</p>
      *
      * @see ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE
      * @see ACAMERA_LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION
+     * @see ACAMERA_LENS_OPTICAL_STABILIZATION_MODE
      */
     ACAMERA_LENS_OPTICAL_STABILIZATION_MODE =                   // byte (acamera_metadata_enum_android_lens_optical_stabilization_mode_t)
             ACAMERA_LENS_START + 4,
@@ -2306,6 +2681,11 @@ typedef enum acamera_metadata_tag {
      * <p><code>p' = Rp</code></p>
      * <p>where <code>p</code> is in the device sensor coordinate system, and
      *  <code>p'</code> is in the camera-oriented coordinate system.</p>
+     * <p>If ACAMERA_LENS_POSE_REFERENCE is UNDEFINED, the quaternion rotation cannot
+     *  be accurately represented by the camera device, and will be represented by
+     *  default values matching its default facing.</p>
+     *
+     * @see ACAMERA_LENS_POSE_REFERENCE
      */
     ACAMERA_LENS_POSE_ROTATION =                                // float[4]
             ACAMERA_LENS_START + 6,
@@ -2346,6 +2726,11 @@ typedef enum acamera_metadata_tag {
      * <p>When ACAMERA_LENS_POSE_REFERENCE is GYROSCOPE, then this position is relative to
      * the center of the primary gyroscope on the device. The axis definitions are the same as
      * with PRIMARY_CAMERA.</p>
+     * <p>When ACAMERA_LENS_POSE_REFERENCE is UNDEFINED, this position cannot be accurately
+     * represented by the camera device, and will be represented as <code>(0, 0, 0)</code>.</p>
+     * <p>When ACAMERA_LENS_POSE_REFERENCE is AUTOMOTIVE, then this position is relative to the
+     * origin of the automotive sensor coordinate system, which is at the center of the rear
+     * axle.</p>
      *
      * @see ACAMERA_LENS_DISTORTION
      * @see ACAMERA_LENS_INTRINSIC_CALIBRATION
@@ -2387,7 +2772,7 @@ typedef enum acamera_metadata_tag {
      * <p>When the state is STATIONARY, the lens parameters are not changing. This could be
      * either because the parameters are all fixed, or because the lens has had enough
      * time to reach the most recently-requested values.
-     * If all these lens parameters are not changable for a camera device, as listed below:</p>
+     * If all these lens parameters are not changeable for a camera device, as listed below:</p>
      * <ul>
      * <li>Fixed focus (<code>ACAMERA_LENS_INFO_MINIMUM_FOCUS_DISTANCE == 0</code>), which means
      * ACAMERA_LENS_FOCUS_DISTANCE parameter will always be 0.</li>
@@ -2488,8 +2873,10 @@ typedef enum acamera_metadata_tag {
     ACAMERA_LENS_RADIAL_DISTORTION =                            // Deprecated! DO NOT USE
             ACAMERA_LENS_START + 11,
     /**
-     * <p>The origin for ACAMERA_LENS_POSE_TRANSLATION.</p>
+     * <p>The origin for ACAMERA_LENS_POSE_TRANSLATION, and the accuracy of
+     * ACAMERA_LENS_POSE_TRANSLATION and ACAMERA_LENS_POSE_ROTATION.</p>
      *
+     * @see ACAMERA_LENS_POSE_ROTATION
      * @see ACAMERA_LENS_POSE_TRANSLATION
      *
      * <p>Type: byte (acamera_metadata_enum_android_lens_pose_reference_t)</p>
@@ -2549,6 +2936,51 @@ typedef enum acamera_metadata_tag {
      */
     ACAMERA_LENS_DISTORTION =                                   // float[5]
             ACAMERA_LENS_START + 13,
+    /**
+     * <p>The correction coefficients to correct for this camera device's
+     * radial and tangential lens distortion for a
+     * CaptureRequest with ACAMERA_SENSOR_PIXEL_MODE set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: float[5]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_LENS_DISTORTION, when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_LENS_DISTORTION
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_LENS_DISTORTION_MAXIMUM_RESOLUTION =                // float[5]
+            ACAMERA_LENS_START + 14,
+    /**
+     * <p>The parameters for this camera device's intrinsic
+     * calibration when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: float[5]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_LENS_INTRINSIC_CALIBRATION, when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_LENS_INTRINSIC_CALIBRATION
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_LENS_INTRINSIC_CALIBRATION_MAXIMUM_RESOLUTION =     // float[5]
+            ACAMERA_LENS_START + 15,
     ACAMERA_LENS_END,
 
     /**
@@ -2792,7 +3224,7 @@ typedef enum acamera_metadata_tag {
      * the camera device. Using more streams simultaneously may require more hardware and
      * CPU resources that will consume more power. The image format for an output stream can
      * be any supported format provided by ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS.
-     * The formats defined in ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS can be catergorized
+     * The formats defined in ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS can be categorized
      * into the 3 stream types as below:</p>
      * <ul>
      * <li>Processed (but stalling): any non-RAW format with a stallDurations &gt; 0.
@@ -3019,7 +3451,7 @@ typedef enum acamera_metadata_tag {
      * but clients should be aware and expect delays during their application.
      * An example usage scenario could look like this:</p>
      * <ul>
-     * <li>The camera client starts by quering the session parameter key list via
+     * <li>The camera client starts by querying the session parameter key list via
      *   {@link ACameraManager_getCameraCharacteristics }.</li>
      * <li>Before triggering the capture session create sequence, a capture request
      *   must be built via
@@ -3046,6 +3478,48 @@ typedef enum acamera_metadata_tag {
      */
     ACAMERA_REQUEST_AVAILABLE_SESSION_KEYS =                    // int32[n]
             ACAMERA_REQUEST_START + 16,
+    /**
+     * <p>A subset of the available request keys that can be overridden for
+     * physical devices backing a logical multi-camera.</p>
+     *
+     * <p>Type: int32[n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>This is a subset of ACAMERA_REQUEST_AVAILABLE_REQUEST_KEYS which contains a list
+     * of keys that can be overridden using
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CaptureRequest.Builder.html#setPhysicalCameraKey">Builder#setPhysicalCameraKey</a>.
+     * The respective value of such request key can be obtained by calling
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CaptureRequest.Builder.html#getPhysicalCameraKey">Builder#getPhysicalCameraKey</a>.
+     * Capture requests that contain individual physical device requests must be built via
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraDevice.html#createCaptureRequest(int,">Set)</a>.</p>
+     *
+     * @see ACAMERA_REQUEST_AVAILABLE_REQUEST_KEYS
+     */
+    ACAMERA_REQUEST_AVAILABLE_PHYSICAL_CAMERA_REQUEST_KEYS =    // int32[n]
+            ACAMERA_REQUEST_START + 17,
+    /**
+     * <p>A map of all available 10-bit dynamic range profiles along with their
+     * capture request constraints.</p>
+     *
+     * <p>Type: int64[n*3] (acamera_metadata_enum_android_request_available_dynamic_range_profiles_map_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Devices supporting the 10-bit output capability
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraCharacteristics.html#REQUEST_AVAILABLE_CAPABILITIES_DYNAMIC_RANGE_TEN_BIT">CameraCharacteristics#REQUEST_AVAILABLE_CAPABILITIES_DYNAMIC_RANGE_TEN_BIT</a>
+     * must list their supported dynamic range profiles. In case the camera is not able to
+     * support every possible profile combination within a single capture request, then the
+     * constraints must be listed here as well.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP =      // int64[n*3] (acamera_metadata_enum_android_request_available_dynamic_range_profiles_map_t)
+            ACAMERA_REQUEST_START + 19,
     ACAMERA_REQUEST_END,
 
     /**
@@ -3063,32 +3537,70 @@ typedef enum acamera_metadata_tag {
      * <p>For devices not supporting ACAMERA_DISTORTION_CORRECTION_MODE control, the coordinate
      * system always follows that of ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, with <code>(0, 0)</code> being
      * the top-left pixel of the active array.</p>
-     * <p>For devices supporting ACAMERA_DISTORTION_CORRECTION_MODE control, the coordinate
-     * system depends on the mode being set.
-     * When the distortion correction mode is OFF, the coordinate system follows
-     * ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE, with
-     * <code>(0, 0)</code> being the top-left pixel of the pre-correction active array.
-     * When the distortion correction mode is not OFF, the coordinate system follows
-     * ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, with
-     * <code>(0, 0)</code> being the top-left pixel of the active array.</p>
-     * <p>Output streams use this rectangle to produce their output,
-     * cropping to a smaller region if necessary to maintain the
-     * stream's aspect ratio, then scaling the sensor input to
+     * <p>For devices supporting ACAMERA_DISTORTION_CORRECTION_MODE control, the coordinate system
+     * depends on the mode being set.  When the distortion correction mode is OFF, the
+     * coordinate system follows ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE, with <code>(0,
+     * 0)</code> being the top-left pixel of the pre-correction active array.  When the distortion
+     * correction mode is not OFF, the coordinate system follows
+     * ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, with <code>(0, 0)</code> being the top-left pixel of the
+     * active array.</p>
+     * <p>Output streams use this rectangle to produce their output, cropping to a smaller region
+     * if necessary to maintain the stream's aspect ratio, then scaling the sensor input to
      * match the output's configured resolution.</p>
-     * <p>The crop region is applied after the RAW to other color
-     * space (e.g. YUV) conversion. Since raw streams
-     * (e.g. RAW16) don't have the conversion stage, they are not
+     * <p>The crop region is applied after the RAW to other color space (e.g. YUV)
+     * conversion. Since raw streams (e.g. RAW16) don't have the conversion stage, they are not
      * croppable. The crop region will be ignored by raw streams.</p>
-     * <p>For non-raw streams, any additional per-stream cropping will
-     * be done to maximize the final pixel area of the stream.</p>
-     * <p>For example, if the crop region is set to a 4:3 aspect
-     * ratio, then 4:3 streams will use the exact crop
-     * region. 16:9 streams will further crop vertically
-     * (letterbox).</p>
-     * <p>Conversely, if the crop region is set to a 16:9, then 4:3
-     * outputs will crop horizontally (pillarbox), and 16:9
-     * streams will match exactly. These additional crops will
-     * be centered within the crop region.</p>
+     * <p>For non-raw streams, any additional per-stream cropping will be done to maximize the
+     * final pixel area of the stream.</p>
+     * <p>For example, if the crop region is set to a 4:3 aspect ratio, then 4:3 streams will use
+     * the exact crop region. 16:9 streams will further crop vertically (letterbox).</p>
+     * <p>Conversely, if the crop region is set to a 16:9, then 4:3 outputs will crop horizontally
+     * (pillarbox), and 16:9 streams will match exactly. These additional crops will be
+     * centered within the crop region.</p>
+     * <p>To illustrate, here are several scenarios of different crop regions and output streams,
+     * for a hypothetical camera device with an active array of size <code>(2000,1500)</code>.  Note that
+     * several of these examples use non-centered crop regions for ease of illustration; such
+     * regions are only supported on devices with FREEFORM capability
+     * (ACAMERA_SCALER_CROPPING_TYPE <code>== FREEFORM</code>), but this does not affect the way the crop
+     * rules work otherwise.</p>
+     * <ul>
+     * <li>Camera Configuration:<ul>
+     * <li>Active array size: <code>2000x1500</code> (3 MP, 4:3 aspect ratio)</li>
+     * <li>Output stream #1: <code>640x480</code> (VGA, 4:3 aspect ratio)</li>
+     * <li>Output stream #2: <code>1280x720</code> (720p, 16:9 aspect ratio)</li>
+     * </ul>
+     * </li>
+     * <li>Case #1: 4:3 crop region with 2x digital zoom<ul>
+     * <li>Crop region: <code>Rect(500, 375, 1500, 1125) // (left, top, right, bottom)</code></li>
+     * <li><img alt="4:3 aspect ratio crop diagram" src="../images/camera2/metadata/android.scaler.cropRegion/crop-region-43-ratio.png" /></li>
+     * <li><code>640x480</code> stream source area: <code>(500, 375, 1500, 1125)</code> (equal to crop region)</li>
+     * <li><code>1280x720</code> stream source area: <code>(500, 469, 1500, 1031)</code> (letterboxed)</li>
+     * </ul>
+     * </li>
+     * <li>Case #2: 16:9 crop region with ~1.5x digital zoom.<ul>
+     * <li>Crop region: <code>Rect(500, 375, 1833, 1125)</code></li>
+     * <li><img alt="16:9 aspect ratio crop diagram" src="../images/camera2/metadata/android.scaler.cropRegion/crop-region-169-ratio.png" /></li>
+     * <li><code>640x480</code> stream source area: <code>(666, 375, 1666, 1125)</code> (pillarboxed)</li>
+     * <li><code>1280x720</code> stream source area: <code>(500, 375, 1833, 1125)</code> (equal to crop region)</li>
+     * </ul>
+     * </li>
+     * <li>Case #3: 1:1 crop region with ~2.6x digital zoom.<ul>
+     * <li>Crop region: <code>Rect(500, 375, 1250, 1125)</code></li>
+     * <li><img alt="1:1 aspect ratio crop diagram" src="../images/camera2/metadata/android.scaler.cropRegion/crop-region-11-ratio.png" /></li>
+     * <li><code>640x480</code> stream source area: <code>(500, 469, 1250, 1031)</code> (letterboxed)</li>
+     * <li><code>1280x720</code> stream source area: <code>(500, 543, 1250, 957)</code> (letterboxed)</li>
+     * </ul>
+     * </li>
+     * <li>Case #4: Replace <code>640x480</code> stream with <code>1024x1024</code> stream, with 4:3 crop region:<ul>
+     * <li>Crop region: <code>Rect(500, 375, 1500, 1125)</code></li>
+     * <li><img alt="Square output, 4:3 aspect ratio crop diagram" src="../images/camera2/metadata/android.scaler.cropRegion/crop-region-43-square-ratio.png" /></li>
+     * <li><code>1024x1024</code> stream source area: <code>(625, 375, 1375, 1125)</code> (pillarboxed)</li>
+     * <li><code>1280x720</code> stream source area: <code>(500, 469, 1500, 1031)</code> (letterboxed)</li>
+     * <li>Note that in this case, neither of the two outputs is a subset of the other, with
+     *   each containing image data the other doesn't have.</li>
+     * </ul>
+     * </li>
+     * </ul>
      * <p>If the coordinate system is ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, the width and height
      * of the crop region cannot be set to be smaller than
      * <code>floor( activeArraySize.width / ACAMERA_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM )</code> and
@@ -3099,16 +3611,41 @@ typedef enum acamera_metadata_tag {
      * and
      * <code>floor( preCorrectionActiveArraySize.height / ACAMERA_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM )</code>,
      * respectively.</p>
-     * <p>The camera device may adjust the crop region to account
-     * for rounding and other hardware requirements; the final
-     * crop region used will be included in the output capture
-     * result.</p>
+     * <p>The camera device may adjust the crop region to account for rounding and other hardware
+     * requirements; the final crop region used will be included in the output capture result.</p>
+     * <p>The camera sensor output aspect ratio depends on factors such as output stream
+     * combination and ACAMERA_CONTROL_AE_TARGET_FPS_RANGE, and shouldn't be adjusted by using
+     * this control. And the camera device will treat different camera sensor output sizes
+     * (potentially with in-sensor crop) as the same crop of
+     * ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE. As a result, the application shouldn't assume the
+     * maximum crop region always maps to the same aspect ratio or field of view for the
+     * sensor output.</p>
+     * <p>Starting from API level 30, it's strongly recommended to use ACAMERA_CONTROL_ZOOM_RATIO
+     * to take advantage of better support for zoom with logical multi-camera. The benefits
+     * include better precision with optical-digital zoom combination, and ability to do
+     * zoom-out from 1.0x. When using ACAMERA_CONTROL_ZOOM_RATIO for zoom, the crop region in
+     * the capture request should be left as the default activeArray size. The
+     * coordinate system is post-zoom, meaning that the activeArraySize or
+     * preCorrectionActiveArraySize covers the camera device's field of view "after" zoom.  See
+     * ACAMERA_CONTROL_ZOOM_RATIO for details.</p>
+     * <p>For camera devices with the
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION /
+     * ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION must be used as the
+     * coordinate system for requests where ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
      * <p>The data representation is int[4], which maps to (left, top, width, height).</p>
      *
+     * @see ACAMERA_CONTROL_AE_TARGET_FPS_RANGE
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
      * @see ACAMERA_DISTORTION_CORRECTION_MODE
      * @see ACAMERA_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM
+     * @see ACAMERA_SCALER_CROPPING_TYPE
      * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION
      * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION
+     * @see ACAMERA_SENSOR_PIXEL_MODE
      */
     ACAMERA_SCALER_CROP_REGION =                                // int32[4]
             ACAMERA_SCALER_START,
@@ -3132,6 +3669,12 @@ typedef enum acamera_metadata_tag {
      * <p>Crop regions that have a width or height that is smaller
      * than this ratio allows will be rounded up to the minimum
      * allowed size by the camera device.</p>
+     * <p>Starting from API level 30, when using ACAMERA_CONTROL_ZOOM_RATIO to zoom in or out,
+     * the application must use ACAMERA_CONTROL_ZOOM_RATIO_RANGE to query both the minimum and
+     * maximum zoom ratio.</p>
+     *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
+     * @see ACAMERA_CONTROL_ZOOM_RATIO_RANGE
      */
     ACAMERA_SCALER_AVAILABLE_MAX_DIGITAL_ZOOM =                 // float
             ACAMERA_SCALER_START + 4,
@@ -3160,8 +3703,8 @@ typedef enum acamera_metadata_tag {
      * <p>Not all output formats may be supported in a configuration with
      * an input stream of a particular format. For more details, see
      * android.scaler.availableInputOutputFormatsMap.</p>
-     * <p>The following table describes the minimum required output stream
-     * configurations based on the hardware level
+     * <p>For applications targeting SDK version older than 31, the following table
+     * describes the minimum required output stream configurations based on the hardware level
      * (ACAMERA_INFO_SUPPORTED_HARDWARE_LEVEL):</p>
      * <p>Format         | Size                                         | Hardware Level | Notes
      * :-------------:|:--------------------------------------------:|:--------------:|:--------------:
@@ -3173,8 +3716,39 @@ typedef enum acamera_metadata_tag {
      * YUV_420_888    | all output sizes available for JPEG          | FULL           |
      * YUV_420_888    | all output sizes available for JPEG, up to the maximum video size | LIMITED        |
      * IMPLEMENTATION_DEFINED | same as YUV_420_888                  | Any            |</p>
+     * <p>For applications targeting SDK version 31 or newer, if the mobile device declares to be
+     * media performance class 12 or higher by setting
+     * <a href="https://developer.android.com/reference/android/os/Build.VERSION.html#MEDIA_PERFORMANCE_CLASS">VERSION#MEDIA_PERFORMANCE_CLASS</a> to be 31 or larger,
+     * the primary camera devices (first rear/front camera in the camera ID list) will not
+     * support JPEG sizes smaller than 1080p. If the application configures a JPEG stream
+     * smaller than 1080p, the camera device will round up the JPEG image size to at least
+     * 1080p. The requirements for IMPLEMENTATION_DEFINED and YUV_420_888 stay the same.
+     * This new minimum required output stream configurations are illustrated by the table below:</p>
+     * <p>Format         | Size                                         | Hardware Level | Notes
+     * :-------------:|:--------------------------------------------:|:--------------:|:--------------:
+     * JPEG           | ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE          | Any            |
+     * JPEG           | 1920x1080 (1080p)                            | Any            | if 1080p &lt;= activeArraySize
+     * YUV_420_888    | ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE          | FULL           |
+     * YUV_420_888    | 1920x1080 (1080p)                            | FULL           | if 1080p &lt;= activeArraySize
+     * YUV_420_888    | 1280x720 (720)                               | FULL           | if 720p &lt;= activeArraySize
+     * YUV_420_888    | 640x480 (480p)                               | FULL           | if 480p &lt;= activeArraySize
+     * YUV_420_888    | 320x240 (240p)                               | FULL           | if 240p &lt;= activeArraySize
+     * YUV_420_888    | all output sizes available for FULL hardware level, up to the maximum video size | LIMITED        |
+     * IMPLEMENTATION_DEFINED | same as YUV_420_888                  | Any            |</p>
+     * <p>For applications targeting SDK version 31 or newer, if the mobile device doesn't declare
+     * to be media performance class 12 or better by setting
+     * <a href="https://developer.android.com/reference/android/os/Build.VERSION.html#MEDIA_PERFORMANCE_CLASS">VERSION#MEDIA_PERFORMANCE_CLASS</a> to be 31 or larger,
+     * or if the camera device isn't a primary rear/front camera, the minimum required output
+     * stream configurations are the same as for applications targeting SDK version older than
+     * 31.</p>
      * <p>Refer to ACAMERA_REQUEST_AVAILABLE_CAPABILITIES for additional
      * mandatory stream configurations on a per-capability basis.</p>
+     * <p>Exception on 176x144 (QCIF) resolution: camera devices usually have a fixed capability for
+     * downscaling from larger resolution to smaller, and the QCIF resolution sometimes is not
+     * fully supported due to this limitation on devices with high-resolution image sensors.
+     * Therefore, trying to configure a QCIF resolution stream together with any other
+     * stream larger than 1920x1080 resolution (either width or height) might not be supported,
+     * and capture session creation will fail if it is not.</p>
      *
      * @see ACAMERA_INFO_SUPPORTED_HARDWARE_LEVEL
      * @see ACAMERA_REQUEST_AVAILABLE_CAPABILITIES
@@ -3198,8 +3772,6 @@ typedef enum acamera_metadata_tag {
      * set to either OFF or FAST.</p>
      * <p>When multiple streams are used in a request, the minimum frame
      * duration will be max(individual stream min durations).</p>
-     * <p>The minimum frame duration of a stream (of a particular format, size)
-     * is the same regardless of whether the stream is input or output.</p>
      * <p>See ACAMERA_SENSOR_FRAME_DURATION and
      * ACAMERA_SCALER_AVAILABLE_STALL_DURATIONS for more details about
      * calculating the max frame rate.</p>
@@ -3300,8 +3872,26 @@ typedef enum acamera_metadata_tag {
      * <p>Camera devices that support FREEFORM cropping will support any crop region that
      * is inside of the active array. The camera device will apply the same crop region and
      * return the final used crop region in capture result metadata ACAMERA_SCALER_CROP_REGION.</p>
+     * <p>Starting from API level 30,</p>
+     * <ul>
+     * <li>If the camera device supports FREEFORM cropping, in order to do FREEFORM cropping, the
+     * application must set ACAMERA_CONTROL_ZOOM_RATIO to 1.0, and use ACAMERA_SCALER_CROP_REGION
+     * for zoom.</li>
+     * <li>To do CENTER_ONLY zoom, the application has below 2 options:<ol>
+     * <li>Set ACAMERA_CONTROL_ZOOM_RATIO to 1.0; adjust zoom by ACAMERA_SCALER_CROP_REGION.</li>
+     * <li>Adjust zoom by ACAMERA_CONTROL_ZOOM_RATIO; use ACAMERA_SCALER_CROP_REGION to crop
+     * the field of view vertically (letterboxing) or horizontally (pillarboxing), but not
+     * windowboxing.</li>
+     * </ol>
+     * </li>
+     * <li>Setting ACAMERA_CONTROL_ZOOM_RATIO to values different than 1.0 and
+     * ACAMERA_SCALER_CROP_REGION to be windowboxing at the same time are not supported. In this
+     * case, the camera framework will override the ACAMERA_SCALER_CROP_REGION to be the active
+     * array.</li>
+     * </ul>
      * <p>LEGACY capability devices will only support CENTER_ONLY cropping.</p>
      *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
      * @see ACAMERA_SCALER_CROP_REGION
      * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
      */
@@ -3382,6 +3972,329 @@ typedef enum acamera_metadata_tag {
     ACAMERA_SCALER_AVAILABLE_RECOMMENDED_INPUT_OUTPUT_FORMATS_MAP = 
                                                                 // int32
             ACAMERA_SCALER_START + 15,
+    /**
+     * <p>List of rotate-and-crop modes for ACAMERA_SCALER_ROTATE_AND_CROP that are supported by this camera device.</p>
+     *
+     * @see ACAMERA_SCALER_ROTATE_AND_CROP
+     *
+     * <p>Type: byte[n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>This entry lists the valid modes for ACAMERA_SCALER_ROTATE_AND_CROP for this camera device.</p>
+     * <p>Starting with API level 30, all devices will list at least <code>ROTATE_AND_CROP_NONE</code>.
+     * Devices with support for rotate-and-crop will additionally list at least
+     * <code>ROTATE_AND_CROP_AUTO</code> and <code>ROTATE_AND_CROP_90</code>.</p>
+     *
+     * @see ACAMERA_SCALER_ROTATE_AND_CROP
+     */
+    ACAMERA_SCALER_AVAILABLE_ROTATE_AND_CROP_MODES =            // byte[n]
+            ACAMERA_SCALER_START + 16,
+    /**
+     * <p>Whether a rotation-and-crop operation is applied to processed
+     * outputs from the camera.</p>
+     *
+     * <p>Type: byte (acamera_metadata_enum_android_scaler_rotate_and_crop_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraCaptureSession_captureCallback_result callbacks</li>
+     *   <li>ACaptureRequest</li>
+     * </ul></p>
+     *
+     * <p>This control is primarily intended to help camera applications with no support for
+     * multi-window modes to work correctly on devices where multi-window scenarios are
+     * unavoidable, such as foldables or other devices with variable display geometry or more
+     * free-form window placement (such as laptops, which often place portrait-orientation apps
+     * in landscape with pillarboxing).</p>
+     * <p>If supported, the default value is <code>ROTATE_AND_CROP_AUTO</code>, which allows the camera API
+     * to enable backwards-compatibility support for applications that do not support resizing
+     * / multi-window modes, when the device is in fact in a multi-window mode (such as inset
+     * portrait on laptops, or on a foldable device in some fold states).  In addition,
+     * <code>ROTATE_AND_CROP_NONE</code> and <code>ROTATE_AND_CROP_90</code> will always be available if this control
+     * is supported by the device.  If not supported, devices API level 30 or higher will always
+     * list only <code>ROTATE_AND_CROP_NONE</code>.</p>
+     * <p>When <code>CROP_AUTO</code> is in use, and the camera API activates backward-compatibility mode,
+     * several metadata fields will also be parsed differently to ensure that coordinates are
+     * correctly handled for features like drawing face detection boxes or passing in
+     * tap-to-focus coordinates.  The camera API will convert positions in the active array
+     * coordinate system to/from the cropped-and-rotated coordinate system to make the
+     * operation transparent for applications.  The following controls are affected:</p>
+     * <ul>
+     * <li>ACAMERA_CONTROL_AE_REGIONS</li>
+     * <li>ACAMERA_CONTROL_AF_REGIONS</li>
+     * <li>ACAMERA_CONTROL_AWB_REGIONS</li>
+     * <li>android.statistics.faces</li>
+     * </ul>
+     * <p>Capture results will contain the actual value selected by the API;
+     * <code>ROTATE_AND_CROP_AUTO</code> will never be seen in a capture result.</p>
+     * <p>Applications can also select their preferred cropping mode, either to opt out of the
+     * backwards-compatibility treatment, or to use the cropping feature themselves as needed.
+     * In this case, no coordinate translation will be done automatically, and all controls
+     * will continue to use the normal active array coordinates.</p>
+     * <p>Cropping and rotating is done after the application of digital zoom (via either
+     * ACAMERA_SCALER_CROP_REGION or ACAMERA_CONTROL_ZOOM_RATIO), but before each individual
+     * output is further cropped and scaled. It only affects processed outputs such as
+     * YUV, PRIVATE, and JPEG.  It has no effect on RAW outputs.</p>
+     * <p>When <code>CROP_90</code> or <code>CROP_270</code> are selected, there is a significant loss to the field of
+     * view. For example, with a 4:3 aspect ratio output of 1600x1200, <code>CROP_90</code> will still
+     * produce 1600x1200 output, but these buffers are cropped from a vertical 3:4 slice at the
+     * center of the 4:3 area, then rotated to be 4:3, and then upscaled to 1600x1200.  Only
+     * 56.25% of the original FOV is still visible.  In general, for an aspect ratio of <code>w:h</code>,
+     * the crop and rotate operation leaves <code>(h/w)^2</code> of the field of view visible. For 16:9,
+     * this is ~31.6%.</p>
+     * <p>As a visual example, the figure below shows the effect of <code>ROTATE_AND_CROP_90</code> on the
+     * outputs for the following parameters:</p>
+     * <ul>
+     * <li>Sensor active array: <code>2000x1500</code></li>
+     * <li>Crop region: top-left: <code>(500, 375)</code>, size: <code>(1000, 750)</code> (4:3 aspect ratio)</li>
+     * <li>Output streams: YUV <code>640x480</code> and YUV <code>1280x720</code></li>
+     * <li><code>ROTATE_AND_CROP_90</code></li>
+     * </ul>
+     * <p><img alt="Effect of ROTATE_AND_CROP_90" src="../images/camera2/metadata/android.scaler.rotateAndCrop/crop-region-rotate-90-43-ratio.png" /></p>
+     * <p>With these settings, the regions of the active array covered by the output streams are:</p>
+     * <ul>
+     * <li>640x480 stream crop: top-left: <code>(219, 375)</code>, size: <code>(562, 750)</code></li>
+     * <li>1280x720 stream crop: top-left: <code>(289, 375)</code>, size: <code>(422, 750)</code></li>
+     * </ul>
+     * <p>Since the buffers are rotated, the buffers as seen by the application are:</p>
+     * <ul>
+     * <li>640x480 stream: top-left: <code>(781, 375)</code> on active array, size: <code>(640, 480)</code>, downscaled 1.17x from sensor pixels</li>
+     * <li>1280x720 stream: top-left: <code>(711, 375)</code> on active array, size: <code>(1280, 720)</code>, upscaled 1.71x from sensor pixels</li>
+     * </ul>
+     *
+     * @see ACAMERA_CONTROL_AE_REGIONS
+     * @see ACAMERA_CONTROL_AF_REGIONS
+     * @see ACAMERA_CONTROL_AWB_REGIONS
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
+     * @see ACAMERA_SCALER_CROP_REGION
+     */
+    ACAMERA_SCALER_ROTATE_AND_CROP =                            // byte (acamera_metadata_enum_android_scaler_rotate_and_crop_t)
+            ACAMERA_SCALER_START + 17,
+    /**
+     * <p>Default YUV/PRIVATE size to use for requesting secure image buffers.</p>
+     *
+     * <p>Type: int32[2]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>This entry lists the default size supported in the secure camera mode. This entry is
+     * optional on devices support the SECURE_IMAGE_DATA capability. This entry will be null
+     * if the camera device does not list SECURE_IMAGE_DATA capability.</p>
+     * <p>When the key is present, only a PRIVATE/YUV output of the specified size is guaranteed
+     * to be supported by the camera HAL in the secure camera mode. Any other format or
+     * resolutions might not be supported. Use
+     * {@link ACameraDevice_isSessionConfigurationSupported }
+     * API to query if a secure session configuration is supported if the device supports this
+     * API.</p>
+     * <p>If this key returns null on a device with SECURE_IMAGE_DATA capability, the application
+     * can assume all output sizes listed in the
+     * {@link ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS }
+     * are supported.</p>
+     */
+    ACAMERA_SCALER_DEFAULT_SECURE_IMAGE_SIZE =                  // int32[2]
+            ACAMERA_SCALER_START + 18,
+    /**
+     * <p>The available multi-resolution stream configurations that this
+     * physical camera device supports
+     * (i.e. format, width, height, output/input stream).</p>
+     *
+     * <p>Type: int32[n*4] (acamera_metadata_enum_android_scaler_physical_camera_multi_resolution_stream_configurations_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>This list contains a subset of the parent logical camera's multi-resolution stream
+     * configurations which belong to this physical camera, and it will advertise and will only
+     * advertise the maximum supported resolutions for a particular format.</p>
+     * <p>If this camera device isn't a physical camera device constituting a logical camera,
+     * but a standalone <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * camera, this field represents the multi-resolution input/output stream configurations of
+     * default mode and max resolution modes. The sizes will be the maximum resolution of a
+     * particular format for default mode and max resolution mode.</p>
+     * <p>This field will only be advertised if the device is a physical camera of a
+     * logical multi-camera device or an ultra high resolution sensor camera. For a logical
+     * multi-camera, the camera API will derive the logical camera’s multi-resolution stream
+     * configurations from all physical cameras. For an ultra high resolution sensor camera, this
+     * is used directly as the camera’s multi-resolution stream configurations.</p>
+     */
+    ACAMERA_SCALER_PHYSICAL_CAMERA_MULTI_RESOLUTION_STREAM_CONFIGURATIONS = 
+                                                                // int32[n*4] (acamera_metadata_enum_android_scaler_physical_camera_multi_resolution_stream_configurations_t)
+            ACAMERA_SCALER_START + 19,
+    /**
+     * <p>The available stream configurations that this
+     * camera device supports (i.e. format, width, height, output/input stream) for a
+     * CaptureRequest with ACAMERA_SENSOR_PIXEL_MODE set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int32[n*4] (acamera_metadata_enum_android_scaler_available_stream_configurations_maximum_resolution_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS, for configurations
+     * which are applicable when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     * <p>Not all output formats may be supported in a configuration with
+     * an input stream of a particular format. For more details, see
+     * android.scaler.availableInputOutputFormatsMapMaximumResolution.</p>
+     *
+     * @see ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int32[n*4] (acamera_metadata_enum_android_scaler_available_stream_configurations_maximum_resolution_t)
+            ACAMERA_SCALER_START + 20,
+    /**
+     * <p>This lists the minimum frame duration for each
+     * format/size combination when the camera device is sent a CaptureRequest with
+     * ACAMERA_SENSOR_PIXEL_MODE set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int64[4*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS, for configurations
+     * which are applicable when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     * <p>When multiple streams are used in a request (if supported, when ACAMERA_SENSOR_PIXEL_MODE
+     * is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>), the
+     * minimum frame duration will be max(individual stream min durations).</p>
+     * <p>See ACAMERA_SENSOR_FRAME_DURATION and
+     * ACAMERA_SCALER_AVAILABLE_STALL_DURATIONS_MAXIMUM_RESOLUTION for more details about
+     * calculating the max frame rate.</p>
+     *
+     * @see ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS
+     * @see ACAMERA_SCALER_AVAILABLE_STALL_DURATIONS_MAXIMUM_RESOLUTION
+     * @see ACAMERA_SENSOR_FRAME_DURATION
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int64[4*n]
+            ACAMERA_SCALER_START + 21,
+    /**
+     * <p>This lists the maximum stall duration for each
+     * output format/size combination when CaptureRequests are submitted with
+     * ACAMERA_SENSOR_PIXEL_MODE set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a></p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int64[4*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS, for configurations
+     * which are applicable when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SCALER_AVAILABLE_MIN_FRAME_DURATIONS
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_SCALER_AVAILABLE_STALL_DURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int64[4*n]
+            ACAMERA_SCALER_START + 22,
+    /**
+     * <p>Whether the camera device supports multi-resolution input or output streams</p>
+     *
+     * <p>Type: byte (acamera_metadata_enum_android_scaler_multi_resolution_stream_supported_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>A logical multi-camera or an ultra high resolution camera may support multi-resolution
+     * input or output streams. With multi-resolution output streams, the camera device is able
+     * to output different resolution images depending on the current active physical camera or
+     * pixel mode. With multi-resolution input streams, the camera device can reprocess images
+     * of different resolutions from different physical cameras or sensor pixel modes.</p>
+     * <p>When set to TRUE:</p>
+     * <ul>
+     * <li>For a logical multi-camera, the camera framework derives
+     * android.scaler.multiResolutionStreamConfigurationMap by combining the
+     * ACAMERA_SCALER_PHYSICAL_CAMERA_MULTI_RESOLUTION_STREAM_CONFIGURATIONS from its physical
+     * cameras.</li>
+     * <li>For an ultra-high resolution sensor camera, the camera framework directly copies
+     * the value of ACAMERA_SCALER_PHYSICAL_CAMERA_MULTI_RESOLUTION_STREAM_CONFIGURATIONS to
+     * android.scaler.multiResolutionStreamConfigurationMap.</li>
+     * </ul>
+     *
+     * @see ACAMERA_SCALER_PHYSICAL_CAMERA_MULTI_RESOLUTION_STREAM_CONFIGURATIONS
+     */
+    ACAMERA_SCALER_MULTI_RESOLUTION_STREAM_SUPPORTED =          // byte (acamera_metadata_enum_android_scaler_multi_resolution_stream_supported_t)
+            ACAMERA_SCALER_START + 24,
+    /**
+     * <p>The stream use cases supported by this camera device.</p>
+     *
+     * <p>Type: int64[n] (acamera_metadata_enum_android_scaler_available_stream_use_cases_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>The stream use case indicates the purpose of a particular camera stream from
+     * the end-user perspective. Some examples of camera use cases are: preview stream for
+     * live viewfinder shown to the user, still capture for generating high quality photo
+     * capture, video record for encoding the camera output for the purpose of future playback,
+     * and video call for live realtime video conferencing.</p>
+     * <p>With this flag, the camera device can optimize the image processing pipeline
+     * parameters, such as tuning, sensor mode, and ISP settings, independent of
+     * the properties of the immediate camera output surface. For example, if the output
+     * surface is a SurfaceTexture, the stream use case flag can be used to indicate whether
+     * the camera frames eventually go to display, video encoder,
+     * still image capture, or all of them combined.</p>
+     * <p>The application sets the use case of a camera stream by calling
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/params/OutputConfiguration.html#setStreamUseCase">OutputConfiguration#setStreamUseCase</a>.</p>
+     * <p>A camera device with
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraCharacteristics.html#REQUEST_AVAILABLE_CAPABILITIES_STREAM_USE_CASE">CameraCharacteristics#REQUEST_AVAILABLE_CAPABILITIES_STREAM_USE_CASE</a>
+     * capability must support the following stream use cases:</p>
+     * <ul>
+     * <li>DEFAULT</li>
+     * <li>PREVIEW</li>
+     * <li>STILL_CAPTURE</li>
+     * <li>VIDEO_RECORD</li>
+     * <li>PREVIEW_VIDEO_STILL</li>
+     * <li>VIDEO_CALL</li>
+     * </ul>
+     * <p>The guaranteed stream combinations related to stream use case for a camera device with
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraCharacteristics.html#REQUEST_AVAILABLE_CAPABILITIES_STREAM_USE_CASE">CameraCharacteristics#REQUEST_AVAILABLE_CAPABILITIES_STREAM_USE_CASE</a>
+     * capability is documented in the camera device
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraDevice.html#createCaptureSession">guideline</a>. The
+     * application is strongly recommended to use one of the guaranteed stream combinations.
+     * If the application creates a session with a stream combination not in the guaranteed
+     * list, or with mixed DEFAULT and non-DEFAULT use cases within the same session,
+     * the camera device may ignore some stream use cases due to hardware constraints
+     * and implementation details.</p>
+     * <p>For stream combinations not covered by the stream use case mandatory lists, such as
+     * reprocessable session, constrained high speed session, or RAW stream combinations, the
+     * application should leave stream use cases within the session as DEFAULT.</p>
+     */
+    ACAMERA_SCALER_AVAILABLE_STREAM_USE_CASES =                 // int64[n] (acamera_metadata_enum_android_scaler_available_stream_use_cases_t)
+            ACAMERA_SCALER_START + 25,
     ACAMERA_SCALER_END,
 
     /**
@@ -3508,11 +4421,19 @@ typedef enum acamera_metadata_tag {
      * output capture result.</p>
      * <p>This control is only effective if ACAMERA_CONTROL_AE_MODE or ACAMERA_CONTROL_MODE is set to
      * OFF; otherwise the auto-exposure algorithm will override this value.</p>
+     * <p>Note that for devices supporting postRawSensitivityBoost, the total sensitivity applied
+     * to the final processed image is the combination of ACAMERA_SENSOR_SENSITIVITY and
+     * ACAMERA_CONTROL_POST_RAW_SENSITIVITY_BOOST. In case the application uses the sensor
+     * sensitivity from last capture result of an auto request for a manual request, in order
+     * to achieve the same brightness in the output image, the application should also
+     * set postRawSensitivityBoost.</p>
      *
      * @see ACAMERA_CONTROL_AE_MODE
      * @see ACAMERA_CONTROL_MODE
+     * @see ACAMERA_CONTROL_POST_RAW_SENSITIVITY_BOOST
      * @see ACAMERA_SENSOR_INFO_SENSITIVITY_RANGE
      * @see ACAMERA_SENSOR_MAX_ANALOG_SENSITIVITY
+     * @see ACAMERA_SENSOR_SENSITIVITY
      */
     ACAMERA_SENSOR_SENSITIVITY =                                // int32
             ACAMERA_SENSOR_START + 2,
@@ -3828,6 +4749,25 @@ typedef enum acamera_metadata_tag {
      *
      * <p>Also defines the direction of rolling shutter readout, which is from top to bottom in
      * the sensor's coordinate system.</p>
+     * <p>Starting with Android API level 32, camera clients that query the orientation via
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraCharacteristics.html#get">CameraCharacteristics#get</a> on foldable devices which
+     * include logical cameras can receive a value that can dynamically change depending on the
+     * device/fold state.
+     * Clients are advised to not cache or store the orientation value of such logical sensors.
+     * In case repeated queries to CameraCharacteristics are not preferred, then clients can
+     * also access the entire mapping from device state to sensor orientation in
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/params/DeviceStateSensorOrientationMap.html">DeviceStateSensorOrientationMap</a>.
+     * Do note that a dynamically changing sensor orientation value in camera characteristics
+     * will not be the best way to establish the orientation per frame. Clients that want to
+     * know the sensor orientation of a particular captured frame should query the
+     * ACAMERA_LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID from the corresponding capture result and
+     * check the respective physical camera orientation.</p>
+     * <p>Native camera clients must query ACAMERA_INFO_DEVICE_STATE_ORIENTATIONS for the mapping
+     * between device state and camera sensor orientation. Dynamic updates to the sensor
+     * orientation are not supported in this code path.</p>
+     *
+     * @see ACAMERA_INFO_DEVICE_STATE_ORIENTATIONS
+     * @see ACAMERA_LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID
      */
     ACAMERA_SENSOR_ORIENTATION =                                // int32
             ACAMERA_SENSOR_START + 14,
@@ -3908,7 +4848,7 @@ typedef enum acamera_metadata_tag {
      * noise model used here is:</p>
      * <p>N(x) = sqrt(Sx + O)</p>
      * <p>Where x represents the recorded signal of a CFA channel normalized to
-     * the range [0, 1], and S and O are the noise model coeffiecients for
+     * the range [0, 1], and S and O are the noise model coefficients for
      * that channel.</p>
      * <p>A more detailed description of the noise model can be found in the
      * Adobe DNG specification for the NoiseProfile tag.</p>
@@ -3957,7 +4897,7 @@ typedef enum acamera_metadata_tag {
      * <li>1.20 &lt;= R &gt;= 1.03 will require some software
      * correction to avoid demosaic errors (3-20% divergence).</li>
      * <li>R &gt; 1.20 will require strong software correction to produce
-     * a usuable image (&gt;20% divergence).</li>
+     * a usable image (&gt;20% divergence).</li>
      * </ul>
      * <p>Starting from Android Q, this key will not be present for a MONOCHROME camera, even if
      * the camera device has RAW capability.</p>
@@ -4027,8 +4967,8 @@ typedef enum acamera_metadata_tag {
     ACAMERA_SENSOR_AVAILABLE_TEST_PATTERN_MODES =               // int32[n]
             ACAMERA_SENSOR_START + 25,
     /**
-     * <p>Duration between the start of first row exposure
-     * and the start of last row exposure.</p>
+     * <p>Duration between the start of exposure for the first row of the image sensor,
+     * and the start of exposure for one past the last row of the image sensor.</p>
      *
      * <p>Type: int64</p>
      *
@@ -4037,12 +4977,22 @@ typedef enum acamera_metadata_tag {
      *   <li>ACameraMetadata from ACameraCaptureSession_captureCallback_result callbacks</li>
      * </ul></p>
      *
-     * <p>This is the exposure time skew between the first and last
-     * row exposure start times. The first row and the last row are
-     * the first and last rows inside of the
+     * <p>This is the exposure time skew between the first and <code>(last+1)</code> row exposure start times. The
+     * first row and the last row are the first and last rows inside of the
      * ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE.</p>
-     * <p>For typical camera sensors that use rolling shutters, this is also equivalent
-     * to the frame readout time.</p>
+     * <p>For typical camera sensors that use rolling shutters, this is also equivalent to the frame
+     * readout time.</p>
+     * <p>If the image sensor is operating in a binned or cropped mode due to the current output
+     * target resolutions, it's possible this skew is reported to be larger than the exposure
+     * time, for example, since it is based on the full array even if a partial array is read
+     * out. Be sure to scale the number to cover the section of the sensor actually being used
+     * for the outputs you care about. So if your output covers N rows of the active array of
+     * height H, scale this value by N/H to get the total skew for that viewport.</p>
+     * <p><em>Note:</em> Prior to Android 11, this field was described as measuring duration from
+     * first to last row of the image sensor, which is not equal to the frame readout time for a
+     * rolling shutter sensor. Implementations generally reported the latter value, so to resolve
+     * the inconsistency, the description has been updated to range from (first, last+1) row
+     * exposure start, instead.</p>
      *
      * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
      */
@@ -4150,6 +5100,67 @@ typedef enum acamera_metadata_tag {
      */
     ACAMERA_SENSOR_DYNAMIC_WHITE_LEVEL =                        // int32
             ACAMERA_SENSOR_START + 29,
+    /**
+     * <p>Switches sensor pixel mode between maximum resolution mode and default mode.</p>
+     *
+     * <p>Type: byte (acamera_metadata_enum_android_sensor_pixel_mode_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraCaptureSession_captureCallback_result callbacks</li>
+     *   <li>ACaptureRequest</li>
+     * </ul></p>
+     *
+     * <p>This key controls whether the camera sensor operates in
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>
+     * mode or not. By default, all camera devices operate in
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_DEFAULT">CameraMetadata#SENSOR_PIXEL_MODE_DEFAULT</a> mode.
+     * When operating in
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_DEFAULT">CameraMetadata#SENSOR_PIXEL_MODE_DEFAULT</a> mode, sensors
+     * with <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability would typically perform pixel binning in order to improve low light
+     * performance, noise reduction etc. However, in
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>
+     * mode (supported only
+     * by <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * sensors), sensors typically operate in unbinned mode allowing for a larger image size.
+     * The stream configurations supported in
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>
+     * mode are also different from those of
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_DEFAULT">CameraMetadata#SENSOR_PIXEL_MODE_DEFAULT</a> mode.
+     * They can be queried through
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraCharacteristics.html#get">CameraCharacteristics#get</a> with
+     * <a href="https://developer.android.com/reference/CameraCharacteristics.html#SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)">CameraCharacteristics#SCALER_STREAM_CONFIGURATION_MAP_MAXIMUM_RESOLUTION)</a>.
+     * Unless reported by both
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/params/StreamConfigurationMap.html">StreamConfigurationMap</a>s, the outputs from
+     * <code>android.scaler.streamConfigurationMapMaximumResolution</code> and
+     * <code>android.scaler.streamConfigurationMap</code>
+     * must not be mixed in the same CaptureRequest. In other words, these outputs are
+     * exclusive to each other.
+     * This key does not need to be set for reprocess requests.</p>
+     */
+    ACAMERA_SENSOR_PIXEL_MODE =                                 // byte (acamera_metadata_enum_android_sensor_pixel_mode_t)
+            ACAMERA_SENSOR_START + 32,
+    /**
+     * <p>Whether <code>RAW</code> images requested have their bayer pattern as described by
+     * ACAMERA_SENSOR_INFO_BINNING_FACTOR.</p>
+     *
+     * @see ACAMERA_SENSOR_INFO_BINNING_FACTOR
+     *
+     * <p>Type: byte (acamera_metadata_enum_android_sensor_raw_binning_factor_used_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraCaptureSession_captureCallback_result callbacks</li>
+     * </ul></p>
+     *
+     * <p>This key will only be present in devices advertising the
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability which also advertise <code>REMOSAIC_REPROCESSING</code> capability. On all other devices
+     * RAW targets will have a regular bayer pattern.</p>
+     */
+    ACAMERA_SENSOR_RAW_BINNING_FACTOR_USED =                    // byte (acamera_metadata_enum_android_sensor_raw_binning_factor_used_t)
+            ACAMERA_SENSOR_START + 33,
     ACAMERA_SENSOR_END,
 
     /**
@@ -4407,7 +5418,7 @@ typedef enum acamera_metadata_tag {
      * rectangle, and cropping to the rectangle given in ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE.</p>
      * <p>E.g. to calculate position of a pixel, (x,y), in a processed YUV output image with the
      * dimensions in ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE given the position of a pixel,
-     * (x', y'), in the raw pixel array with dimensions give in
+     * (x', y'), in the raw pixel array with dimensions given in
      * ACAMERA_SENSOR_INFO_PIXEL_ARRAY_SIZE:</p>
      * <ol>
      * <li>Choose a pixel (x', y') within the active array region of the raw buffer given in
@@ -4451,6 +5462,120 @@ typedef enum acamera_metadata_tag {
      */
     ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE =      // int32[4]
             ACAMERA_SENSOR_INFO_START + 10,
+    /**
+     * <p>The area of the image sensor which corresponds to active pixels after any geometric
+     * distortion correction has been applied, when the sensor runs in maximum resolution mode.</p>
+     *
+     * <p>Type: int32[4]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, when ACAMERA_SENSOR_PIXEL_MODE
+     * is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.
+     * Refer to ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE for details, with sensor array related keys
+     * replaced with their
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>
+     * counterparts.
+     * This key will only be present for devices which advertise the
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability.</p>
+     * <p>The data representation is <code>int[4]</code>, which maps to <code>(left, top, width, height)</code>.</p>
+     *
+     * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION =  // int32[4]
+            ACAMERA_SENSOR_INFO_START + 11,
+    /**
+     * <p>Dimensions of the full pixel array, possibly
+     * including black calibration pixels, when the sensor runs in maximum resolution mode.
+     * Analogous to ACAMERA_SENSOR_INFO_PIXEL_ARRAY_SIZE, when ACAMERA_SENSOR_PIXEL_MODE is
+     * set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_INFO_PIXEL_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int32[2]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>The pixel count of the full pixel array of the image sensor, which covers
+     * ACAMERA_SENSOR_INFO_PHYSICAL_SIZE area. This represents the full pixel dimensions of
+     * the raw buffers produced by this sensor, when it runs in maximum resolution mode. That
+     * is, when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.
+     * This key will only be present for devices which advertise the
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability.</p>
+     *
+     * @see ACAMERA_SENSOR_INFO_PHYSICAL_SIZE
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_SENSOR_INFO_PIXEL_ARRAY_SIZE_MAXIMUM_RESOLUTION =   // int32[2]
+            ACAMERA_SENSOR_INFO_START + 12,
+    /**
+     * <p>The area of the image sensor which corresponds to active pixels prior to the
+     * application of any geometric distortion correction, when the sensor runs in maximum
+     * resolution mode. This key must be used for crop / metering regions, only when
+     * ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int32[4]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE,
+     * when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.
+     * This key will only be present for devices which advertise the
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability.</p>
+     * <p>The data representation is <code>int[4]</code>, which maps to <code>(left, top, width, height)</code>.</p>
+     *
+     * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION = 
+                                                                // int32[4]
+            ACAMERA_SENSOR_INFO_START + 13,
+    /**
+     * <p>Dimensions of the group of pixels which are under the same color filter.
+     * This specifies the width and height (pair of integers) of the group of pixels which fall
+     * under the same color filter for ULTRA_HIGH_RESOLUTION sensors.</p>
+     *
+     * <p>Type: int32[2]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Sensors can have pixels grouped together under the same color filter in order
+     * to improve various aspects of imaging such as noise reduction, low light
+     * performance etc. These groups can be of various sizes such as 2X2 (quad bayer),
+     * 3X3 (nona-bayer). This key specifies the length and width of the pixels grouped under
+     * the same color filter.</p>
+     * <p>This key will not be present if REMOSAIC_REPROCESSING is not supported, since RAW images
+     * will have a regular bayer pattern.</p>
+     * <p>This key will not be present for sensors which don't have the
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>
+     * capability.</p>
+     */
+    ACAMERA_SENSOR_INFO_BINNING_FACTOR =                        // int32[2]
+            ACAMERA_SENSOR_INFO_START + 14,
     ACAMERA_SENSOR_INFO_END,
 
     /**
@@ -4593,9 +5718,20 @@ typedef enum acamera_metadata_tag {
      * When the distortion correction mode is not OFF, the coordinate system follows
      * ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, with
      * <code>(0, 0)</code> being the top-left pixel of the active array.</p>
-     * <p>Only available if ACAMERA_STATISTICS_FACE_DETECT_MODE == FULL</p>
+     * <p>Only available if ACAMERA_STATISTICS_FACE_DETECT_MODE == FULL.</p>
+     * <p>Starting from API level 30, the coordinate system of activeArraySize or
+     * preCorrectionActiveArraySize is used to represent post-zoomRatio field of view, not
+     * pre-zoomRatio field of view. This means that if the relative position of faces and
+     * the camera device doesn't change, when zooming in by increasing
+     * ACAMERA_CONTROL_ZOOM_RATIO, the face landmarks move farther away from the center of the
+     * activeArray or preCorrectionActiveArray. If ACAMERA_CONTROL_ZOOM_RATIO is set to 1.0
+     * (default), the face landmarks coordinates won't change as ACAMERA_SCALER_CROP_REGION
+     * changes. See ACAMERA_CONTROL_ZOOM_RATIO for details. Whether to use activeArraySize or
+     * preCorrectionActiveArraySize still depends on distortion correction mode.</p>
      *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
      * @see ACAMERA_DISTORTION_CORRECTION_MODE
+     * @see ACAMERA_SCALER_CROP_REGION
      * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
      * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE
      * @see ACAMERA_STATISTICS_FACE_DETECT_MODE
@@ -4624,10 +5760,21 @@ typedef enum acamera_metadata_tag {
      * When the distortion correction mode is not OFF, the coordinate system follows
      * ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, with
      * <code>(0, 0)</code> being the top-left pixel of the active array.</p>
-     * <p>Only available if ACAMERA_STATISTICS_FACE_DETECT_MODE != OFF
-     * The data representation is <code>int[4]</code>, which maps to <code>(left, top, right, bottom)</code>.</p>
+     * <p>Only available if ACAMERA_STATISTICS_FACE_DETECT_MODE != OFF.</p>
+     * <p>Starting from API level 30, the coordinate system of activeArraySize or
+     * preCorrectionActiveArraySize is used to represent post-zoomRatio field of view, not
+     * pre-zoomRatio field of view. This means that if the relative position of faces and
+     * the camera device doesn't change, when zooming in by increasing
+     * ACAMERA_CONTROL_ZOOM_RATIO, the face rectangles grow larger and move farther away from
+     * the center of the activeArray or preCorrectionActiveArray. If ACAMERA_CONTROL_ZOOM_RATIO
+     * is set to 1.0 (default), the face rectangles won't change as ACAMERA_SCALER_CROP_REGION
+     * changes. See ACAMERA_CONTROL_ZOOM_RATIO for details. Whether to use activeArraySize or
+     * preCorrectionActiveArraySize still depends on distortion correction mode.</p>
+     * <p>The data representation is <code>int[4]</code>, which maps to <code>(left, top, right, bottom)</code>.</p>
      *
+     * @see ACAMERA_CONTROL_ZOOM_RATIO
      * @see ACAMERA_DISTORTION_CORRECTION_MODE
+     * @see ACAMERA_SCALER_CROP_REGION
      * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
      * @see ACAMERA_SENSOR_INFO_PRE_CORRECTION_ACTIVE_ARRAY_SIZE
      * @see ACAMERA_STATISTICS_FACE_DETECT_MODE
@@ -4829,7 +5976,7 @@ typedef enum acamera_metadata_tag {
      * </ul></p>
      *
      * <p>Since optical image stabilization generally involves motion much faster than the duration
-     * of individualq image exposure, multiple OIS samples can be included for a single capture
+     * of individual image exposure, multiple OIS samples can be included for a single capture
      * result. For example, if the OIS reporting operates at 200 Hz, a typical camera operating
      * at 30fps may have 6-7 OIS samples per capture result. This information can be combined
      * with the rolling shutter skew to account for lens motion during image exposure in
@@ -5192,9 +6339,11 @@ typedef enum acamera_metadata_tag {
      *   <li>ACaptureRequest</li>
      * </ul></p>
      *
-     * <p>The tonemap curve will be defined the following formula:
-     * * OUT = pow(IN, 1.0 / gamma)
-     * where IN and OUT is the input pixel value scaled to range [0.0, 1.0],
+     * <p>The tonemap curve will be defined the following formula:</p>
+     * <ul>
+     * <li>OUT = pow(IN, 1.0 / gamma)</li>
+     * </ul>
+     * <p>where IN and OUT is the input pixel value scaled to range [0.0, 1.0],
      * pow is the power function and gamma is the gamma value specified by this
      * key.</p>
      * <p>The same curve will be applied to all color channels. The camera device
@@ -5284,7 +6433,7 @@ typedef enum acamera_metadata_tag {
      * <li><code>LEVEL_3</code> devices additionally support YUV reprocessing and RAW image capture, along
      *   with additional output stream configurations.</li>
      * <li><code>EXTERNAL</code> devices are similar to <code>LIMITED</code> devices with exceptions like some sensor or
-     *   lens information not reorted or less stable framerates.</li>
+     *   lens information not reported or less stable framerates.</li>
      * </ul>
      * <p>See the individual level enums for full descriptions of the supported capabilities.  The
      * ACAMERA_REQUEST_AVAILABLE_CAPABILITIES entry describes the device's capabilities at a
@@ -5327,6 +6476,21 @@ typedef enum acamera_metadata_tag {
      */
     ACAMERA_INFO_VERSION =                                      // byte
             ACAMERA_INFO_START + 1,
+    /**
+     *
+     * <p>Type: int64[2*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>HAL must populate the array with
+     * (hardware::camera::provider::V2_5::DeviceState, sensorOrientation) pairs for each
+     * supported device state bitwise combination.</p>
+     */
+    ACAMERA_INFO_DEVICE_STATE_ORIENTATIONS =                    // int64[2*n]
+            ACAMERA_INFO_START + 3,
     ACAMERA_INFO_END,
 
     /**
@@ -5634,6 +6798,162 @@ typedef enum acamera_metadata_tag {
      */
     ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STALL_DURATIONS =     // int64[4*n]
             ACAMERA_DEPTH_START + 8,
+    /**
+     * <p>The available depth dataspace stream
+     * configurations that this camera device supports
+     * (i.e. format, width, height, output/input stream) when a CaptureRequest is submitted with
+     * ACAMERA_SENSOR_PIXEL_MODE set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int32[n*4] (acamera_metadata_enum_android_depth_available_depth_stream_configurations_maximum_resolution_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS, for configurations which
+     * are applicable when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int32[n*4] (acamera_metadata_enum_android_depth_available_depth_stream_configurations_maximum_resolution_t)
+            ACAMERA_DEPTH_START + 9,
+    /**
+     * <p>This lists the minimum frame duration for each
+     * format/size combination for depth output formats when a CaptureRequest is submitted with
+     * ACAMERA_SENSOR_PIXEL_MODE set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int64[4*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_DEPTH_AVAILABLE_DEPTH_MIN_FRAME_DURATIONS, for configurations which
+     * are applicable when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     * <p>See ACAMERA_SENSOR_FRAME_DURATION and
+     * ACAMERA_SCALER_AVAILABLE_STALL_DURATIONS_MAXIMUM_RESOLUTION for more details about
+     * calculating the max frame rate.</p>
+     *
+     * @see ACAMERA_DEPTH_AVAILABLE_DEPTH_MIN_FRAME_DURATIONS
+     * @see ACAMERA_SCALER_AVAILABLE_STALL_DURATIONS_MAXIMUM_RESOLUTION
+     * @see ACAMERA_SENSOR_FRAME_DURATION
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_DEPTH_AVAILABLE_DEPTH_MIN_FRAME_DURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int64[4*n]
+            ACAMERA_DEPTH_START + 10,
+    /**
+     * <p>This lists the maximum stall duration for each
+     * output format/size combination for depth streams for CaptureRequests where
+     * ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int64[4*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_DEPTH_AVAILABLE_DEPTH_STALL_DURATIONS, for configurations which
+     * are applicable when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_DEPTH_AVAILABLE_DEPTH_STALL_DURATIONS
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_DEPTH_AVAILABLE_DEPTH_STALL_DURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int64[4*n]
+            ACAMERA_DEPTH_START + 11,
+    /**
+     * <p>The available dynamic depth dataspace stream
+     * configurations that this camera device supports (i.e. format, width, height,
+     * output/input stream) for CaptureRequests where ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int32[n*4] (acamera_metadata_enum_android_depth_available_dynamic_depth_stream_configurations_maximum_resolution_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STREAM_CONFIGURATIONS, for configurations
+     * which are applicable when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STREAM_CONFIGURATIONS
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int32[n*4] (acamera_metadata_enum_android_depth_available_dynamic_depth_stream_configurations_maximum_resolution_t)
+            ACAMERA_DEPTH_START + 12,
+    /**
+     * <p>This lists the minimum frame duration for each
+     * format/size combination for dynamic depth output streams  for CaptureRequests where
+     * ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int64[4*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_MIN_FRAME_DURATIONS, for configurations
+     * which are applicable when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_MIN_FRAME_DURATIONS
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_MIN_FRAME_DURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int64[4*n]
+            ACAMERA_DEPTH_START + 13,
+    /**
+     * <p>This lists the maximum stall duration for each
+     * output format/size combination for dynamic depth streams for CaptureRequests where
+     * ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int64[4*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Analogous to ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STALL_DURATIONS, for configurations
+     * which are applicable when ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STALL_DURATIONS
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     */
+    ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STALL_DURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int64[4*n]
+            ACAMERA_DEPTH_START + 14,
     ACAMERA_DEPTH_END,
 
     /**
@@ -5666,13 +6986,16 @@ typedef enum acamera_metadata_tag {
      * </ul></p>
      *
      * <p>The accuracy of the frame timestamp synchronization determines the physical cameras'
-     * ability to start exposure at the same time. If the sensorSyncType is CALIBRATED,
-     * the physical camera sensors usually run in master-slave mode so that their shutter
-     * time is synchronized. For APPROXIMATE sensorSyncType, the camera sensors usually run in
-     * master-master mode, and there could be offset between their start of exposure.</p>
+     * ability to start exposure at the same time. If the sensorSyncType is CALIBRATED, the
+     * physical camera sensors usually run in leader/follower mode where one sensor generates a
+     * timing signal for the other, so that their shutter time is synchronized. For APPROXIMATE
+     * sensorSyncType, the camera sensors usually run in leader/leader mode, where both sensors
+     * use their own timing generator, and there could be offset between their start of exposure.</p>
      * <p>In both cases, all images generated for a particular capture request still carry the same
      * timestamps, so that they can be used to look up the matching frame number and
      * onCaptureStarted callback.</p>
+     * <p>This tag is only applicable if the logical camera device supports concurrent physical
+     * streams from different physical cameras.</p>
      */
     ACAMERA_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE =             // byte (acamera_metadata_enum_android_logical_multi_camera_sensor_sync_type_t)
             ACAMERA_LOGICAL_MULTI_CAMERA_START + 1,
@@ -5688,13 +7011,17 @@ typedef enum acamera_metadata_tag {
      *
      * <p>The ID of the active physical camera that's backing the logical camera. All camera
      * streams and metadata that are not physical camera specific will be originating from this
-     * physical camera. This must be one of valid physical IDs advertised in the physicalIds
-     * static tag.</p>
+     * physical camera.</p>
      * <p>For a logical camera made up of physical cameras where each camera's lenses have
      * different characteristics, the camera device may choose to switch between the physical
      * cameras when application changes FOCAL_LENGTH or SCALER_CROP_REGION.
      * At the time of lens switch, this result metadata reflects the new active physical camera
      * ID.</p>
+     * <p>This key will be available if the camera device advertises this key via {@link ACAMERA_REQUEST_AVAILABLE_RESULT_KEYS }.
+     * When available, this must be one of valid physical IDs backing this logical multi-camera.
+     * If this key is not available for a logical multi-camera, the camera device implementation
+     * may still switch between different active physical cameras based on use case, but the
+     * current active physical camera information won't be available to the application.</p>
      */
     ACAMERA_LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID =           // byte
             ACAMERA_LOGICAL_MULTI_CAMERA_START + 2,
@@ -5847,7 +7174,153 @@ typedef enum acamera_metadata_tag {
      */
     ACAMERA_HEIC_AVAILABLE_HEIC_STALL_DURATIONS =               // int64[4*n]
             ACAMERA_HEIC_START + 2,
+    /**
+     * <p>The available HEIC (ISO/IEC 23008-12) stream
+     * configurations that this camera device supports
+     * (i.e. format, width, height, output/input stream).</p>
+     *
+     * <p>Type: int32[n*4] (acamera_metadata_enum_android_heic_available_heic_stream_configurations_maximum_resolution_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Refer to ACAMERA_HEIC_AVAILABLE_HEIC_STREAM_CONFIGURATIONS for details.</p>
+     * <p>All the configuration tuples <code>(format, width, height, input?)</code> will contain
+     * AIMAGE_FORMAT_HEIC format as OUTPUT only.</p>
+     *
+     * @see ACAMERA_HEIC_AVAILABLE_HEIC_STREAM_CONFIGURATIONS
+     */
+    ACAMERA_HEIC_AVAILABLE_HEIC_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int32[n*4] (acamera_metadata_enum_android_heic_available_heic_stream_configurations_maximum_resolution_t)
+            ACAMERA_HEIC_START + 3,
+    /**
+     * <p>This lists the minimum frame duration for each
+     * format/size combination for HEIC output formats for CaptureRequests where
+     * ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int64[4*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Refer to ACAMERA_HEIC_AVAILABLE_HEIC_MIN_FRAME_DURATIONS for details.</p>
+     *
+     * @see ACAMERA_HEIC_AVAILABLE_HEIC_MIN_FRAME_DURATIONS
+     */
+    ACAMERA_HEIC_AVAILABLE_HEIC_MIN_FRAME_DURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int64[4*n]
+            ACAMERA_HEIC_START + 4,
+    /**
+     * <p>This lists the maximum stall duration for each
+     * output format/size combination for HEIC streams for CaptureRequests where
+     * ACAMERA_SENSOR_PIXEL_MODE is set to
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION">CameraMetadata#SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION</a>.</p>
+     *
+     * @see ACAMERA_SENSOR_PIXEL_MODE
+     *
+     * <p>Type: int64[4*n]</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>Refer to ACAMERA_HEIC_AVAILABLE_HEIC_STALL_DURATIONS for details.</p>
+     *
+     * @see ACAMERA_HEIC_AVAILABLE_HEIC_STALL_DURATIONS
+     */
+    ACAMERA_HEIC_AVAILABLE_HEIC_STALL_DURATIONS_MAXIMUM_RESOLUTION = 
+                                                                // int64[4*n]
+            ACAMERA_HEIC_START + 5,
     ACAMERA_HEIC_END,
+
+    /**
+     * <p>Location of the cameras on the automotive devices.</p>
+     *
+     * <p>Type: byte (acamera_metadata_enum_android_automotive_location_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>This enum defines the locations of the cameras relative to the vehicle body frame on
+     * <a href="https://source.android.com/devices/sensors/sensor-types#auto_axes">the automotive sensor coordinate system</a>.
+     * If the system has FEATURE_AUTOMOTIVE, the camera will have this entry in its static
+     * metadata.</p>
+     * <ul>
+     * <li>INTERIOR is the inside of the vehicle body frame (or the passenger cabin).</li>
+     * <li>EXTERIOR is the outside of the vehicle body frame.</li>
+     * <li>EXTRA is the extra vehicle such as a trailer.</li>
+     * </ul>
+     * <p>Each side of the vehicle body frame on this coordinate system is defined as below:</p>
+     * <ul>
+     * <li>FRONT is where the Y-axis increases toward.</li>
+     * <li>REAR is where the Y-axis decreases toward.</li>
+     * <li>LEFT is where the X-axis decreases toward.</li>
+     * <li>RIGHT is where the X-axis increases toward.</li>
+     * </ul>
+     * <p>If the camera has either EXTERIOR_OTHER or EXTRA_OTHER, its static metadata will list
+     * the following entries, so that applications can determine the camera's exact location:</p>
+     * <ul>
+     * <li>ACAMERA_LENS_POSE_REFERENCE</li>
+     * <li>ACAMERA_LENS_POSE_ROTATION</li>
+     * <li>ACAMERA_LENS_POSE_TRANSLATION</li>
+     * </ul>
+     *
+     * @see ACAMERA_LENS_POSE_REFERENCE
+     * @see ACAMERA_LENS_POSE_ROTATION
+     * @see ACAMERA_LENS_POSE_TRANSLATION
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION =                               // byte (acamera_metadata_enum_android_automotive_location_t)
+            ACAMERA_AUTOMOTIVE_START,
+    ACAMERA_AUTOMOTIVE_END,
+
+    /**
+     * <p>The direction of the camera faces relative to the vehicle body frame and the
+     * passenger seats.</p>
+     *
+     * <p>Type: byte[n] (acamera_metadata_enum_android_automotive_lens_facing_t)</p>
+     *
+     * <p>This tag may appear in:
+     * <ul>
+     *   <li>ACameraMetadata from ACameraManager_getCameraCharacteristics</li>
+     * </ul></p>
+     *
+     * <p>This enum defines the lens facing characteristic of the cameras on the automotive
+     * devices with locations ACAMERA_AUTOMOTIVE_LOCATION defines.  If the system has
+     * FEATURE_AUTOMOTIVE, the camera will have this entry in its static metadata.</p>
+     * <p>When ACAMERA_AUTOMOTIVE_LOCATION is INTERIOR, this has one or more INTERIOR_*
+     * values or a single EXTERIOR_* value.  When this has more than one INTERIOR_*,
+     * the first value must be the one for the seat closest to the optical axis. If this
+     * contains INTERIOR_OTHER, all other values will be ineffective.</p>
+     * <p>When ACAMERA_AUTOMOTIVE_LOCATION is EXTERIOR_* or EXTRA, this has a single
+     * EXTERIOR_* value.</p>
+     * <p>If a camera has INTERIOR_OTHER or EXTERIOR_OTHER, or more than one camera is at the
+     * same location and facing the same direction, their static metadata will list the
+     * following entries, so that applications can determine their lenses' exact facing
+     * directions:</p>
+     * <ul>
+     * <li>ACAMERA_LENS_POSE_REFERENCE</li>
+     * <li>ACAMERA_LENS_POSE_ROTATION</li>
+     * <li>ACAMERA_LENS_POSE_TRANSLATION</li>
+     * </ul>
+     *
+     * @see ACAMERA_AUTOMOTIVE_LOCATION
+     * @see ACAMERA_LENS_POSE_REFERENCE
+     * @see ACAMERA_LENS_POSE_ROTATION
+     * @see ACAMERA_LENS_POSE_TRANSLATION
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING =                            // byte[n] (acamera_metadata_enum_android_automotive_lens_facing_t)
+            ACAMERA_AUTOMOTIVE_LENS_START,
+    ACAMERA_AUTOMOTIVE_LENS_END,
 
 } acamera_metadata_tag_t;
 
@@ -6547,6 +8020,7 @@ typedef enum acamera_metadata_enum_acamera_control_mode {
      * This setting can only be used if scene mode is supported (i.e.
      * ACAMERA_CONTROL_AVAILABLE_SCENE_MODES
      * contain some modes other than DISABLED).</p>
+     * <p>For extended scene modes such as BOKEH, please use USE_EXTENDED_SCENE_MODE instead.</p>
      *
      * @see ACAMERA_CONTROL_AVAILABLE_SCENE_MODES
      */
@@ -6563,6 +8037,18 @@ typedef enum acamera_metadata_enum_acamera_control_mode {
      * discarded by the camera device.</p>
      */
     ACAMERA_CONTROL_MODE_OFF_KEEP_STATE                              = 3,
+
+    /**
+     * <p>Use a specific extended scene mode.</p>
+     * <p>When extended scene mode is on, the camera device may override certain control
+     * parameters, such as targetFpsRange, AE, AWB, and AF modes, to achieve best power and
+     * quality tradeoffs. Only the mandatory stream combinations of LIMITED hardware level
+     * are guaranteed.</p>
+     * <p>This setting can only be used if extended scene mode is supported (i.e.
+     * android.control.availableExtendedSceneModes
+     * contains some modes other than DISABLED).</p>
+     */
+    ACAMERA_CONTROL_MODE_USE_EXTENDED_SCENE_MODE                     = 4,
 
 } acamera_metadata_enum_android_control_mode_t;
 
@@ -6736,6 +8222,17 @@ typedef enum acamera_metadata_enum_acamera_control_video_stabilization_mode {
      * <p>Video stabilization is enabled.</p>
      */
     ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE_ON                      = 1,
+
+    /**
+     * <p>Preview stabilization, where the preview in addition to all other non-RAW streams are
+     * stabilized with the same quality of stabilization, is enabled. This mode aims to give
+     * clients a 'what you see is what you get' effect. In this mode, the FoV reduction will
+     * be a maximum of 20 % both horizontally and vertically
+     * (10% from left, right, top, bottom) for the given zoom ratio / crop region.
+     * The resultant FoV will also be the same across all processed streams
+     * (that have the same aspect ratio).</p>
+     */
+    ACAMERA_CONTROL_VIDEO_STABILIZATION_MODE_PREVIEW_STABILIZATION   = 2,
 
 } acamera_metadata_enum_android_control_video_stabilization_mode_t;
 
@@ -6952,6 +8449,31 @@ typedef enum acamera_metadata_enum_acamera_control_af_scene_change {
     ACAMERA_CONTROL_AF_SCENE_CHANGE_DETECTED                         = 1,
 
 } acamera_metadata_enum_android_control_af_scene_change_t;
+
+// ACAMERA_CONTROL_EXTENDED_SCENE_MODE
+typedef enum acamera_metadata_enum_acamera_control_extended_scene_mode {
+    /**
+     * <p>Extended scene mode is disabled.</p>
+     */
+    ACAMERA_CONTROL_EXTENDED_SCENE_MODE_DISABLED                     = 0,
+
+    /**
+     * <p>High quality bokeh mode is enabled for all non-raw streams (including YUV,
+     * JPEG, and IMPLEMENTATION_DEFINED) when capture intent is STILL_CAPTURE. Due to the
+     * extra image processing, this mode may introduce additional stall to non-raw streams.
+     * This mode should be used in high quality still capture use case.</p>
+     */
+    ACAMERA_CONTROL_EXTENDED_SCENE_MODE_BOKEH_STILL_CAPTURE          = 1,
+
+    /**
+     * <p>Bokeh effect must not slow down capture rate relative to sensor raw output,
+     * and the effect is applied to all processed streams no larger than the maximum
+     * streaming dimension. This mode should be used if performance and power are a
+     * priority, such as video recording.</p>
+     */
+    ACAMERA_CONTROL_EXTENDED_SCENE_MODE_BOKEH_CONTINUOUS             = 2,
+
+} acamera_metadata_enum_android_control_extended_scene_mode_t;
 
 
 
@@ -7178,6 +8700,27 @@ typedef enum acamera_metadata_enum_acamera_lens_pose_reference {
      * @see ACAMERA_LENS_POSE_TRANSLATION
      */
     ACAMERA_LENS_POSE_REFERENCE_GYROSCOPE                            = 1,
+
+    /**
+     * <p>The camera device cannot represent the values of ACAMERA_LENS_POSE_TRANSLATION
+     * and ACAMERA_LENS_POSE_ROTATION accurately enough. One such example is a camera device
+     * on the cover of a foldable phone: in order to measure the pose translation and rotation,
+     * some kind of hinge position sensor would be needed.</p>
+     * <p>The value of ACAMERA_LENS_POSE_TRANSLATION must be all zeros, and
+     * ACAMERA_LENS_POSE_ROTATION must be values matching its default facing.</p>
+     *
+     * @see ACAMERA_LENS_POSE_ROTATION
+     * @see ACAMERA_LENS_POSE_TRANSLATION
+     */
+    ACAMERA_LENS_POSE_REFERENCE_UNDEFINED                            = 2,
+
+    /**
+     * <p>The value of ACAMERA_LENS_POSE_TRANSLATION is relative to the origin of the
+     * automotive sensor coordinate system, which is at the center of the rear axle.</p>
+     *
+     * @see ACAMERA_LENS_POSE_TRANSLATION
+     */
+    ACAMERA_LENS_POSE_REFERENCE_AUTOMOTIVE                           = 3,
 
 } acamera_metadata_enum_android_lens_pose_reference_t;
 
@@ -7477,21 +9020,22 @@ typedef enum acamera_metadata_enum_acamera_request_available_capabilities {
 
     /**
      * <p>The camera device supports capturing high-resolution images at &gt;= 20 frames per
-     * second, in at least the uncompressed YUV format, when post-processing settings are set
-     * to FAST. Additionally, maximum-resolution images can be captured at &gt;= 10 frames
-     * per second.  Here, 'high resolution' means at least 8 megapixels, or the maximum
-     * resolution of the device, whichever is smaller.</p>
+     * second, in at least the uncompressed YUV format, when post-processing settings are
+     * set to FAST. Additionally, all image resolutions less than 24 megapixels can be
+     * captured at &gt;= 10 frames per second. Here, 'high resolution' means at least 8
+     * megapixels, or the maximum resolution of the device, whichever is smaller.</p>
      * <p>More specifically, this means that at least one output {@link AIMAGE_FORMAT_YUV_420_888 } size listed in
      * {@link ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS }
      * is larger or equal to the 'high resolution' defined above, and can be captured at at
      * least 20 fps.  For the largest {@link AIMAGE_FORMAT_YUV_420_888 } size listed in
      * {@link ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS },
-     * camera device can capture this size for at least 10 frames per second.  Also the
-     * ACAMERA_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES entry lists at least one FPS range where
-     * the minimum FPS is &gt;= 1 / minimumFrameDuration for the largest YUV_420_888 size.</p>
+     * camera device can capture this size for at least 10 frames per second if the size is
+     * less than 24 megapixels. Also the ACAMERA_CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES entry
+     * lists at least one FPS range where the minimum FPS is &gt;= 1 / minimumFrameDuration
+     * for the largest YUV_420_888 size.</p>
      * <p>If the device supports the {@link AIMAGE_FORMAT_RAW10 }, {@link AIMAGE_FORMAT_RAW12 }, {@link AIMAGE_FORMAT_Y8 }, then those can also be
      * captured at the same rate as the maximum-size YUV_420_888 resolution is.</p>
-     * <p>In addition, the ACAMERA_SYNC_MAX_LATENCY field is guaranted to have a value between 0
+     * <p>In addition, the ACAMERA_SYNC_MAX_LATENCY field is guaranteed to have a value between 0
      * and 4, inclusive. ACAMERA_CONTROL_AE_LOCK_AVAILABLE and ACAMERA_CONTROL_AWB_LOCK_AVAILABLE
      * are also guaranteed to be <code>true</code> so burst capture with these two locks ON yields
      * consistent image output.</p>
@@ -7555,14 +9099,29 @@ typedef enum acamera_metadata_enum_acamera_request_available_capabilities {
     ACAMERA_REQUEST_AVAILABLE_CAPABILITIES_MOTION_TRACKING           = 10,
 
     /**
-     * <p>The camera device is a logical camera backed by two or more physical cameras. In
-     * API level 28, the physical cameras must also be exposed to the application via
-     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraManager.html#getCameraIdList">CameraManager#getCameraIdList</a>. Starting from API
-     * level 29, some or all physical cameras may not be independently exposed to the
-     * application, in which case the physical camera IDs will not be available in
-     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraManager.html#getCameraIdList">CameraManager#getCameraIdList</a>. But the application
-     * can still query the physical cameras' characteristics by calling
-     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraManager.html#getCameraCharacteristics">CameraManager#getCameraCharacteristics</a>.</p>
+     * <p>The camera device is a logical camera backed by two or more physical cameras.</p>
+     * <p>In API level 28, the physical cameras must also be exposed to the application via
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraManager.html#getCameraIdList">CameraManager#getCameraIdList</a>.</p>
+     * <p>Starting from API level 29:</p>
+     * <ul>
+     * <li>Some or all physical cameras may not be independently exposed to the application,
+     * in which case the physical camera IDs will not be available in
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraManager.html#getCameraIdList">CameraManager#getCameraIdList</a>. But the
+     * application can still query the physical cameras' characteristics by calling
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraManager.html#getCameraCharacteristics">CameraManager#getCameraCharacteristics</a>.</li>
+     * <li>If a physical camera is hidden from camera ID list, the mandatory stream
+     * combinations for that physical camera must be supported through the logical camera
+     * using physical streams. One exception is that in API level 30, a physical camera
+     * may become unavailable via
+     * {@link ACameraManager_PhysicalCameraAvailabilityCallback }
+     * callback.</li>
+     * </ul>
+     * <p>Combinations of logical and physical streams, or physical streams from different
+     * physical cameras are not guaranteed. However, if the camera device supports
+     * {@link ACameraDevice_isSessionConfigurationSupported },
+     * application must be able to query whether a stream combination involving physical
+     * streams is supported by calling
+     * {@link ACameraDevice_isSessionConfigurationSupported }.</p>
      * <p>Camera application shouldn't assume that there are at most 1 rear camera and 1 front
      * camera in the system. For an application that switches between front and back cameras,
      * the recommendation is to switch between the first rear camera and the first front
@@ -7587,24 +9146,6 @@ typedef enum acamera_metadata_enum_acamera_request_available_capabilities {
      *   the same.</li>
      * <li>The logical camera must be LIMITED or higher device.</li>
      * </ul>
-     * <p>Both the logical camera device and its underlying physical devices support the
-     * mandatory stream combinations required for their device levels.</p>
-     * <p>Additionally, for each guaranteed stream combination, the logical camera supports:</p>
-     * <ul>
-     * <li>For each guaranteed stream combination, the logical camera supports replacing one
-     *   logical {@link AIMAGE_FORMAT_YUV_420_888 YUV_420_888}
-     *   or raw stream with two physical streams of the same size and format, each from a
-     *   separate physical camera, given that the size and format are supported by both
-     *   physical cameras.</li>
-     * <li>If the logical camera doesn't advertise RAW capability, but the underlying physical
-     *   cameras do, the logical camera will support guaranteed stream combinations for RAW
-     *   capability, except that the RAW streams will be physical streams, each from a separate
-     *   physical camera. This is usually the case when the physical cameras have different
-     *   sensor sizes.</li>
-     * </ul>
-     * <p>Using physical streams in place of a logical stream of the same size and format will
-     * not slow down the frame rate of the capture, as long as the minimum frame duration
-     * of the physical and logical streams are the same.</p>
      * <p>A logical camera device's dynamic metadata may contain
      * ACAMERA_LOGICAL_MULTI_CAMERA_ACTIVE_PHYSICAL_ID to notify the application of the current
      * active physical camera Id. An active physical camera is the physical camera from which
@@ -7645,14 +9186,62 @@ typedef enum acamera_metadata_enum_acamera_request_available_capabilities {
      * <li>ACAMERA_LENS_POSE_REFERENCE</li>
      * <li>ACAMERA_LENS_DISTORTION</li>
      * </ul>
-     * <p>To maintain backward compatibility, the capture request and result metadata tags
-     * required for basic camera functionalities will be solely based on the
-     * logical camera capabiltity. Other request and result metadata tags, on the other
-     * hand, will be based on current active physical camera. For example, the physical
-     * cameras' sensor sensitivity and lens capability could be different from each other.
-     * So when the application manually controls sensor exposure time/gain, or does manual
-     * focus control, it must checks the current active physical camera's exposure, gain,
-     * and focus distance range.</p>
+     * <p>The field of view of non-RAW physical streams must not be smaller than that of the
+     * non-RAW logical streams, or the maximum field-of-view of the physical camera,
+     * whichever is smaller. The application should check the physical capture result
+     * metadata for how the physical streams are cropped or zoomed. More specifically, given
+     * the physical camera result metadata, the effective horizontal field-of-view of the
+     * physical camera is:</p>
+     * <pre><code>fov = 2 * atan2(cropW * sensorW / (2 * zoomRatio * activeArrayW), focalLength)
+     * </code></pre>
+     * <p>where the equation parameters are the physical camera's crop region width, physical
+     * sensor width, zoom ratio, active array width, and focal length respectively. Typically
+     * the physical stream of active physical camera has the same field-of-view as the
+     * logical streams. However, the same may not be true for physical streams from
+     * non-active physical cameras. For example, if the logical camera has a wide-ultrawide
+     * configuration where the wide lens is the default, when the crop region is set to the
+     * logical camera's active array size, (and the zoom ratio set to 1.0 starting from
+     * Android 11), a physical stream for the ultrawide camera may prefer outputting images
+     * with larger field-of-view than that of the wide camera for better stereo matching
+     * margin or more robust motion tracking. At the same time, the physical non-RAW streams'
+     * field of view must not be smaller than the requested crop region and zoom ratio, as
+     * long as it's within the physical lens' capability. For example, for a logical camera
+     * with wide-tele lens configuration where the wide lens is the default, if the logical
+     * camera's crop region is set to maximum size, and zoom ratio set to 1.0, the physical
+     * stream for the tele lens will be configured to its maximum size crop region (no zoom).</p>
+     * <p><em>Deprecated:</em> Prior to Android 11, the field of view of all non-RAW physical streams
+     * cannot be larger than that of non-RAW logical streams. If the logical camera has a
+     * wide-ultrawide lens configuration where the wide lens is the default, when the logical
+     * camera's crop region is set to maximum size, the FOV of the physical streams for the
+     * ultrawide lens will be the same as the logical stream, by making the crop region
+     * smaller than its active array size to compensate for the smaller focal length.</p>
+     * <p>There are two ways for the application to capture RAW images from a logical camera
+     * with RAW capability:</p>
+     * <ul>
+     * <li>Because the underlying physical cameras may have different RAW capabilities (such
+     * as resolution or CFA pattern), to maintain backward compatibility, when a RAW stream
+     * is configured, the camera device makes sure the default active physical camera remains
+     * active and does not switch to other physical cameras. (One exception is that, if the
+     * logical camera consists of identical image sensors and advertises multiple focalLength
+     * due to different lenses, the camera device may generate RAW images from different
+     * physical cameras based on the focalLength being set by the application.) This
+     * backward-compatible approach usually results in loss of optical zoom, to telephoto
+     * lens or to ultrawide lens.</li>
+     * <li>Alternatively, to take advantage of the full zoomRatio range of the logical camera,
+     * the application should use <a href="https://developer.android.com/reference/android/hardware/camera2/MultiResolutionImageReader.html">MultiResolutionImageReader</a>
+     * to capture RAW images from the currently active physical camera. Because different
+     * physical camera may have different RAW characteristics, the application needs to use
+     * the characteristics and result metadata of the active physical camera for the
+     * relevant RAW metadata.</li>
+     * </ul>
+     * <p>The capture request and result metadata tags required for backward compatible camera
+     * functionalities will be solely based on the logical camera capability. On the other
+     * hand, the use of manual capture controls (sensor or post-processing) with a
+     * logical camera may result in unexpected behavior when the HAL decides to switch
+     * between physical cameras with different characteristics under the hood. For example,
+     * when the application manually sets exposure time and sensitivity while zooming in,
+     * the brightness of the camera images may suddenly change because HAL switches from one
+     * physical camera to the other.</p>
      *
      * @see ACAMERA_LENS_DISTORTION
      * @see ACAMERA_LENS_INFO_FOCUS_DISTANCE_CALIBRATION
@@ -7707,7 +9296,157 @@ typedef enum acamera_metadata_enum_acamera_request_available_capabilities {
      */
     ACAMERA_REQUEST_AVAILABLE_CAPABILITIES_SECURE_IMAGE_DATA         = 13,
 
+    /**
+     * <p>The camera device is only accessible by Android's system components and privileged
+     * applications. Processes need to have the android.permission.SYSTEM_CAMERA in
+     * addition to android.permission.CAMERA in order to connect to this camera device.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_CAPABILITIES_SYSTEM_CAMERA             = 14,
+
+    /**
+     * <p>This camera device is capable of producing ultra high resolution images in
+     * addition to the image sizes described in the
+     * android.scaler.streamConfigurationMap.
+     * It can operate in 'default' mode and 'max resolution' mode. It generally does this
+     * by binning pixels in 'default' mode and not binning them in 'max resolution' mode.
+     * <code>android.scaler.streamConfigurationMap</code> describes the streams supported in 'default'
+     * mode.
+     * The stream configurations supported in 'max resolution' mode are described by
+     * <code>android.scaler.streamConfigurationMapMaximumResolution</code>.
+     * The maximum resolution mode pixel array size of a camera device
+     * (<code>ACAMERA_SENSOR_INFO_PIXEL_ARRAY_SIZE</code>) with this capability,
+     * will be at least 24 megapixels.</p>
+     *
+     * @see ACAMERA_SENSOR_INFO_PIXEL_ARRAY_SIZE
+     */
+    ACAMERA_REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR
+                                                                      = 16,
+
+    /**
+     * <p>The camera device supports selecting a per-stream use case via
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/params/OutputConfiguration.html#setStreamUseCase">OutputConfiguration#setStreamUseCase</a>
+     * so that the device can optimize camera pipeline parameters such as tuning, sensor
+     * mode, or ISP settings for a specific user scenario.
+     * Some sample usages of this capability are:</p>
+     * <ul>
+     * <li>Distinguish high quality YUV captures from a regular YUV stream where
+     *   the image quality may not be as good as the JPEG stream, or</li>
+     * <li>Use one stream to serve multiple purposes: viewfinder, video recording and
+     *   still capture. This is common with applications that wish to apply edits equally
+     *   to preview, saved images, and saved videos.</li>
+     * </ul>
+     * <p>This capability requires the camera device to support the following
+     * stream use cases:</p>
+     * <ul>
+     * <li>DEFAULT for backward compatibility where the application doesn't set
+     *   a stream use case</li>
+     * <li>PREVIEW for live viewfinder and in-app image analysis</li>
+     * <li>STILL_CAPTURE for still photo capture</li>
+     * <li>VIDEO_RECORD for recording video clips</li>
+     * <li>PREVIEW_VIDEO_STILL for one single stream used for viewfinder, video
+     *   recording, and still capture.</li>
+     * <li>VIDEO_CALL for long running video calls</li>
+     * </ul>
+     * <p><a href="https://developer.android.com/reference/android/hardware/camera2/CameraCharacteristics.html#SCALER_AVAILABLE_STREAM_USE_CASES">CameraCharacteristics#SCALER_AVAILABLE_STREAM_USE_CASES</a>
+     * lists all of the supported stream use cases.</p>
+     * <p>Refer to <a href="https://developer.android.com/reference/android/hardware/camera2/CameraDevice.html#createCaptureSession">CameraDevice#createCaptureSession</a> for the
+     * mandatory stream combinations involving stream use cases, which can also be queried
+     * via <a href="https://developer.android.com/reference/android/hardware/camera2/params/MandatoryStreamCombination.html">MandatoryStreamCombination</a>.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_CAPABILITIES_STREAM_USE_CASE           = 19,
+
 } acamera_metadata_enum_android_request_available_capabilities_t;
+
+// ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP
+typedef enum acamera_metadata_enum_acamera_request_available_dynamic_range_profiles_map {
+    /**
+     * <p>8-bit SDR profile which is the default for all non 10-bit output capable devices.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD    = 0x1,
+
+    /**
+     * <p>10-bit pixel samples encoded using the Hybrid log-gamma transfer function.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HLG10       = 0x2,
+
+    /**
+     * <p>10-bit pixel samples encoded using the SMPTE ST 2084 transfer function.
+     * This profile utilizes internal static metadata to increase the quality
+     * of the capture.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HDR10       = 0x4,
+
+    /**
+     * <p>10-bit pixel samples encoded using the SMPTE ST 2084 transfer function.
+     * In contrast to HDR10, this profile uses internal per-frame metadata
+     * to further enhance the quality of the capture.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_HDR10_PLUS  = 0x8,
+
+    /**
+     * <p>This is a camera mode for Dolby Vision capture optimized for a more scene
+     * accurate capture. This would typically differ from what a specific device
+     * might want to tune for a consumer optimized Dolby Vision general capture.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_REF
+                                                                      = 0x10,
+
+    /**
+     * <p>This is the power optimized mode for 10-bit Dolby Vision HDR Reference Mode.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_REF_PO
+                                                                      = 0x20,
+
+    /**
+     * <p>This is the camera mode for the default Dolby Vision capture mode for the
+     * specific device. This would be tuned by each specific device for consumer
+     * pleasing results that resonate with their particular audience. We expect
+     * that each specific device would have a different look for their default
+     * Dolby Vision capture.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_OEM
+                                                                      = 0x40,
+
+    /**
+     * <p>This is the power optimized mode for 10-bit Dolby Vision HDR device specific
+     * capture Mode.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_10B_HDR_OEM_PO
+                                                                      = 0x80,
+
+    /**
+     * <p>This is the 8-bit version of the Dolby Vision reference capture mode optimized
+     * for scene accuracy.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_8B_HDR_REF
+                                                                      = 0x100,
+
+    /**
+     * <p>This is the power optimized mode for 8-bit Dolby Vision HDR Reference Mode.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_8B_HDR_REF_PO
+                                                                      = 0x200,
+
+    /**
+     * <p>This is the 8-bit version of device specific tuned and optimized Dolby Vision
+     * capture mode.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_8B_HDR_OEM
+                                                                      = 0x400,
+
+    /**
+     * <p>This is the power optimized mode for 8-bit Dolby Vision HDR device specific
+     * capture Mode.</p>
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_DOLBY_VISION_8B_HDR_OEM_PO
+                                                                      = 0x800,
+
+    /**
+     *
+     */
+    ACAMERA_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_MAX         = 0x1000,
+
+} acamera_metadata_enum_android_request_available_dynamic_range_profiles_map_t;
 
 
 // ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS
@@ -7736,7 +9475,9 @@ typedef enum acamera_metadata_enum_acamera_scaler_cropping_type {
 typedef enum acamera_metadata_enum_acamera_scaler_available_recommended_stream_configurations {
     /**
      * <p>Preview must only include non-stalling processed stream configurations with
-     * output formats like YUV_420_888, IMPLEMENTATION_DEFINED, etc.</p>
+     * output formats like
+     * {@link AIMAGE_FORMAT_YUV_420_888 },
+     * {@link AIMAGE_FORMAT_PRIVATE }, etc.</p>
      */
     ACAMERA_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS_PREVIEW
                                                                       = 0x0,
@@ -7751,19 +9492,20 @@ typedef enum acamera_metadata_enum_acamera_scaler_available_recommended_stream_c
 
     /**
      * <p>Video snapshot must include stream configurations at least as big as
-     * the maximum RECORD resolutions and only with format BLOB + DATASPACE_JFIF
-     * format/dataspace combination (JPEG). Additionally the configurations shouldn't cause
-     * preview glitches and also be able to run at 30 fps.</p>
+     * the maximum RECORD resolutions and only with
+     * {@link AIMAGE_FORMAT_JPEG JPEG output format}.
+     * Additionally the configurations shouldn't cause preview glitches and also be able to
+     * run at 30 fps.</p>
      */
     ACAMERA_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS_VIDEO_SNAPSHOT
                                                                       = 0x2,
 
     /**
      * <p>Recommended snapshot stream configurations must include at least one with
-     * size close to ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE with BLOB + DATASPACE_JFIF
-     * format/dataspace combination (JPEG). Taking into account restrictions on aspect
-     * ratio, alignment etc. the area of the maximum suggested size shouldn’t be less than
-     * 97% of the sensor array size area.</p>
+     * size close to ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE and
+     * {@link AIMAGE_FORMAT_JPEG JPEG output format}.
+     * Taking into account restrictions on aspect ratio, alignment etc. the area of the
+     * maximum suggested size shouldn’t be less than 97% of the sensor array size area.</p>
      *
      * @see ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE
      */
@@ -7782,8 +9524,33 @@ typedef enum acamera_metadata_enum_acamera_scaler_available_recommended_stream_c
      */
     ACAMERA_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS_RAW   = 0x5,
 
-    ACAMERA_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS_PUBLIC_END
+    /**
+     * <p>If supported, the recommended low latency stream configurations must have
+     * end-to-end latency that does not exceed 200 ms. under standard operating conditions
+     * (reasonable light levels, not loaded system) and using template
+     * TEMPLATE_STILL_CAPTURE. This is primarily for listing configurations for the
+     * {@link AIMAGE_FORMAT_JPEG JPEG output format}
+     * however other supported output formats can be added as well.</p>
+     */
+    ACAMERA_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS_LOW_LATENCY_SNAPSHOT
                                                                       = 0x6,
+
+    ACAMERA_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS_PUBLIC_END
+                                                                      = 0x7,
+
+    /**
+     * <p>If supported, the recommended 10-bit output stream configurations must include
+     * a subset of the advertised <a href="https://developer.android.com/reference/android/graphics/ImageFormat.html#YCBCR_P010">ImageFormat#YCBCR_P010</a> and
+     * <a href="https://developer.android.com/reference/android/graphics/ImageFormat.html#PRIVATE">ImageFormat#PRIVATE</a> outputs that are optimized for power
+     * and performance when registered along with a supported 10-bit dynamic range profile.
+     * see android.hardware.camera2.params.OutputConfiguration#setDynamicRangeProfile for
+     * details.</p>
+     */
+    ACAMERA_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS_10BIT_OUTPUT
+                                                                      = 0x8,
+
+    ACAMERA_SCALER_AVAILABLE_RECOMMENDED_STREAM_CONFIGURATIONS_PUBLIC_END_3_8
+                                                                      = 0x9,
 
     /**
      * <p>Vendor defined use cases. These depend on the vendor implementation.</p>
@@ -7792,6 +9559,149 @@ typedef enum acamera_metadata_enum_acamera_scaler_available_recommended_stream_c
                                                                       = 0x18,
 
 } acamera_metadata_enum_android_scaler_available_recommended_stream_configurations_t;
+
+// ACAMERA_SCALER_ROTATE_AND_CROP
+typedef enum acamera_metadata_enum_acamera_scaler_rotate_and_crop {
+    /**
+     * <p>No rotate and crop is applied. Processed outputs are in the sensor orientation.</p>
+     */
+    ACAMERA_SCALER_ROTATE_AND_CROP_NONE                              = 0,
+
+    /**
+     * <p>Processed images are rotated by 90 degrees clockwise, and then cropped
+     * to the original aspect ratio.</p>
+     */
+    ACAMERA_SCALER_ROTATE_AND_CROP_90                                = 1,
+
+    /**
+     * <p>Processed images are rotated by 180 degrees.  Since the aspect ratio does not
+     * change, no cropping is performed.</p>
+     */
+    ACAMERA_SCALER_ROTATE_AND_CROP_180                               = 2,
+
+    /**
+     * <p>Processed images are rotated by 270 degrees clockwise, and then cropped
+     * to the original aspect ratio.</p>
+     */
+    ACAMERA_SCALER_ROTATE_AND_CROP_270                               = 3,
+
+    /**
+     * <p>The camera API automatically selects the best concrete value for
+     * rotate-and-crop based on the application's support for resizability and the current
+     * multi-window mode.</p>
+     * <p>If the application does not support resizing but the display mode for its main
+     * Activity is not in a typical orientation, the camera API will set <code>ROTATE_AND_CROP_90</code>
+     * or some other supported rotation value, depending on device configuration,
+     * to ensure preview and captured images are correctly shown to the user. Otherwise,
+     * <code>ROTATE_AND_CROP_NONE</code> will be selected.</p>
+     * <p>When a value other than NONE is selected, several metadata fields will also be parsed
+     * differently to ensure that coordinates are correctly handled for features like drawing
+     * face detection boxes or passing in tap-to-focus coordinates.  The camera API will
+     * convert positions in the active array coordinate system to/from the cropped-and-rotated
+     * coordinate system to make the operation transparent for applications.</p>
+     * <p>No coordinate mapping will be done when the application selects a non-AUTO mode.</p>
+     */
+    ACAMERA_SCALER_ROTATE_AND_CROP_AUTO                              = 4,
+
+} acamera_metadata_enum_android_scaler_rotate_and_crop_t;
+
+// ACAMERA_SCALER_PHYSICAL_CAMERA_MULTI_RESOLUTION_STREAM_CONFIGURATIONS
+typedef enum acamera_metadata_enum_acamera_scaler_physical_camera_multi_resolution_stream_configurations {
+    ACAMERA_SCALER_PHYSICAL_CAMERA_MULTI_RESOLUTION_STREAM_CONFIGURATIONS_OUTPUT
+                                                                      = 0,
+
+    ACAMERA_SCALER_PHYSICAL_CAMERA_MULTI_RESOLUTION_STREAM_CONFIGURATIONS_INPUT
+                                                                      = 1,
+
+} acamera_metadata_enum_android_scaler_physical_camera_multi_resolution_stream_configurations_t;
+
+// ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION
+typedef enum acamera_metadata_enum_acamera_scaler_available_stream_configurations_maximum_resolution {
+    ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION_OUTPUT
+                                                                      = 0,
+
+    ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION_INPUT
+                                                                      = 1,
+
+} acamera_metadata_enum_android_scaler_available_stream_configurations_maximum_resolution_t;
+
+// ACAMERA_SCALER_MULTI_RESOLUTION_STREAM_SUPPORTED
+typedef enum acamera_metadata_enum_acamera_scaler_multi_resolution_stream_supported {
+    ACAMERA_SCALER_MULTI_RESOLUTION_STREAM_SUPPORTED_FALSE           = 0,
+
+    ACAMERA_SCALER_MULTI_RESOLUTION_STREAM_SUPPORTED_TRUE            = 1,
+
+} acamera_metadata_enum_android_scaler_multi_resolution_stream_supported_t;
+
+// ACAMERA_SCALER_AVAILABLE_STREAM_USE_CASES
+typedef enum acamera_metadata_enum_acamera_scaler_available_stream_use_cases {
+    /**
+     * <p>Default stream use case.</p>
+     * <p>This use case is the same as when the application doesn't set any use case for
+     * the stream. The camera device uses the properties of the output target, such as
+     * format, dataSpace, or surface class type, to optimize the image processing pipeline.</p>
+     */
+    ACAMERA_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT                = 0x0,
+
+    /**
+     * <p>Live stream shown to the user.</p>
+     * <p>Optimized for performance and usability as a viewfinder, but not necessarily for
+     * image quality. The output is not meant to be persisted as saved images or video.</p>
+     * <p>No stall if ACAMERA_CONTROL_* are set to FAST. There may be stall if
+     * they are set to HIGH_QUALITY. This use case has the same behavior as the
+     * default SurfaceView and SurfaceTexture targets. Additionally, this use case can be
+     * used for in-app image analysis.</p>
+     */
+    ACAMERA_SCALER_AVAILABLE_STREAM_USE_CASES_PREVIEW                = 0x1,
+
+    /**
+     * <p>Still photo capture.</p>
+     * <p>Optimized for high-quality high-resolution capture, and not expected to maintain
+     * preview-like frame rates.</p>
+     * <p>The stream may have stalls regardless of whether ACAMERA_CONTROL_* is HIGH_QUALITY.
+     * This use case has the same behavior as the default JPEG and RAW related formats.</p>
+     */
+    ACAMERA_SCALER_AVAILABLE_STREAM_USE_CASES_STILL_CAPTURE          = 0x2,
+
+    /**
+     * <p>Recording video clips.</p>
+     * <p>Optimized for high-quality video capture, including high-quality image stabilization
+     * if supported by the device and enabled by the application. As a result, may produce
+     * output frames with a substantial lag from real time, to allow for highest-quality
+     * stabilization or other processing. As such, such an output is not suitable for drawing
+     * to screen directly, and is expected to be persisted to disk or similar for later
+     * playback or processing. Only streams that set the VIDEO_RECORD use case are guaranteed
+     * to have video stabilization applied when the video stabilization control is set
+     * to ON, as opposed to PREVIEW_STABILIZATION.</p>
+     * <p>This use case has the same behavior as the default MediaRecorder and MediaCodec
+     * targets.</p>
+     */
+    ACAMERA_SCALER_AVAILABLE_STREAM_USE_CASES_VIDEO_RECORD           = 0x3,
+
+    /**
+     * <p>One single stream used for combined purposes of preview, video, and still capture.</p>
+     * <p>For such multi-purpose streams, the camera device aims to make the best tradeoff
+     * between the individual use cases. For example, the STILL_CAPTURE use case by itself
+     * may have stalls for achieving best image quality. But if combined with PREVIEW and
+     * VIDEO_RECORD, the camera device needs to trade off the additional image processing
+     * for speed so that preview and video recording aren't slowed down.</p>
+     * <p>Similarly, VIDEO_RECORD may produce frames with a substantial lag, but
+     * PREVIEW_VIDEO_STILL must have minimal output delay. This means that to enable video
+     * stabilization with this use case, the device must support and the app must select the
+     * PREVIEW_STABILIZATION mode for video stabilization.</p>
+     */
+    ACAMERA_SCALER_AVAILABLE_STREAM_USE_CASES_PREVIEW_VIDEO_STILL    = 0x4,
+
+    /**
+     * <p>Long-running video call optimized for both power efficiency and video quality.</p>
+     * <p>The camera sensor may run in a lower-resolution mode to reduce power consumption
+     * at the cost of some image and digital zoom quality. Unlike VIDEO_RECORD, VIDEO_CALL
+     * outputs are expected to work in dark conditions, so are usually accompanied with
+     * variable frame rate settings to allow sufficient exposure time in low light.</p>
+     */
+    ACAMERA_SCALER_AVAILABLE_STREAM_USE_CASES_VIDEO_CALL             = 0x5,
+
+} acamera_metadata_enum_android_scaler_available_stream_use_cases_t;
 
 
 // ACAMERA_SENSOR_REFERENCE_ILLUMINANT1
@@ -7865,10 +9775,10 @@ typedef enum acamera_metadata_enum_acamera_sensor_test_pattern_mode {
      * respective color channel provided in
      * ACAMERA_SENSOR_TEST_PATTERN_DATA.</p>
      * <p>For example:</p>
-     * <pre><code>android.testPatternData = [0, 0xFFFFFFFF, 0xFFFFFFFF, 0]
+     * <pre><code>ACAMERA_SENSOR_TEST_PATTERN_DATA = [0, 0xFFFFFFFF, 0xFFFFFFFF, 0]
      * </code></pre>
      * <p>All green pixels are 100% green. All red/blue pixels are black.</p>
-     * <pre><code>android.testPatternData = [0xFFFFFFFF, 0, 0xFFFFFFFF, 0]
+     * <pre><code>ACAMERA_SENSOR_TEST_PATTERN_DATA = [0xFFFFFFFF, 0, 0xFFFFFFFF, 0]
      * </code></pre>
      * <p>All red pixels are 100% red. Only the odd green pixels
      * are 100% green. All blue pixels are 100% black.</p>
@@ -7951,6 +9861,42 @@ typedef enum acamera_metadata_enum_acamera_sensor_test_pattern_mode {
 
 } acamera_metadata_enum_android_sensor_test_pattern_mode_t;
 
+// ACAMERA_SENSOR_PIXEL_MODE
+typedef enum acamera_metadata_enum_acamera_sensor_pixel_mode {
+    /**
+     * <p>This is the default sensor pixel mode. This is the only sensor pixel mode
+     * supported unless a camera device advertises
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>.</p>
+     */
+    ACAMERA_SENSOR_PIXEL_MODE_DEFAULT                                = 0,
+
+    /**
+     * <p>This sensor pixel mode is offered by devices with capability
+     * <a href="https://developer.android.com/reference/android/hardware/camera2/CameraMetadata.html#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR">CameraMetadata#REQUEST_AVAILABLE_CAPABILITIES_ULTRA_HIGH_RESOLUTION_SENSOR</a>.
+     * In this mode, sensors typically do not bin pixels, as a result can offer larger
+     * image sizes.</p>
+     */
+    ACAMERA_SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION                     = 1,
+
+} acamera_metadata_enum_android_sensor_pixel_mode_t;
+
+// ACAMERA_SENSOR_RAW_BINNING_FACTOR_USED
+typedef enum acamera_metadata_enum_acamera_sensor_raw_binning_factor_used {
+    /**
+     * <p>The <code>RAW</code> targets in this capture have ACAMERA_SENSOR_INFO_BINNING_FACTOR as the
+     * bayer pattern.</p>
+     *
+     * @see ACAMERA_SENSOR_INFO_BINNING_FACTOR
+     */
+    ACAMERA_SENSOR_RAW_BINNING_FACTOR_USED_TRUE                      = 0,
+
+    /**
+     * <p>The <code>RAW</code> targets have a regular bayer pattern in this capture.</p>
+     */
+    ACAMERA_SENSOR_RAW_BINNING_FACTOR_USED_FALSE                     = 1,
+
+} acamera_metadata_enum_android_sensor_raw_binning_factor_used_t;
+
 
 // ACAMERA_SENSOR_INFO_COLOR_FILTER_ARRANGEMENT
 typedef enum acamera_metadata_enum_acamera_sensor_info_color_filter_arrangement {
@@ -7989,12 +9935,16 @@ typedef enum acamera_metadata_enum_acamera_sensor_info_color_filter_arrangement 
 // ACAMERA_SENSOR_INFO_TIMESTAMP_SOURCE
 typedef enum acamera_metadata_enum_acamera_sensor_info_timestamp_source {
     /**
-     * <p>Timestamps from ACAMERA_SENSOR_TIMESTAMP are in nanoseconds and monotonic,
-     * but can not be compared to timestamps from other subsystems
-     * (e.g. accelerometer, gyro etc.), or other instances of the same or different
-     * camera devices in the same system. Timestamps between streams and results for
-     * a single camera instance are comparable, and the timestamps for all buffers
-     * and the result metadata generated by a single capture are identical.</p>
+     * <p>Timestamps from ACAMERA_SENSOR_TIMESTAMP are in nanoseconds and monotonic, but can
+     * not be compared to timestamps from other subsystems (e.g. accelerometer, gyro etc.),
+     * or other instances of the same or different camera devices in the same system with
+     * accuracy. However, the timestamps are roughly in the same timebase as
+     * <a href="https://developer.android.com/reference/android/os/SystemClock.html#uptimeMillis">SystemClock#uptimeMillis</a>.  The accuracy is sufficient for tasks
+     * like A/V synchronization for video recording, at least, and the timestamps can be
+     * directly used together with timestamps from the audio subsystem for that task.</p>
+     * <p>Timestamps between streams and results for a single camera instance are comparable,
+     * and the timestamps for all buffers and the result metadata generated by a single
+     * capture are identical.</p>
      *
      * @see ACAMERA_SENSOR_TIMESTAMP
      */
@@ -8004,6 +9954,14 @@ typedef enum acamera_metadata_enum_acamera_sensor_info_timestamp_source {
      * <p>Timestamps from ACAMERA_SENSOR_TIMESTAMP are in the same timebase as
      * <a href="https://developer.android.com/reference/android/os/SystemClock.html#elapsedRealtimeNanos">SystemClock#elapsedRealtimeNanos</a>,
      * and they can be compared to other timestamps using that base.</p>
+     * <p>When buffers from a REALTIME device are passed directly to a video encoder from the
+     * camera, automatic compensation is done to account for differing timebases of the
+     * audio and camera subsystems.  If the application is receiving buffers and then later
+     * sending them to a video encoder or other application where they are compared with
+     * audio subsystem timestamps or similar, this compensation is not present.  In those
+     * cases, applications need to adjust the timestamps themselves.  Since <a href="https://developer.android.com/reference/android/os/SystemClock.html#elapsedRealtimeNanos">SystemClock#elapsedRealtimeNanos</a> and <a href="https://developer.android.com/reference/android/os/SystemClock.html#uptimeMillis">SystemClock#uptimeMillis</a> only diverge while the device is asleep, an
+     * offset between the two sources can be measured once per active session and applied
+     * to timestamps for sufficient accuracy for A/V sync.</p>
      *
      * @see ACAMERA_SENSOR_TIMESTAMP
      */
@@ -8162,7 +10120,7 @@ typedef enum acamera_metadata_enum_acamera_tonemap_mode {
     ACAMERA_TONEMAP_MODE_HIGH_QUALITY                                = 2,
 
     /**
-     * <p>Use the gamma value specified in ACAMERA_TONEMAP_GAMMA to peform
+     * <p>Use the gamma value specified in ACAMERA_TONEMAP_GAMMA to perform
      * tonemapping.</p>
      * <p>All color enhancement and tonemapping must be disabled, except
      * for applying the tonemapping curve specified by ACAMERA_TONEMAP_GAMMA.</p>
@@ -8174,7 +10132,7 @@ typedef enum acamera_metadata_enum_acamera_tonemap_mode {
 
     /**
      * <p>Use the preset tonemapping curve specified in
-     * ACAMERA_TONEMAP_PRESET_CURVE to peform tonemapping.</p>
+     * ACAMERA_TONEMAP_PRESET_CURVE to perform tonemapping.</p>
      * <p>All color enhancement and tonemapping must be disabled, except
      * for applying the tonemapping curve specified by
      * ACAMERA_TONEMAP_PRESET_CURVE.</p>
@@ -8272,6 +10230,7 @@ typedef enum acamera_metadata_enum_acamera_info_supported_hardware_level {
      * fire the flash for flash power metering during precapture, and then fire the flash
      * for the final capture, if a flash is available on the device and the AE mode is set to
      * enable the flash.</p>
+     * <p>Devices that initially shipped with Android version <a href="https://developer.android.com/reference/android/os/Build.VERSION_CODES.html#Q">Q</a> or newer will not include any LEGACY-level devices.</p>
      *
      * @see ACAMERA_CONTROL_AE_PRECAPTURE_TRIGGER
      * @see ACAMERA_REQUEST_AVAILABLE_CAPABILITIES
@@ -8422,6 +10381,26 @@ typedef enum acamera_metadata_enum_acamera_depth_available_dynamic_depth_stream_
 
 } acamera_metadata_enum_android_depth_available_dynamic_depth_stream_configurations_t;
 
+// ACAMERA_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION
+typedef enum acamera_metadata_enum_acamera_depth_available_depth_stream_configurations_maximum_resolution {
+    ACAMERA_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION_OUTPUT
+                                                                      = 0,
+
+    ACAMERA_DEPTH_AVAILABLE_DEPTH_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION_INPUT
+                                                                      = 1,
+
+} acamera_metadata_enum_android_depth_available_depth_stream_configurations_maximum_resolution_t;
+
+// ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION
+typedef enum acamera_metadata_enum_acamera_depth_available_dynamic_depth_stream_configurations_maximum_resolution {
+    ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION_OUTPUT
+                                                                      = 0,
+
+    ACAMERA_DEPTH_AVAILABLE_DYNAMIC_DEPTH_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION_INPUT
+                                                                      = 1,
+
+} acamera_metadata_enum_android_depth_available_dynamic_depth_stream_configurations_maximum_resolution_t;
+
 
 // ACAMERA_LOGICAL_MULTI_CAMERA_SENSOR_SYNC_TYPE
 typedef enum acamera_metadata_enum_acamera_logical_multi_camera_sensor_sync_type {
@@ -8473,9 +10452,179 @@ typedef enum acamera_metadata_enum_acamera_heic_available_heic_stream_configurat
 
 } acamera_metadata_enum_android_heic_available_heic_stream_configurations_t;
 
+// ACAMERA_HEIC_AVAILABLE_HEIC_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION
+typedef enum acamera_metadata_enum_acamera_heic_available_heic_stream_configurations_maximum_resolution {
+    ACAMERA_HEIC_AVAILABLE_HEIC_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION_OUTPUT
+                                                                      = 0,
+
+    ACAMERA_HEIC_AVAILABLE_HEIC_STREAM_CONFIGURATIONS_MAXIMUM_RESOLUTION_INPUT
+                                                                      = 1,
+
+} acamera_metadata_enum_android_heic_available_heic_stream_configurations_maximum_resolution_t;
 
 
-#endif /* __ANDROID_API__ >= 24 */
+
+// ACAMERA_AUTOMOTIVE_LOCATION
+typedef enum acamera_metadata_enum_acamera_automotive_location {
+    /**
+     * <p>The camera device exists inside of the vehicle cabin.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_INTERIOR                             = 0,
+
+    /**
+     * <p>The camera exists outside of the vehicle body frame but not exactly on one of the
+     * exterior locations this enum defines.  The applications should determine the exact
+     * location from ACAMERA_LENS_POSE_TRANSLATION.</p>
+     *
+     * @see ACAMERA_LENS_POSE_TRANSLATION
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTERIOR_OTHER                       = 1,
+
+    /**
+     * <p>The camera device exists outside of the vehicle body frame and on its front side.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTERIOR_FRONT                       = 2,
+
+    /**
+     * <p>The camera device exists outside of the vehicle body frame and on its rear side.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTERIOR_REAR                        = 3,
+
+    /**
+     * <p>The camera device exists outside and on left side of the vehicle body frame.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTERIOR_LEFT                        = 4,
+
+    /**
+     * <p>The camera device exists outside and on right side of the vehicle body frame.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTERIOR_RIGHT                       = 5,
+
+    /**
+     * <p>The camera device exists on an extra vehicle, such as the trailer, but not exactly
+     * on one of front, rear, left, or right side.  Applications should determine the exact
+     * location from ACAMERA_LENS_POSE_TRANSLATION.</p>
+     *
+     * @see ACAMERA_LENS_POSE_TRANSLATION
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTRA_OTHER                          = 6,
+
+    /**
+     * <p>The camera device exists outside of the extra vehicle's body frame and on its front
+     * side.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTRA_FRONT                          = 7,
+
+    /**
+     * <p>The camera device exists outside of the extra vehicle's body frame and on its rear
+     * side.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTRA_REAR                           = 8,
+
+    /**
+     * <p>The camera device exists outside and on left side of the extra vehicle body.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTRA_LEFT                           = 9,
+
+    /**
+     * <p>The camera device exists outside and on right side of the extra vehicle body.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LOCATION_EXTRA_RIGHT                          = 10,
+
+} acamera_metadata_enum_android_automotive_location_t;
+
+
+// ACAMERA_AUTOMOTIVE_LENS_FACING
+typedef enum acamera_metadata_enum_acamera_automotive_lens_facing {
+    /**
+     * <p>The camera device faces the outside of the vehicle body frame but not exactly
+     * one of the exterior sides defined by this enum.  Applications should determine
+     * the exact facing direction from ACAMERA_LENS_POSE_ROTATION and
+     * ACAMERA_LENS_POSE_TRANSLATION.</p>
+     *
+     * @see ACAMERA_LENS_POSE_ROTATION
+     * @see ACAMERA_LENS_POSE_TRANSLATION
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_EXTERIOR_OTHER                    = 0,
+
+    /**
+     * <p>The camera device faces the front of the vehicle body frame.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_EXTERIOR_FRONT                    = 1,
+
+    /**
+     * <p>The camera device faces the rear of the vehicle body frame.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_EXTERIOR_REAR                     = 2,
+
+    /**
+     * <p>The camera device faces the left side of the vehicle body frame.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_EXTERIOR_LEFT                     = 3,
+
+    /**
+     * <p>The camera device faces the right side of the vehicle body frame.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_EXTERIOR_RIGHT                    = 4,
+
+    /**
+     * <p>The camera device faces the inside of the vehicle body frame but not exactly
+     * one of seats described by this enum.  Applications should determine the exact
+     * facing direction from ACAMERA_LENS_POSE_ROTATION and ACAMERA_LENS_POSE_TRANSLATION.</p>
+     *
+     * @see ACAMERA_LENS_POSE_ROTATION
+     * @see ACAMERA_LENS_POSE_TRANSLATION
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_OTHER                    = 5,
+
+    /**
+     * <p>The camera device faces the left side seat of the first row.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_SEAT_ROW_1_LEFT          = 6,
+
+    /**
+     * <p>The camera device faces the center seat of the first row.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_SEAT_ROW_1_CENTER        = 7,
+
+    /**
+     * <p>The camera device faces the right seat of the first row.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_SEAT_ROW_1_RIGHT         = 8,
+
+    /**
+     * <p>The camera device faces the left side seat of the second row.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_SEAT_ROW_2_LEFT          = 9,
+
+    /**
+     * <p>The camera device faces the center seat of the second row.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_SEAT_ROW_2_CENTER        = 10,
+
+    /**
+     * <p>The camera device faces the right side seat of the second row.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_SEAT_ROW_2_RIGHT         = 11,
+
+    /**
+     * <p>The camera device faces the left side seat of the third row.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_SEAT_ROW_3_LEFT          = 12,
+
+    /**
+     * <p>The camera device faces the center seat of the third row.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_SEAT_ROW_3_CENTER        = 13,
+
+    /**
+     * <p>The camera device faces the right seat of the third row.</p>
+     */
+    ACAMERA_AUTOMOTIVE_LENS_FACING_INTERIOR_SEAT_ROW_3_RIGHT         = 14,
+
+} acamera_metadata_enum_android_automotive_lens_facing_t;
+
+
 
 __END_DECLS
 

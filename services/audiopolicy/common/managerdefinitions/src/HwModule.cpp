@@ -17,11 +17,12 @@
 #define LOG_TAG "APM::HwModule"
 //#define LOG_NDEBUG 0
 
-#include "HwModule.h"
-#include "IOProfile.h"
-#include "AudioGain.h"
+#include <android-base/stringprintf.h>
 #include <policy.h>
 #include <system/audio.h>
+
+#include "HwModule.h"
+#include "IOProfile.h"
 
 namespace android {
 
@@ -42,7 +43,15 @@ HwModule::~HwModule()
     }
 }
 
-status_t HwModule::addOutputProfile(const String8& name, const audio_config_t *config,
+std::string HwModule::getTagForDevice(audio_devices_t device, const String8 &address,
+                                          audio_format_t codec)
+{
+    DeviceVector declaredDevices = getDeclaredDevices();
+    sp<DeviceDescriptor> deviceDesc = declaredDevices.getDevice(device, address, codec);
+    return deviceDesc ? deviceDesc->getTagName() : std::string{};
+}
+
+status_t HwModule::addOutputProfile(const std::string& name, const audio_config_t *config,
                                     audio_devices_t device, const String8& address)
 {
     sp<IOProfile> profile = new OutputProfile(name);
@@ -50,8 +59,8 @@ status_t HwModule::addOutputProfile(const String8& name, const audio_config_t *c
     profile->addAudioProfile(new AudioProfile(config->format, config->channel_mask,
                                               config->sample_rate));
 
-    sp<DeviceDescriptor> devDesc = new DeviceDescriptor(device);
-    devDesc->setAddress(address);
+    sp<DeviceDescriptor> devDesc =
+            new DeviceDescriptor(device, getTagForDevice(device), address.string());
     addDynamicDevice(devDesc);
     // Reciprocally attach the device to the module
     devDesc->attach(this);
@@ -96,7 +105,7 @@ void HwModule::setProfiles(const IOProfileCollection &profiles)
     }
 }
 
-status_t HwModule::removeOutputProfile(const String8& name)
+status_t HwModule::removeOutputProfile(const std::string& name)
 {
     for (size_t i = 0; i < mOutputProfiles.size(); i++) {
         if (mOutputProfiles[i]->getName() == name) {
@@ -111,27 +120,27 @@ status_t HwModule::removeOutputProfile(const String8& name)
     return NO_ERROR;
 }
 
-status_t HwModule::addInputProfile(const String8& name, const audio_config_t *config,
+status_t HwModule::addInputProfile(const std::string& name, const audio_config_t *config,
                                    audio_devices_t device, const String8& address)
 {
     sp<IOProfile> profile = new InputProfile(name);
     profile->addAudioProfile(new AudioProfile(config->format, config->channel_mask,
                                               config->sample_rate));
 
-    sp<DeviceDescriptor> devDesc = new DeviceDescriptor(device);
-    devDesc->setAddress(address);
+    sp<DeviceDescriptor> devDesc =
+            new DeviceDescriptor(device, getTagForDevice(device), address.string());
     addDynamicDevice(devDesc);
     // Reciprocally attach the device to the module
     devDesc->attach(this);
     profile->addSupportedDevice(devDesc);
 
     ALOGV("addInputProfile() name %s rate %d mask 0x%08x",
-          name.string(), config->sample_rate, config->channel_mask);
+          name.c_str(), config->sample_rate, config->channel_mask);
 
     return addInputProfile(profile);
 }
 
-status_t HwModule::removeInputProfile(const String8& name)
+status_t HwModule::removeInputProfile(const std::string& name)
 {
     for (size_t i = 0; i < mInputProfiles.size(); i++) {
         if (mInputProfiles[i]->getName() == name) {
@@ -157,7 +166,7 @@ void HwModule::setDeclaredDevices(const DeviceVector &devices)
 sp<DeviceDescriptor> HwModule::getRouteSinkDevice(const sp<AudioRoute> &route) const
 {
     sp<DeviceDescriptor> sinkDevice = 0;
-    if (route->getSink()->getType() == AUDIO_PORT_TYPE_DEVICE) {
+    if (route->getSink()->asAudioPort()->getType() == AUDIO_PORT_TYPE_DEVICE) {
         sinkDevice = mDeclaredDevices.getDeviceFromTagName(route->getSink()->getTagName());
     }
     return sinkDevice;
@@ -167,7 +176,7 @@ DeviceVector HwModule::getRouteSourceDevices(const sp<AudioRoute> &route) const
 {
     DeviceVector sourceDevices;
     for (const auto& source : route->getSources()) {
-        if (source->getType() == AUDIO_PORT_TYPE_DEVICE) {
+        if (source->asAudioPort()->getType() == AUDIO_PORT_TYPE_DEVICE) {
             sourceDevices.add(mDeclaredDevices.getDeviceFromTagName(source->getTagName()));
         }
     }
@@ -187,20 +196,20 @@ void HwModule::refreshSupportedDevices()
     for (const auto& stream : mInputProfiles) {
         DeviceVector sourceDevices;
         for (const auto& route : stream->getRoutes()) {
-            sp<AudioPort> sink = route->getSink();
+            sp<PolicyAudioPort> sink = route->getSink();
             if (sink == 0 || stream != sink) {
                 ALOGE("%s: Invalid route attached to input stream", __FUNCTION__);
                 continue;
             }
             DeviceVector sourceDevicesForRoute = getRouteSourceDevices(route);
             if (sourceDevicesForRoute.isEmpty()) {
-                ALOGE("%s: invalid source devices for %s", __FUNCTION__, stream->getName().string());
+                ALOGE("%s: invalid source devices for %s", __FUNCTION__, stream->getName().c_str());
                 continue;
             }
             sourceDevices.add(sourceDevicesForRoute);
         }
         if (sourceDevices.isEmpty()) {
-            ALOGE("%s: invalid source devices for %s", __FUNCTION__, stream->getName().string());
+            ALOGE("%s: invalid source devices for %s", __FUNCTION__, stream->getName().c_str());
             continue;
         }
         stream->setSupportedDevices(sourceDevices);
@@ -208,14 +217,14 @@ void HwModule::refreshSupportedDevices()
     for (const auto& stream : mOutputProfiles) {
         DeviceVector sinkDevices;
         for (const auto& route : stream->getRoutes()) {
-            sp<AudioPort> source = route->getSources().findByTagName(stream->getTagName());
+            sp<PolicyAudioPort> source = findByTagName(route->getSources(), stream->getTagName());
             if (source == 0 || stream != source) {
                 ALOGE("%s: Invalid route attached to output stream", __FUNCTION__);
                 continue;
             }
             sp<DeviceDescriptor> sinkDevice = getRouteSinkDevice(route);
             if (sinkDevice == 0) {
-                ALOGE("%s: invalid sink device for %s", __FUNCTION__, stream->getName().string());
+                ALOGE("%s: invalid sink device for %s", __FUNCTION__, stream->getName().c_str());
                 continue;
             }
             sinkDevices.add(sinkDevice);
@@ -230,7 +239,8 @@ void HwModule::setHandle(audio_module_handle_t handle) {
     mHandle = handle;
 }
 
-bool HwModule::supportsPatch(const sp<AudioPort> &srcPort, const sp<AudioPort> &dstPort) const {
+bool HwModule::supportsPatch(const sp<PolicyAudioPort> &srcPort,
+                             const sp<PolicyAudioPort> &dstPort) const {
     for (const auto &route : mRoutes) {
         if (route->supportsPatch(srcPort, dstPort)) {
             return true;
@@ -239,28 +249,28 @@ bool HwModule::supportsPatch(const sp<AudioPort> &srcPort, const sp<AudioPort> &
     return false;
 }
 
-void HwModule::dump(String8 *dst) const
+void HwModule::dump(String8 *dst, int spaces) const
 {
-    dst->appendFormat("  - name: %s\n", getName());
-    dst->appendFormat("  - handle: %d\n", mHandle);
-    dst->appendFormat("  - version: %u.%u\n", getHalVersionMajor(), getHalVersionMinor());
+    dst->appendFormat("Handle: %d; \"%s\"\n", mHandle, getName());
     if (mOutputProfiles.size()) {
-        dst->append("  - outputs:\n");
+        dst->appendFormat("%*s- Output MixPorts (%zu):\n", spaces - 2, "", mOutputProfiles.size());
         for (size_t i = 0; i < mOutputProfiles.size(); i++) {
-            dst->appendFormat("    output %zu:\n", i);
-            mOutputProfiles[i]->dump(dst);
+            const std::string prefix = base::StringPrintf("%*s %zu. ", spaces, "", i + 1);
+            dst->append(prefix.c_str());
+            mOutputProfiles[i]->dump(dst, prefix.size());
         }
     }
     if (mInputProfiles.size()) {
-        dst->append("  - inputs:\n");
+        dst->appendFormat("%*s- Input MixPorts (%zu):\n", spaces - 2, "", mInputProfiles.size());
         for (size_t i = 0; i < mInputProfiles.size(); i++) {
-            dst->appendFormat("    input %zu:\n", i);
-            mInputProfiles[i]->dump(dst);
+            const std::string prefix = base::StringPrintf("%*s %zu. ", spaces, "", i + 1);
+            dst->append(prefix.c_str());
+            mInputProfiles[i]->dump(dst, prefix.size());
         }
     }
-    mDeclaredDevices.dump(dst, String8("Declared"), 2, true);
-    mDynamicDevices.dump(dst, String8("Dynamic"),  2, true);
-    mRoutes.dump(dst, 2);
+    mDeclaredDevices.dump(dst, String8("- Declared"), spaces - 2, true);
+    mDynamicDevices.dump(dst, String8("- Dynamic"),  spaces - 2, true);
+    dumpAudioRouteVector(mRoutes, dst, spaces);
 }
 
 sp <HwModule> HwModuleCollection::getModuleFromName(const char *name) const
@@ -273,22 +283,29 @@ sp <HwModule> HwModuleCollection::getModuleFromName(const char *name) const
     return nullptr;
 }
 
-sp <HwModule> HwModuleCollection::getModuleForDeviceTypes(audio_devices_t type,
-                                                          audio_format_t encodedFormat) const
+sp<HwModule> HwModuleCollection::getModuleForDeviceType(audio_devices_t type,
+                                                        audio_format_t encodedFormat,
+                                                        std::string *tagName) const
 {
     for (const auto& module : *this) {
         const auto& profiles = audio_is_output_device(type) ?
                 module->getOutputProfiles() : module->getInputProfiles();
         for (const auto& profile : profiles) {
-            if (profile->supportsDeviceTypes(type)) {
+            if (profile->supportsDeviceTypes({type})) {
                 if (encodedFormat != AUDIO_FORMAT_DEFAULT) {
                     DeviceVector declaredDevices = module->getDeclaredDevices();
                     sp <DeviceDescriptor> deviceDesc =
                             declaredDevices.getDevice(type, String8(), encodedFormat);
                     if (deviceDesc) {
+                        if (tagName != nullptr) {
+                            *tagName = deviceDesc->getTagName();
+                        }
                         return module;
                     }
                 } else {
+                    if (tagName != nullptr) {
+                        *tagName = profile->getTag({type});
+                    }
                     return module;
                 }
             }
@@ -300,7 +317,7 @@ sp <HwModule> HwModuleCollection::getModuleForDeviceTypes(audio_devices_t type,
 sp<HwModule> HwModuleCollection::getModuleForDevice(const sp<DeviceDescriptor> &device,
                                                      audio_format_t encodedFormat) const
 {
-    return getModuleForDeviceTypes(device->type(), encodedFormat);
+    return getModuleForDeviceType(device->type(), encodedFormat);
 }
 
 DeviceVector HwModuleCollection::getAvailableDevicesFromModuleName(
@@ -322,20 +339,38 @@ sp<DeviceDescriptor> HwModuleCollection::getDeviceDescriptor(const audio_devices
 {
     String8 devAddress = (address == nullptr || !matchAddress) ? String8("") : String8(address);
     // handle legacy remote submix case where the address was not always specified
-    if (device_distinguishes_on_address(deviceType) && (devAddress.length() == 0)) {
+    if (audio_is_remote_submix_device(deviceType) && (devAddress.length() == 0)) {
         devAddress = String8("0");
     }
 
     for (const auto& hwModule : *this) {
+        if (!allowToCreate) {
+            auto dynamicDevices = hwModule->getDynamicDevices();
+            auto dynamicDevice = dynamicDevices.getDevice(deviceType, devAddress, encodedFormat);
+            if (dynamicDevice) {
+                return dynamicDevice;
+            }
+        }
         DeviceVector moduleDevices = hwModule->getAllDevices();
         auto moduleDevice = moduleDevices.getDevice(deviceType, devAddress, encodedFormat);
+
+        // Prevent overwritting moduleDevice address if connected device does not have the same
+        // address (since getDevice with empty address ignores match on address), use dynamic device
+        if (moduleDevice && allowToCreate &&
+                (!moduleDevice->address().empty() &&
+                 (moduleDevice->address().compare(devAddress.c_str()) != 0))) {
+            break;
+        }
         if (moduleDevice) {
             if (encodedFormat != AUDIO_FORMAT_DEFAULT) {
                 moduleDevice->setEncodedFormat(encodedFormat);
             }
-            moduleDevice->setAddress(devAddress);
             if (allowToCreate) {
                 moduleDevice->attach(hwModule);
+                // Name may be overwritten, restored on detach.
+                moduleDevice->setAddress(devAddress.string());
+                // Name may be overwritten, restored on detach.
+                moduleDevice->setName(name);
             }
             return moduleDevice;
         }
@@ -353,18 +388,19 @@ sp<DeviceDescriptor> HwModuleCollection::createDevice(const audio_devices_t type
                                                       const char *name,
                                                       const audio_format_t encodedFormat) const
 {
-    sp<HwModule> hwModule = getModuleForDeviceTypes(type, encodedFormat);
+    std::string tagName = {};
+    sp<HwModule> hwModule = getModuleForDeviceType(type, encodedFormat, &tagName);
     if (hwModule == 0) {
         ALOGE("%s: could not find HW module for device %04x address %s", __FUNCTION__, type,
               address);
         return nullptr;
     }
-    sp<DeviceDescriptor> device = new DeviceDescriptor(type, String8(name));
-    device->setName(String8(name));
-    device->setAddress(String8(address));
-    device->setEncodedFormat(encodedFormat);
 
-  // Add the device to the list of dynamic devices
+    sp<DeviceDescriptor> device = new DeviceDescriptor(type, tagName, address);
+    device->setName(name);
+    device->setEncodedFormat(encodedFormat);
+    device->setDynamic();
+    // Add the device to the list of dynamic devices
     hwModule->addDynamicDevice(device);
     // Reciprocally attach the device to the module
     device->attach(hwModule);
@@ -376,12 +412,12 @@ sp<DeviceDescriptor> HwModuleCollection::createDevice(const audio_devices_t type
     for (const auto &profile : profiles) {
         // Add the device as supported to all profile supporting "weakly" or not the device
         // according to its type
-        if (profile->supportsDevice(device, false /*matchAdress*/)) {
+        if (profile->supportsDevice(device, false /*matchAddress*/)) {
 
             // @todo quid of audio profile? import the profile from device of the same type?
             const auto &isoTypeDeviceForProfile =
                 profile->getSupportedDevices().getDevice(type, String8(), AUDIO_FORMAT_DEFAULT);
-            device->importAudioPort(isoTypeDeviceForProfile, true /* force */);
+            device->importAudioPortAndPickAudioProfile(isoTypeDeviceForProfile, true /* force */);
 
             ALOGV("%s: adding device %s to profile %s", __FUNCTION__,
                   device->toString().c_str(), profile->getTagName().c_str());
@@ -398,12 +434,18 @@ void HwModuleCollection::cleanUpForDevice(const sp<DeviceDescriptor> &device)
         if (!moduleDevices.contains(device)) {
             continue;
         }
+
+        // removal of remote submix devices associated with a dynamic policy is
+        // handled by removeOutputProfile() and removeInputProfile()
+        if (audio_is_remote_submix_device(device->type()) && device->address() != "0") {
+            continue;
+        }
+
         device->detach();
         // Only remove from dynamic list, not from declared list!!!
-        if (!hwModule->getDynamicDevices().contains(device)) {
+        if (!hwModule->removeDynamicDevice(device)) {
             return;
         }
-        hwModule->removeDynamicDevice(device);
         ALOGV("%s: removed dynamic device %s from module %s", __FUNCTION__,
               device->toString().c_str(), hwModule->getName());
 
@@ -422,10 +464,11 @@ void HwModuleCollection::cleanUpForDevice(const sp<DeviceDescriptor> &device)
 
 void HwModuleCollection::dump(String8 *dst) const
 {
-    dst->append("\nHW Modules dump:\n");
+    dst->appendFormat("\n Hardware modules (%zu):\n", size());
     for (size_t i = 0; i < size(); i++) {
-        dst->appendFormat("- HW Module %zu:\n", i + 1);
-        itemAt(i)->dump(dst);
+        const std::string prefix = base::StringPrintf("  %zu. ", i + 1);
+        dst->append(prefix.c_str());
+        itemAt(i)->dump(dst, prefix.size());
     }
 }
 

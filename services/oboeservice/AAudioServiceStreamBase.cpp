@@ -22,18 +22,27 @@
 #include <iostream>
 #include <mutex>
 
-#include "binding/IAAudioService.h"
+#include <media/MediaMetricsItem.h>
+#include <media/TypeConverter.h>
+#include <mediautils/SchedulingPolicyService.h>
+
 #include "binding/AAudioServiceMessage.h"
+#include "core/AudioGlobal.h"
 #include "utility/AudioClock.h"
 
 #include "AAudioEndpointManager.h"
 #include "AAudioService.h"
 #include "AAudioServiceEndpoint.h"
 #include "AAudioServiceStreamBase.h"
-#include "TimestampScheduler.h"
 
 using namespace android;  // TODO just import names needed
 using namespace aaudio;   // TODO just import names needed
+
+using content::AttributionSourceState;
+
+static const int64_t TIMEOUT_NANOS = 3LL * 1000 * 1000 * 1000;
+// If the stream is idle for more than `IDLE_TIMEOUT_NANOS`, the stream will be put into standby.
+static const int64_t IDLE_TIMEOUT_NANOS = 3e9;
 
 /**
  * Base class for streams in the service.
@@ -41,26 +50,41 @@ using namespace aaudio;   // TODO just import names needed
  */
 
 AAudioServiceStreamBase::AAudioServiceStreamBase(AAudioService &audioService)
-        : mUpMessageQueue(nullptr)
-        , mTimestampThread("AATime")
+        : mCommandThread("AACommand")
         , mAtomicStreamTimestamp()
         , mAudioService(audioService) {
-    mMmapClient.clientUid = -1;
-    mMmapClient.clientPid = -1;
-    mMmapClient.packageName = String16("");
+    mMmapClient.attributionSource = AttributionSourceState();
 }
 
 AAudioServiceStreamBase::~AAudioServiceStreamBase() {
+    ALOGD("%s() called", __func__);
+
+    // May not be set if open failed.
+    if (mMetricsId.size() > 0) {
+        mediametrics::LogItem(mMetricsId)
+                .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_DTOR)
+                .set(AMEDIAMETRICS_PROP_STATE, AudioGlobal_convertStreamStateToText(getState()))
+                .record();
+    }
+
     // If the stream is deleted when OPEN or in use then audio resources will leak.
     // This would indicate an internal error. So we want to find this ASAP.
     LOG_ALWAYS_FATAL_IF(!(getState() == AAUDIO_STREAM_STATE_CLOSED
-                        || getState() == AAUDIO_STREAM_STATE_UNINITIALIZED
-                        || getState() == AAUDIO_STREAM_STATE_DISCONNECTED),
-                        "service stream still open, state = %d", getState());
+                        || getState() == AAUDIO_STREAM_STATE_UNINITIALIZED),
+                        "service stream %p still open, state = %d",
+                        this, getState());
+
+    // Stop the command thread before destroying.
+    if (mThreadEnabled) {
+        mThreadEnabled = false;
+        mCommandQueue.stopWaiting();
+        mCommandThread.stop();
+    }
 }
 
 std::string AAudioServiceStreamBase::dumpHeader() {
-    return std::string("    T   Handle   UId   Port Run State Format Burst Chan Capacity");
+    return std::string(
+            "    T   Handle   UId   Port Run State Format Burst Chan Mask     Capacity");
 }
 
 std::string AAudioServiceStreamBase::dump() const {
@@ -68,25 +92,59 @@ std::string AAudioServiceStreamBase::dump() const {
 
     result << "    0x" << std::setfill('0') << std::setw(8) << std::hex << mHandle
            << std::dec << std::setfill(' ') ;
-    result << std::setw(6) << mMmapClient.clientUid;
+    result << std::setw(6) << mMmapClient.attributionSource.uid;
     result << std::setw(7) << mClientHandle;
     result << std::setw(4) << (isRunning() ? "yes" : " no");
     result << std::setw(6) << getState();
     result << std::setw(7) << getFormat();
     result << std::setw(6) << mFramesPerBurst;
     result << std::setw(5) << getSamplesPerFrame();
+    result << std::setw(8) << std::hex << getChannelMask() << std::dec;
     result << std::setw(9) << getBufferCapacity();
 
     return result.str();
+}
+
+void AAudioServiceStreamBase::logOpen(aaudio_handle_t streamHandle) {
+    // This is the first log sent from the AAudio Service for a stream.
+    mMetricsId = std::string(AMEDIAMETRICS_KEY_PREFIX_AUDIO_STREAM)
+            + std::to_string(streamHandle);
+
+    audio_attributes_t attributes = AAudioServiceEndpoint::getAudioAttributesFrom(this);
+
+    // Once this item is logged by the server, the client with the same PID, UID
+    // can also log properties.
+    mediametrics::LogItem(mMetricsId)
+        .setPid(getOwnerProcessId())
+        .setUid(getOwnerUserId())
+        .set(AMEDIAMETRICS_PROP_ALLOWUID, (int32_t)getOwnerUserId())
+        .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_OPEN)
+        // the following are immutable
+        .set(AMEDIAMETRICS_PROP_BUFFERCAPACITYFRAMES, (int32_t)getBufferCapacity())
+        .set(AMEDIAMETRICS_PROP_BURSTFRAMES, (int32_t)getFramesPerBurst())
+        .set(AMEDIAMETRICS_PROP_CHANNELCOUNT, (int32_t)getSamplesPerFrame())
+        .set(AMEDIAMETRICS_PROP_CONTENTTYPE, toString(attributes.content_type).c_str())
+        .set(AMEDIAMETRICS_PROP_DIRECTION,
+                AudioGlobal_convertDirectionToText(getDirection()))
+        .set(AMEDIAMETRICS_PROP_ENCODING, toString(getFormat()).c_str())
+        .set(AMEDIAMETRICS_PROP_ROUTEDDEVICEID, (int32_t)getDeviceId())
+        .set(AMEDIAMETRICS_PROP_SAMPLERATE, (int32_t)getSampleRate())
+        .set(AMEDIAMETRICS_PROP_SESSIONID, (int32_t)getSessionId())
+        .set(AMEDIAMETRICS_PROP_SOURCE, toString(attributes.source).c_str())
+        .set(AMEDIAMETRICS_PROP_USAGE, toString(attributes.usage).c_str())
+        .record();
 }
 
 aaudio_result_t AAudioServiceStreamBase::open(const aaudio::AAudioStreamRequest &request) {
     AAudioEndpointManager &mEndpointManager = AAudioEndpointManager::getInstance();
     aaudio_result_t result = AAUDIO_OK;
 
-    mMmapClient.clientUid = request.getUserId();
-    mMmapClient.clientPid = request.getProcessId();
-    mMmapClient.packageName.setTo(String16("")); // TODO What should we do here?
+    mMmapClient.attributionSource = request.getAttributionSource();
+    // TODO b/182392769: use attribution source util
+    mMmapClient.attributionSource.uid = VALUE_OR_FATAL(
+        legacy2aidl_uid_t_int32_t(IPCThreadState::self()->getCallingUid()));
+    mMmapClient.attributionSource.pid = VALUE_OR_FATAL(
+        legacy2aidl_pid_t_int32_t(IPCThreadState::self()->getCallingPid()));
 
     // Limit scope of lock to avoid recursive lock in close().
     {
@@ -96,7 +154,7 @@ aaudio_result_t AAudioServiceStreamBase::open(const aaudio::AAudioStreamRequest 
             return AAUDIO_ERROR_INVALID_STATE;
         }
 
-        mUpMessageQueue = new SharedRingBuffer();
+        mUpMessageQueue = std::make_shared<SharedRingBuffer>();
         result = mUpMessageQueue->allocate(sizeof(AAudioServiceMessage),
                                            QUEUE_UP_CAPACITY_COMMANDS);
         if (result != AAUDIO_OK) {
@@ -118,42 +176,47 @@ aaudio_result_t AAudioServiceStreamBase::open(const aaudio::AAudioStreamRequest 
         mFramesPerBurst = mServiceEndpoint->getFramesPerBurst();
         copyFrom(*mServiceEndpoint);
     }
+
+    // Make sure this object does not get deleted before the run() method
+    // can protect it by making a strong pointer.
+    mCommandQueue.startWaiting();
+    mThreadEnabled = true;
+    incStrong(nullptr); // See run() method.
+    result = mCommandThread.start(this);
+    if (result != AAUDIO_OK) {
+        decStrong(nullptr); // run() can't do it so we have to do it here.
+        goto error;
+    }
     return result;
 
 error:
-    close();
+    closeAndClear();
+    mThreadEnabled = false;
+    mCommandQueue.stopWaiting();
+    mCommandThread.stop();
     return result;
 }
 
 aaudio_result_t AAudioServiceStreamBase::close() {
-    aaudio_result_t result = AAUDIO_OK;
+    aaudio_result_t result = sendCommand(CLOSE, nullptr, true /*waitForReply*/, TIMEOUT_NANOS);
+
+    // Stop the command thread as the stream is closed.
+    mThreadEnabled = false;
+    mCommandQueue.stopWaiting();
+    mCommandThread.stop();
+
+    return result;
+}
+
+aaudio_result_t AAudioServiceStreamBase::close_l() {
     if (getState() == AAUDIO_STREAM_STATE_CLOSED) {
         return AAUDIO_OK;
     }
 
-    stop();
+    // This will stop the stream, just in case it was not already stopped.
+    stop_l();
 
-    sp<AAudioServiceEndpoint> endpoint = mServiceEndpointWeak.promote();
-    if (endpoint == nullptr) {
-        result = AAUDIO_ERROR_INVALID_STATE;
-    } else {
-        endpoint->unregisterStream(this);
-        AAudioEndpointManager &endpointManager = AAudioEndpointManager::getInstance();
-        endpointManager.closeEndpoint(endpoint);
-
-        // AAudioService::closeStream() prevents two threads from closing at the same time.
-        mServiceEndpoint.clear(); // endpoint will hold the pointer until this method returns.
-    }
-
-    {
-        std::lock_guard<std::mutex> lock(mUpMessageQueueLock);
-        stopTimestampThread();
-        delete mUpMessageQueue;
-        mUpMessageQueue = nullptr;
-    }
-
-    setState(AAUDIO_STREAM_STATE_CLOSED);
-    return result;
+    return closeAndClear();
 }
 
 aaudio_result_t AAudioServiceStreamBase::startDevice() {
@@ -172,10 +235,36 @@ aaudio_result_t AAudioServiceStreamBase::startDevice() {
  * An AAUDIO_SERVICE_EVENT_STARTED will be sent to the client when complete.
  */
 aaudio_result_t AAudioServiceStreamBase::start() {
+    return sendCommand(START, nullptr, true /*waitForReply*/, TIMEOUT_NANOS);
+}
+
+aaudio_result_t AAudioServiceStreamBase::start_l() {
+    const int64_t beginNs = AudioClock::getNanoseconds();
     aaudio_result_t result = AAUDIO_OK;
 
+    if (auto state = getState();
+        state == AAUDIO_STREAM_STATE_CLOSED || isDisconnected_l()) {
+        ALOGW("%s() already CLOSED, returns INVALID_STATE, handle = %d",
+                __func__, getHandle());
+        return AAUDIO_ERROR_INVALID_STATE;
+    }
+
+    if (mStandby) {
+        ALOGW("%s() the stream is standby, return ERROR_STANDBY, "
+              "expecting the client call exitStandby before start", __func__);
+        return AAUDIO_ERROR_STANDBY;
+    }
+
+    mediametrics::Defer defer([&] {
+        mediametrics::LogItem(mMetricsId)
+            .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_START)
+            .set(AMEDIAMETRICS_PROP_EXECUTIONTIMENS, (int64_t)(AudioClock::getNanoseconds() - beginNs))
+            .set(AMEDIAMETRICS_PROP_STATE, AudioGlobal_convertStreamStateToText(getState()))
+            .set(AMEDIAMETRICS_PROP_STATUS, (int32_t)result)
+            .record(); });
+
     if (isRunning()) {
-        return AAUDIO_OK;
+        return result;
     }
 
     setFlowing(false);
@@ -191,42 +280,43 @@ aaudio_result_t AAudioServiceStreamBase::start() {
     // This should happen at the end of the start.
     sendServiceEvent(AAUDIO_SERVICE_EVENT_STARTED);
     setState(AAUDIO_STREAM_STATE_STARTED);
-    mThreadEnabled.store(true);
-    result = mTimestampThread.start(this);
-    if (result != AAUDIO_OK) goto error;
 
     return result;
 
 error:
-    disconnect();
+    disconnect_l();
     return result;
 }
 
 aaudio_result_t AAudioServiceStreamBase::pause() {
+    return sendCommand(PAUSE, nullptr, true /*waitForReply*/, TIMEOUT_NANOS);
+}
+
+aaudio_result_t AAudioServiceStreamBase::pause_l() {
     aaudio_result_t result = AAUDIO_OK;
     if (!isRunning()) {
         return result;
     }
+    const int64_t beginNs = AudioClock::getNanoseconds();
 
-    // Send it now because the timestamp gets rounded up when stopStream() is called below.
-    // Also we don't need the timestamps while we are shutting down.
-    sendCurrentTimestamp();
-
-    result = stopTimestampThread();
-    if (result != AAUDIO_OK) {
-        disconnect();
-        return result;
-    }
+    mediametrics::Defer defer([&] {
+        mediametrics::LogItem(mMetricsId)
+            .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_PAUSE)
+            .set(AMEDIAMETRICS_PROP_EXECUTIONTIMENS, (int64_t)(AudioClock::getNanoseconds() - beginNs))
+            .set(AMEDIAMETRICS_PROP_STATE, AudioGlobal_convertStreamStateToText(getState()))
+            .set(AMEDIAMETRICS_PROP_STATUS, (int32_t)result)
+            .record(); });
 
     sp<AAudioServiceEndpoint> endpoint = mServiceEndpointWeak.promote();
     if (endpoint == nullptr) {
         ALOGE("%s() has no endpoint", __func__);
-        return AAUDIO_ERROR_INVALID_STATE;
+        result =  AAUDIO_ERROR_INVALID_STATE; // for MediaMetric tracking
+        return result;
     }
     result = endpoint->stopStream(this, mClientHandle);
     if (result != AAUDIO_OK) {
         ALOGE("%s() mServiceEndpoint returned %d, %s", __func__, result, getTypeText());
-        disconnect(); // TODO should we return or pause Base first?
+        disconnect_l(); // TODO should we return or pause Base first?
     }
 
     sendServiceEvent(AAUDIO_SERVICE_EVENT_PAUSED);
@@ -235,32 +325,42 @@ aaudio_result_t AAudioServiceStreamBase::pause() {
 }
 
 aaudio_result_t AAudioServiceStreamBase::stop() {
+    return sendCommand(STOP, nullptr, true /*waitForReply*/, TIMEOUT_NANOS);
+}
+
+aaudio_result_t AAudioServiceStreamBase::stop_l() {
     aaudio_result_t result = AAUDIO_OK;
     if (!isRunning()) {
         return result;
     }
+    const int64_t beginNs = AudioClock::getNanoseconds();
+
+    mediametrics::Defer defer([&] {
+        mediametrics::LogItem(mMetricsId)
+            .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_STOP)
+            .set(AMEDIAMETRICS_PROP_EXECUTIONTIMENS, (int64_t)(AudioClock::getNanoseconds() - beginNs))
+            .set(AMEDIAMETRICS_PROP_STATE, AudioGlobal_convertStreamStateToText(getState()))
+            .set(AMEDIAMETRICS_PROP_STATUS, (int32_t)result)
+            .record(); });
 
     setState(AAUDIO_STREAM_STATE_STOPPING);
 
-    // Send it now because the timestamp gets rounded up when stopStream() is called below.
-    // Also we don't need the timestamps while we are shutting down.
-    sendCurrentTimestamp(); // warning - this calls a virtual function
-    result = stopTimestampThread();
     if (result != AAUDIO_OK) {
-        disconnect();
+        disconnect_l();
         return result;
     }
 
     sp<AAudioServiceEndpoint> endpoint = mServiceEndpointWeak.promote();
     if (endpoint == nullptr) {
         ALOGE("%s() has no endpoint", __func__);
-        return AAUDIO_ERROR_INVALID_STATE;
+        result =  AAUDIO_ERROR_INVALID_STATE; // for MediaMetric tracking
+        return result;
     }
     // TODO wait for data to be played out
     result = endpoint->stopStream(this, mClientHandle);
     if (result != AAUDIO_OK) {
         ALOGE("%s() stopStream returned %d, %s", __func__, result, getTypeText());
-        disconnect();
+        disconnect_l();
         // TODO what to do with result here?
     }
 
@@ -269,20 +369,24 @@ aaudio_result_t AAudioServiceStreamBase::stop() {
     return result;
 }
 
-aaudio_result_t AAudioServiceStreamBase::stopTimestampThread() {
-    aaudio_result_t result = AAUDIO_OK;
-    // clear flag that tells thread to loop
-    if (mThreadEnabled.exchange(false)) {
-        result = mTimestampThread.stop();
-    }
-    return result;
+aaudio_result_t AAudioServiceStreamBase::flush() {
+    return sendCommand(FLUSH, nullptr, true /*waitForReply*/, TIMEOUT_NANOS);
 }
 
-aaudio_result_t AAudioServiceStreamBase::flush() {
+aaudio_result_t AAudioServiceStreamBase::flush_l() {
     aaudio_result_t result = AAudio_isFlushAllowed(getState());
     if (result != AAUDIO_OK) {
         return result;
     }
+    const int64_t beginNs = AudioClock::getNanoseconds();
+
+    mediametrics::Defer defer([&] {
+        mediametrics::LogItem(mMetricsId)
+            .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_FLUSH)
+            .set(AMEDIAMETRICS_PROP_EXECUTIONTIMENS, (int64_t)(AudioClock::getNanoseconds() - beginNs))
+            .set(AMEDIAMETRICS_PROP_STATE, AudioGlobal_convertStreamStateToText(getState()))
+            .set(AMEDIAMETRICS_PROP_STATUS, (int32_t)result)
+            .record(); });
 
     // Data will get flushed when the client receives the FLUSHED event.
     sendServiceEvent(AAUDIO_SERVICE_EVENT_FLUSHED);
@@ -290,38 +394,188 @@ aaudio_result_t AAudioServiceStreamBase::flush() {
     return AAUDIO_OK;
 }
 
-// implement Runnable, periodically send timestamps to client
+// implement Runnable, periodically send timestamps to client and process commands from queue.
 __attribute__((no_sanitize("integer")))
 void AAudioServiceStreamBase::run() {
-    ALOGD("%s() %s entering >>>>>>>>>>>>>> TIMESTAMPS", __func__, getTypeText());
+    ALOGD("%s() %s entering >>>>>>>>>>>>>> COMMANDS", __func__, getTypeText());
+    // Hold onto the ref counted stream until the end.
+    android::sp<AAudioServiceStreamBase> holdStream(this);
     TimestampScheduler timestampScheduler;
-    timestampScheduler.setBurstPeriod(mFramesPerBurst, getSampleRate());
-    timestampScheduler.start(AudioClock::getNanoseconds());
-    int64_t nextTime = timestampScheduler.nextAbsoluteTime();
+    int64_t nextTime;
+    int64_t standbyTime = AudioClock::getNanoseconds() + IDLE_TIMEOUT_NANOS;
+    // Balance the incStrong from when the thread was launched.
+    holdStream->decStrong(nullptr);
+
+    // Taking mLock while starting the thread. All the operation must be able to
+    // run with holding the lock.
+    std::scoped_lock<std::mutex> _l(mLock);
+
     int32_t loopCount = 0;
-    while(mThreadEnabled.load()) {
+    while (mThreadEnabled.load()) {
         loopCount++;
-        if (AudioClock::getNanoseconds() >= nextTime) {
-            aaudio_result_t result = sendCurrentTimestamp();
-            if (result != AAUDIO_OK) {
-                ALOGE("%s() timestamp thread got result = %d", __func__, result);
-                break;
+        int64_t timeoutNanos = -1;
+        if (isRunning() || (isIdle_l() && !isStandby_l())) {
+            timeoutNanos = (isRunning() ? nextTime : standbyTime) - AudioClock::getNanoseconds();
+            timeoutNanos = std::max<int64_t>(0, timeoutNanos);
+        }
+
+        auto command = mCommandQueue.waitForCommand(timeoutNanos);
+        if (!mThreadEnabled) {
+            // Break the loop if the thread is disabled.
+            break;
+        }
+
+        if (isRunning() && AudioClock::getNanoseconds() >= nextTime) {
+            // It is time to update timestamp.
+            if (sendCurrentTimestamp_l() != AAUDIO_OK) {
+                ALOGE("Failed to send current timestamp, stop updating timestamp");
+                disconnect_l();
+            } else {
+                nextTime = timestampScheduler.nextAbsoluteTime();
             }
-            nextTime = timestampScheduler.nextAbsoluteTime();
-        } else  {
-            // Sleep until it is time to send the next timestamp.
-            // TODO Wait for a signal with a timeout so that we can stop more quickly.
-            AudioClock::sleepUntilNanoTime(nextTime);
+        }
+        if (isIdle_l() && AudioClock::getNanoseconds() >= standbyTime) {
+            standby_l();
+        }
+
+        if (command != nullptr) {
+            std::scoped_lock<std::mutex> _commandLock(command->lock);
+            switch (command->operationCode) {
+                case START:
+                    command->result = start_l();
+                    timestampScheduler.setBurstPeriod(mFramesPerBurst, getSampleRate());
+                    timestampScheduler.start(AudioClock::getNanoseconds());
+                    nextTime = timestampScheduler.nextAbsoluteTime();
+                    break;
+                case PAUSE:
+                    command->result = pause_l();
+                    standbyTime = AudioClock::getNanoseconds() + IDLE_TIMEOUT_NANOS;
+                    break;
+                case STOP:
+                    command->result = stop_l();
+                    standbyTime = AudioClock::getNanoseconds() + IDLE_TIMEOUT_NANOS;
+                    break;
+                case FLUSH:
+                    command->result = flush_l();
+                    break;
+                case CLOSE:
+                    command->result = close_l();
+                    break;
+                case DISCONNECT:
+                    disconnect_l();
+                    break;
+                case REGISTER_AUDIO_THREAD: {
+                    RegisterAudioThreadParam *param =
+                            (RegisterAudioThreadParam *) command->parameter.get();
+                    command->result =
+                            param == nullptr ? AAUDIO_ERROR_ILLEGAL_ARGUMENT
+                                             : registerAudioThread_l(param->mOwnerPid,
+                                                                     param->mClientThreadId,
+                                                                     param->mPriority);
+                }
+                    break;
+                case UNREGISTER_AUDIO_THREAD: {
+                    UnregisterAudioThreadParam *param =
+                            (UnregisterAudioThreadParam *) command->parameter.get();
+                    command->result =
+                            param == nullptr ? AAUDIO_ERROR_ILLEGAL_ARGUMENT
+                                             : unregisterAudioThread_l(param->mClientThreadId);
+                }
+                    break;
+                case GET_DESCRIPTION: {
+                    GetDescriptionParam *param = (GetDescriptionParam *) command->parameter.get();
+                    command->result = param == nullptr ? AAUDIO_ERROR_ILLEGAL_ARGUMENT
+                                                        : getDescription_l(param->mParcelable);
+                }
+                    break;
+                case EXIT_STANDBY: {
+                    ExitStandbyParam *param = (ExitStandbyParam *) command->parameter.get();
+                    command->result = param == nullptr ? AAUDIO_ERROR_ILLEGAL_ARGUMENT
+                                                       : exitStandby_l(param->mParcelable);
+                    standbyTime = AudioClock::getNanoseconds() + IDLE_TIMEOUT_NANOS;
+                } break;
+                default:
+                    ALOGE("Invalid command op code: %d", command->operationCode);
+                    break;
+            }
+            if (command->isWaitingForReply) {
+                command->isWaitingForReply = false;
+                command->conditionVariable.notify_one();
+            }
         }
     }
-    ALOGD("%s() %s exiting after %d loops <<<<<<<<<<<<<< TIMESTAMPS",
+    ALOGD("%s() %s exiting after %d loops <<<<<<<<<<<<<< COMMANDS",
           __func__, getTypeText(), loopCount);
 }
 
 void AAudioServiceStreamBase::disconnect() {
-    if (getState() != AAUDIO_STREAM_STATE_DISCONNECTED) {
+    sendCommand(DISCONNECT);
+}
+
+void AAudioServiceStreamBase::disconnect_l() {
+    if (!isDisconnected_l() && getState() != AAUDIO_STREAM_STATE_CLOSED) {
+
+        mediametrics::LogItem(mMetricsId)
+            .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_DISCONNECT)
+            .set(AMEDIAMETRICS_PROP_STATE, AudioGlobal_convertStreamStateToText(getState()))
+            .record();
+
         sendServiceEvent(AAUDIO_SERVICE_EVENT_DISCONNECTED);
-        setState(AAUDIO_STREAM_STATE_DISCONNECTED);
+        setDisconnected_l(true);
+    }
+}
+
+aaudio_result_t AAudioServiceStreamBase::registerAudioThread(pid_t clientThreadId, int priority) {
+    const pid_t ownerPid = IPCThreadState::self()->getCallingPid(); // TODO review
+    return sendCommand(REGISTER_AUDIO_THREAD,
+            std::make_shared<RegisterAudioThreadParam>(ownerPid, clientThreadId, priority),
+            true /*waitForReply*/,
+            TIMEOUT_NANOS);
+}
+
+aaudio_result_t AAudioServiceStreamBase::registerAudioThread_l(
+        pid_t ownerPid, pid_t clientThreadId, int priority) {
+    aaudio_result_t result = AAUDIO_OK;
+    if (getRegisteredThread() != AAudioServiceStreamBase::ILLEGAL_THREAD_ID) {
+        ALOGE("AAudioService::registerAudioThread(), thread already registered");
+        result = AAUDIO_ERROR_INVALID_STATE;
+    } else {
+        setRegisteredThread(clientThreadId);
+        int err = android::requestPriority(ownerPid, clientThreadId,
+                                           priority, true /* isForApp */);
+        if (err != 0) {
+            ALOGE("AAudioService::registerAudioThread(%d) failed, errno = %d, priority = %d",
+                  clientThreadId, errno, priority);
+            result = AAUDIO_ERROR_INTERNAL;
+        }
+    }
+    return result;
+}
+
+aaudio_result_t AAudioServiceStreamBase::unregisterAudioThread(pid_t clientThreadId) {
+    return sendCommand(UNREGISTER_AUDIO_THREAD,
+            std::make_shared<UnregisterAudioThreadParam>(clientThreadId),
+            true /*waitForReply*/,
+            TIMEOUT_NANOS);
+}
+
+aaudio_result_t AAudioServiceStreamBase::unregisterAudioThread_l(pid_t clientThreadId) {
+    aaudio_result_t result = AAUDIO_OK;
+    if (getRegisteredThread() != clientThreadId) {
+        ALOGE("%s(), wrong thread", __func__);
+        result = AAUDIO_ERROR_ILLEGAL_ARGUMENT;
+    } else {
+        setRegisteredThread(0);
+    }
+    return result;
+}
+
+void AAudioServiceStreamBase::setState(aaudio_stream_state_t state) {
+    // CLOSED is a final state.
+    if (mState != AAUDIO_STREAM_STATE_CLOSED) {
+        mState = state;
+    } else {
+        ALOGW_IF(mState != state, "%s(%d) when already CLOSED", __func__, state);
     }
 }
 
@@ -341,6 +595,16 @@ aaudio_result_t AAudioServiceStreamBase::sendServiceEvent(aaudio_service_event_t
     command.event.event = event;
     command.event.dataLong = dataLong;
     return writeUpMessageQueue(&command);
+}
+
+bool AAudioServiceStreamBase::isUpMessageQueueBusy() {
+    std::lock_guard<std::mutex> lock(mUpMessageQueueLock);
+    if (mUpMessageQueue == nullptr) {
+        ALOGE("%s(): mUpMessageQueue null! - stream not open", __func__);
+        return true;
+    }
+    // Is it half full or more
+    return mUpMessageQueue->getFractionalFullness() >= 0.5;
 }
 
 aaudio_result_t AAudioServiceStreamBase::writeUpMessageQueue(AAudioServiceMessage *command) {
@@ -364,11 +628,18 @@ aaudio_result_t AAudioServiceStreamBase::sendXRunCount(int32_t xRunCount) {
     return sendServiceEvent(AAUDIO_SERVICE_EVENT_XRUN, (int64_t) xRunCount);
 }
 
-aaudio_result_t AAudioServiceStreamBase::sendCurrentTimestamp() {
+aaudio_result_t AAudioServiceStreamBase::sendCurrentTimestamp_l() {
     AAudioServiceMessage command;
+    // It is not worth filling up the queue with timestamps.
+    // That can cause the stream to get suspended.
+    // So just drop the timestamp if the queue is getting full.
+    if (isUpMessageQueueBusy()) {
+        return AAUDIO_OK;
+    }
+
     // Send a timestamp for the clock model.
-    aaudio_result_t result = getFreeRunningPosition(&command.timestamp.position,
-                                                    &command.timestamp.timestamp);
+    aaudio_result_t result = getFreeRunningPosition_l(&command.timestamp.position,
+                                                      &command.timestamp.timestamp);
     if (result == AAUDIO_OK) {
         ALOGV("%s() SERVICE  %8lld at %lld", __func__,
               (long long) command.timestamp.position,
@@ -378,8 +649,8 @@ aaudio_result_t AAudioServiceStreamBase::sendCurrentTimestamp() {
 
         if (result == AAUDIO_OK) {
             // Send a hardware timestamp for presentation time.
-            result = getHardwareTimestamp(&command.timestamp.position,
-                                          &command.timestamp.timestamp);
+            result = getHardwareTimestamp_l(&command.timestamp.position,
+                                            &command.timestamp.timestamp);
             if (result == AAUDIO_OK) {
                 ALOGV("%s() HARDWARE %8lld at %lld", __func__,
                       (long long) command.timestamp.position,
@@ -401,6 +672,14 @@ aaudio_result_t AAudioServiceStreamBase::sendCurrentTimestamp() {
  * used to communicate with the underlying HAL or Service.
  */
 aaudio_result_t AAudioServiceStreamBase::getDescription(AudioEndpointParcelable &parcelable) {
+    return sendCommand(
+            GET_DESCRIPTION,
+            std::make_shared<GetDescriptionParam>(&parcelable),
+            true /*waitForReply*/,
+            TIMEOUT_NANOS);
+}
+
+aaudio_result_t AAudioServiceStreamBase::getDescription_l(AudioEndpointParcelable* parcelable) {
     {
         std::lock_guard<std::mutex> lock(mUpMessageQueueLock);
         if (mUpMessageQueue == nullptr) {
@@ -409,22 +688,50 @@ aaudio_result_t AAudioServiceStreamBase::getDescription(AudioEndpointParcelable 
         }
         // Gather information on the message queue.
         mUpMessageQueue->fillParcelable(parcelable,
-                                        parcelable.mUpMessageQueueParcelable);
+                                        parcelable->mUpMessageQueueParcelable);
     }
-    return getAudioDataDescription(parcelable);
+    return getAudioDataDescription_l(parcelable);
+}
+
+aaudio_result_t AAudioServiceStreamBase::exitStandby(AudioEndpointParcelable *parcelable) {
+    auto command = std::make_shared<AAudioCommand>(
+            EXIT_STANDBY,
+            std::make_shared<ExitStandbyParam>(parcelable),
+            true /*waitForReply*/,
+            TIMEOUT_NANOS);
+    return mCommandQueue.sendCommand(command);
 }
 
 void AAudioServiceStreamBase::onVolumeChanged(float volume) {
     sendServiceEvent(AAUDIO_SERVICE_EVENT_VOLUME, volume);
 }
 
-int32_t AAudioServiceStreamBase::incrementServiceReferenceCount_l() {
-    return ++mCallingCount;
+aaudio_result_t AAudioServiceStreamBase::sendCommand(aaudio_command_opcode opCode,
+                                                     std::shared_ptr<AAudioCommandParam> param,
+                                                     bool waitForReply,
+                                                     int64_t timeoutNanos) {
+    return mCommandQueue.sendCommand(std::make_shared<AAudioCommand>(
+            opCode, param, waitForReply, timeoutNanos));
 }
 
-int32_t AAudioServiceStreamBase::decrementServiceReferenceCount_l() {
-    int32_t count = --mCallingCount;
-    // Each call to increment should be balanced with one call to decrement.
-    assert(count >= 0);
-    return count;
+aaudio_result_t AAudioServiceStreamBase::closeAndClear() {
+    aaudio_result_t result = AAUDIO_OK;
+    sp<AAudioServiceEndpoint> endpoint = mServiceEndpointWeak.promote();
+    if (endpoint == nullptr) {
+        result = AAUDIO_ERROR_INVALID_STATE;
+    } else {
+        endpoint->unregisterStream(this);
+        AAudioEndpointManager &endpointManager = AAudioEndpointManager::getInstance();
+        endpointManager.closeEndpoint(endpoint);
+
+        // AAudioService::closeStream() prevents two threads from closing at the same time.
+        mServiceEndpoint.clear(); // endpoint will hold the pointer after this method returns.
+    }
+
+    setState(AAUDIO_STREAM_STATE_CLOSED);
+
+    mediametrics::LogItem(mMetricsId)
+        .set(AMEDIAMETRICS_PROP_EVENT, AMEDIAMETRICS_PROP_EVENT_VALUE_CLOSE)
+        .record();
+    return result;
 }

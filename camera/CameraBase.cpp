@@ -29,6 +29,7 @@
 #include <binder/IMemory.h>
 
 #include <camera/CameraBase.h>
+#include <camera/CameraUtils.h>
 
 // needed to instantiate
 #include <camera/Camera.h>
@@ -60,6 +61,16 @@ status_t CameraStatus::writeToParcel(android::Parcel* parcel) const {
     if (res != OK) return res;
 
     res = parcel->writeInt32(status);
+    if (res != OK) return res;
+
+    std::vector<String16> unavailablePhysicalIds16;
+    for (auto& id8 : unavailablePhysicalIds) {
+        unavailablePhysicalIds16.push_back(String16(id8));
+    }
+    res = parcel->writeString16Vector(unavailablePhysicalIds16);
+    if (res != OK) return res;
+
+    res = parcel->writeString16(String16(clientPackage));
     return res;
 }
 
@@ -70,6 +81,20 @@ status_t CameraStatus::readFromParcel(const android::Parcel* parcel) {
     cameraId = String8(tempCameraId);
 
     res = parcel->readInt32(&status);
+    if (res != OK) return res;
+
+    std::vector<String16> unavailablePhysicalIds16;
+    res = parcel->readString16Vector(&unavailablePhysicalIds16);
+    if (res != OK) return res;
+    for (auto& id16 : unavailablePhysicalIds16) {
+        unavailablePhysicalIds.push_back(String8(id16));
+    }
+
+    String16 tempClientPackage;
+    res = parcel->readString16(&tempClientPackage);
+    if (res != OK) return res;
+    clientPackage = String8(tempClientPackage);
+
     return res;
 }
 
@@ -109,9 +134,7 @@ const sp<::android::hardware::ICameraService> CameraBase<TCam, TCamTraits>::getC
 {
     Mutex::Autolock _l(gLock);
     if (gCameraService.get() == 0) {
-        char value[PROPERTY_VALUE_MAX];
-        property_get("config.disable_cameraservice", value, "0");
-        if (strncmp(value, "0", 2) != 0 && strncasecmp(value, "false", 6) != 0) {
+        if (CameraUtils::isCameraServiceDisabled()) {
             return gCameraService;
         }
 
@@ -138,7 +161,7 @@ const sp<::android::hardware::ICameraService> CameraBase<TCam, TCamTraits>::getC
 template <typename TCam, typename TCamTraits>
 sp<TCam> CameraBase<TCam, TCamTraits>::connect(int cameraId,
                                                const String16& clientPackageName,
-                                               int clientUid, int clientPid)
+                                               int clientUid, int clientPid, int targetSdkVersion)
 {
     ALOGV("%s: connect", __FUNCTION__);
     sp<TCam> c = new TCam(cameraId);
@@ -149,7 +172,7 @@ sp<TCam> CameraBase<TCam, TCamTraits>::connect(int cameraId,
     if (cs != nullptr) {
         TCamConnectService fnConnectService = TCamTraits::fnConnectService;
         ret = (cs.get()->*fnConnectService)(cl, cameraId, clientPackageName, clientUid,
-                                               clientPid, /*out*/ &c->mCamera);
+                                               clientPid, targetSdkVersion, /*out*/ &c->mCamera);
     }
     if (ret.isOk() && c->mCamera != nullptr) {
         IInterface::asBinder(c->mCamera)->linkToDeath(c);

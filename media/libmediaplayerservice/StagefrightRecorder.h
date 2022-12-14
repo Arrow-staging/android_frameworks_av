@@ -18,7 +18,7 @@
 
 #define STAGEFRIGHT_RECORDER_H_
 
-#include <media/MediaAnalyticsItem.h>
+#include <media/MediaMetricsItem.h>
 #include <media/MediaRecorderBase.h>
 #include <camera/CameraParameters.h>
 #include <utils/String8.h>
@@ -26,8 +26,12 @@
 #include <system/audio.h>
 
 #include <media/hardware/MetadataBufferType.h>
+#include <media/stagefright/foundation/AString.h>
+#include <android/content/AttributionSourceState.h>
 
 namespace android {
+
+using content::AttributionSourceState;
 
 class Camera;
 class ICameraRecordingProxy;
@@ -42,10 +46,13 @@ class MediaProfiles;
 struct ALooper;
 
 struct StagefrightRecorder : public MediaRecorderBase {
-    explicit StagefrightRecorder(const String16 &opPackageName);
+    explicit StagefrightRecorder(const AttributionSourceState& attributionSource);
     virtual ~StagefrightRecorder();
     virtual status_t init();
+    virtual status_t setLogSessionId(const String8 &id);
     virtual status_t setAudioSource(audio_source_t as);
+            status_t setPrivacySensitive(bool privacySensitive) override;
+            status_t isPrivacySensitive(bool *privacySensitive) const override;
     virtual status_t setVideoSource(video_source vs);
     virtual status_t setOutputFormat(output_format of);
     virtual status_t setAudioEncoder(audio_encoder ae);
@@ -77,28 +84,37 @@ struct StagefrightRecorder : public MediaRecorderBase {
     virtual void setAudioDeviceCallback(const sp<AudioSystem::AudioDeviceCallback>& callback);
     virtual status_t enableAudioDeviceCallback(bool enabled);
     virtual status_t getActiveMicrophones(std::vector<media::MicrophoneInfo>* activeMicrophones);
+    virtual status_t setPreferredMicrophoneDirection(audio_microphone_direction_t direction);
+    virtual status_t setPreferredMicrophoneFieldDimension(float zoom);
             status_t getPortId(audio_port_handle_t *portId) const override;
+    virtual status_t getRtpDataUsage(uint64_t *bytes);
 
 private:
+
+    enum privacy_sensitive_t {
+        PRIVACY_SENSITIVE_DEFAULT = -1,
+        PRIVACY_SENSITIVE_DISABLED = 0,
+        PRIVACY_SENSITIVE_ENABLED = 1,
+    };
+
     mutable Mutex mLock;
     sp<hardware::ICamera> mCamera;
     sp<ICameraRecordingProxy> mCameraProxy;
     sp<IGraphicBufferProducer> mPreviewSurface;
     sp<PersistentSurface> mPersistentSurface;
     sp<IMediaRecorderClient> mListener;
-    String16 mClientName;
-    uid_t mClientUid;
-    pid_t mClientPid;
     sp<MediaWriter> mWriter;
     int mOutputFd;
     sp<AudioSource> mAudioSourceNode;
 
-    MediaAnalyticsItem *mAnalyticsItem;
+    mediametrics::Item *mMetricsItem;
     bool mAnalyticsDirty;
     void flushAndResetMetrics(bool reinitialize);
     void updateMetrics();
 
+    AString mLogSessionId;
     audio_source_t mAudioSource;
+    privacy_sensitive_t mPrivacySensitive;
     video_source mVideoSource;
     output_format mOutputFormat;
     audio_encoder mAudioEncoder;
@@ -107,6 +123,7 @@ private:
     int32_t mVideoWidth, mVideoHeight;
     int32_t mFrameRate;
     int32_t mVideoBitRate;
+    int32_t mVideoBitRateMode;
     int32_t mAudioBitRate;
     int32_t mAudioChannels;
     int32_t mSampleRate;
@@ -126,6 +143,18 @@ private:
     int32_t mLongitudex10000;
     int32_t mStartTimeOffsetMs;
     int32_t mTotalBitRate;
+    String8 mLocalIp;
+    String8 mRemoteIp;
+    int32_t mLocalPort;
+    int32_t mRemotePort;
+    int32_t mSelfID;
+    int32_t mOpponentID;
+    int32_t mPayloadType;
+    int32_t mRTPCVOExtMap;
+    int32_t mRTPCVODegrees;
+    int32_t mRTPSockDscp;
+    int64_t mRTPSockNetwork;
+    uint32_t mLastSeqNo;
 
     int64_t mDurationRecordedUs;
     int64_t mStartedRecordingUs;
@@ -159,6 +188,9 @@ private:
     bool mDeviceCallbackEnabled;
     wp<AudioSystem::AudioDeviceCallback> mAudioDeviceCallback;
 
+    audio_microphone_direction_t mSelectedMicDirection;
+    float mSelectedMicFieldDimension;
+
     static const int kMaxHighSpeedFps = 1000;
 
     status_t prepareInternal();
@@ -190,6 +222,7 @@ private:
     status_t setParamCaptureFpsEnable(int32_t timeLapseEnable);
     status_t setParamCaptureFps(double fps);
     status_t setParamVideoEncodingBitRate(int32_t bitRate);
+    status_t setParamVideoBitRateMode(int32_t bitRateMode);
     status_t setParamVideoIFramesInterval(int32_t seconds);
     status_t setParamVideoEncoderProfile(int32_t profile);
     status_t setParamVideoEncoderLevel(int32_t level);
@@ -204,6 +237,18 @@ private:
     status_t setParamMovieTimeScale(int32_t timeScale);
     status_t setParamGeoDataLongitude(int64_t longitudex10000);
     status_t setParamGeoDataLatitude(int64_t latitudex10000);
+    status_t setParamRtpLocalIp(const String8 &localIp);
+    status_t setParamRtpLocalPort(int32_t localPort);
+    status_t setParamRtpRemoteIp(const String8 &remoteIp);
+    status_t setParamRtpRemotePort(int32_t remotePort);
+    status_t setParamSelfID(int32_t selfID);
+    status_t setParamVideoOpponentID(int32_t opponentID);
+    status_t setParamPayloadType(int32_t payloadType);
+    status_t setRTPCVOExtMap(int32_t extmap);
+    status_t setRTPCVODegrees(int32_t cvoDegrees);
+    status_t setParamRtpDscp(int32_t dscp);
+    status_t setSocketNetwork(int64_t networkHandle);
+    status_t requestIDRFrame();
     void clipVideoBitRate();
     void clipVideoFrameRate();
     void clipVideoFrameWidth();

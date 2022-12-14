@@ -26,6 +26,7 @@
 #include <media/AudioTimestamp.h>
 #include <utils/String16.h>
 
+#include "core/AudioGlobal.h"
 #include "core/AudioStream.h"
 #include "legacy/AudioStreamLegacy.h"
 
@@ -33,22 +34,9 @@ using namespace android;
 using namespace aaudio;
 
 AudioStreamLegacy::AudioStreamLegacy()
-        : AudioStream()
-        , mDeviceCallback(new StreamDeviceCallback(this)) {
+        : AudioStream() {
 }
 
-AudioStreamLegacy::~AudioStreamLegacy() {
-}
-
-// Called from AudioTrack.cpp or AudioRecord.cpp
-static void AudioStreamLegacy_callback(int event, void* userData, void *info) {
-    AudioStreamLegacy *streamLegacy = (AudioStreamLegacy *) userData;
-    streamLegacy->processCallback(event, info);
-}
-
-aaudio_legacy_callback_t AudioStreamLegacy::getLegacyCallback() {
-    return AudioStreamLegacy_callback;
-}
 
 aaudio_data_callback_result_t AudioStreamLegacy::callDataCallbackFrames(uint8_t *buffer,
                                                                         int32_t numFrames) {
@@ -72,81 +60,144 @@ aaudio_data_callback_result_t AudioStreamLegacy::callDataCallbackFrames(uint8_t 
 
 // Implement FixedBlockProcessor
 int32_t AudioStreamLegacy::onProcessFixedBlock(uint8_t *buffer, int32_t numBytes) {
-    int32_t numFrames = numBytes / getBytesPerDeviceFrame();
+    int32_t numFrames = numBytes / mBlockAdapterBytesPerFrame;
     return (int32_t) callDataCallbackFrames(buffer, numFrames);
 }
 
-void AudioStreamLegacy::processCallbackCommon(aaudio_callback_operation_t opcode, void *info) {
+
+void AudioStreamLegacy::onNewIAudioTrack() {
+    ALOGD("%s stream disconnected", __func__);
+    forceDisconnect();
+    mCallbackEnabled.store(false);
+}
+
+size_t AudioStreamLegacy::onMoreData(const android::AudioTrack::Buffer& buffer) {
+    // This illegal size can be used to tell AudioRecord or AudioTrack to stop calling us.
+    // This takes advantage of them killing the stream when they see a size out of range.
+    // That is an undocumented behavior.
+    // TODO add to API in AudioRecord and AudioTrack
+    // TODO(b/216175830) cleanup size re-computation
+    const size_t SIZE_STOP_CALLBACKS = SIZE_MAX;
     aaudio_data_callback_result_t callbackResult;
+    (void) checkForDisconnectRequest(true);
+
+    // Note that this code assumes an AudioTrack::Buffer is the same as
+    // AudioRecord::Buffer
+    // TODO define our own AudioBuffer and pass it from the subclasses.
+    size_t written = buffer.size();
+    if (getState() == AAUDIO_STREAM_STATE_DISCONNECTED) {
+        ALOGW("%s() data, stream disconnected", __func__);
+        // This will kill the stream and prevent it from being restarted.
+        // That is OK because the stream is disconnected.
+        written = SIZE_STOP_CALLBACKS;
+    } else if (!mCallbackEnabled.load()) {
+        ALOGW("%s() no data because callback disabled, set size=0", __func__);
+        // Do NOT use SIZE_STOP_CALLBACKS here because that will kill the stream and
+        // prevent it from being restarted. This can occur because of a race condition
+        // caused by Legacy callbacks running after the track is "stopped".
+        written = 0;
+    } else {
+        if (buffer.getFrameCount() == 0) {
+            ALOGW("%s() data, frameCount is zero", __func__);
+            return written;
+        }
+
+        // If the caller specified an exact size then use a block size adapter.
+        if (mBlockAdapter != nullptr) {
+            int32_t byteCount = buffer.getFrameCount() * getBytesPerDeviceFrame();
+            callbackResult = mBlockAdapter->processVariableBlock(
+                    buffer.data(), byteCount);
+        } else {
+            // Call using the AAudio callback interface.
+            callbackResult = callDataCallbackFrames(buffer.data(),
+                                                    buffer.getFrameCount());
+        }
+        if (callbackResult == AAUDIO_CALLBACK_RESULT_CONTINUE) {
+            written = buffer.getFrameCount() * getBytesPerDeviceFrame();
+        } else {
+            if (callbackResult == AAUDIO_CALLBACK_RESULT_STOP) {
+                ALOGD("%s() callback returned AAUDIO_CALLBACK_RESULT_STOP", __func__);
+            } else {
+                ALOGW("%s() callback returned invalid result = %d",
+                      __func__, callbackResult);
+            }
+            written = 0;
+            systemStopInternal();
+            // Disable the callback just in case the system keeps trying to call us.
+            mCallbackEnabled.store(false);
+        }
+
+        if (updateStateMachine() != AAUDIO_OK) {
+            forceDisconnect();
+            mCallbackEnabled.store(false);
+        }
+    }
+    return written;
+}
+
+// TODO (b/216175830) this method is duplicated in order to ease refactoring which will
+// reconsolidate.
+size_t AudioStreamLegacy::onMoreData(const android::AudioRecord::Buffer& buffer) {
     // This illegal size can be used to tell AudioRecord or AudioTrack to stop calling us.
     // This takes advantage of them killing the stream when they see a size out of range.
     // That is an undocumented behavior.
     // TODO add to API in AudioRecord and AudioTrack
     const size_t SIZE_STOP_CALLBACKS = SIZE_MAX;
+    aaudio_data_callback_result_t callbackResult;
+    (void) checkForDisconnectRequest(true);
 
-    switch (opcode) {
-        case AAUDIO_CALLBACK_OPERATION_PROCESS_DATA: {
-            (void) checkForDisconnectRequest(true);
-
-            // Note that this code assumes an AudioTrack::Buffer is the same as
-            // AudioRecord::Buffer
-            // TODO define our own AudioBuffer and pass it from the subclasses.
-            AudioTrack::Buffer *audioBuffer = static_cast<AudioTrack::Buffer *>(info);
-            if (getState() == AAUDIO_STREAM_STATE_DISCONNECTED) {
-                ALOGW("processCallbackCommon() data, stream disconnected");
-                audioBuffer->size = SIZE_STOP_CALLBACKS;
-            } else if (!mCallbackEnabled.load()) {
-                ALOGW("processCallbackCommon() no data because callback disabled");
-                audioBuffer->size = SIZE_STOP_CALLBACKS;
-            } else {
-                if (audioBuffer->frameCount == 0) {
-                    ALOGW("processCallbackCommon() data, frameCount is zero");
-                    return;
-                }
-
-                // If the caller specified an exact size then use a block size adapter.
-                if (mBlockAdapter != nullptr) {
-                    int32_t byteCount = audioBuffer->frameCount * getBytesPerDeviceFrame();
-                    callbackResult = mBlockAdapter->processVariableBlock(
-                            (uint8_t *) audioBuffer->raw, byteCount);
-                } else {
-                    // Call using the AAudio callback interface.
-                    callbackResult = callDataCallbackFrames((uint8_t *)audioBuffer->raw,
-                                                            audioBuffer->frameCount);
-                }
-                if (callbackResult == AAUDIO_CALLBACK_RESULT_CONTINUE) {
-                    audioBuffer->size = audioBuffer->frameCount * getBytesPerDeviceFrame();
-                } else {
-                    if (callbackResult == AAUDIO_CALLBACK_RESULT_STOP) {
-                        ALOGD("%s() callback returned AAUDIO_CALLBACK_RESULT_STOP", __func__);
-                    } else {
-                        ALOGW("%s() callback returned invalid result = %d",
-                              __func__, callbackResult);
-                    }
-                    audioBuffer->size = 0;
-                    systemStopFromCallback();
-                    // Disable the callback just in case the system keeps trying to call us.
-                    mCallbackEnabled.store(false);
-                }
-
-                if (updateStateMachine() != AAUDIO_OK) {
-                    forceDisconnect();
-                    mCallbackEnabled.store(false);
-                }
-            }
+    // Note that this code assumes an AudioTrack::Buffer is the same as
+    // AudioRecord::Buffer
+    // TODO define our own AudioBuffer and pass it from the subclasses.
+    size_t written = buffer.size();
+    if (getState() == AAUDIO_STREAM_STATE_DISCONNECTED) {
+        ALOGW("%s() data, stream disconnected", __func__);
+        // This will kill the stream and prevent it from being restarted.
+        // That is OK because the stream is disconnected.
+        written = SIZE_STOP_CALLBACKS;
+    } else if (!mCallbackEnabled.load()) {
+        ALOGW("%s() no data because callback disabled, set size=0", __func__);
+        // Do NOT use SIZE_STOP_CALLBACKS here because that will kill the stream and
+        // prevent it from being restarted. This can occur because of a race condition
+        // caused by Legacy callbacks running after the track is "stopped".
+        written = 0;
+    } else {
+        if (buffer.getFrameCount() == 0) {
+            ALOGW("%s() data, frameCount is zero", __func__);
+            return written;
         }
-            break;
 
-        // Stream got rerouted so we disconnect.
-        case AAUDIO_CALLBACK_OPERATION_DISCONNECTED:
-            ALOGD("processCallbackCommon() stream disconnected");
+        // If the caller specified an exact size then use a block size adapter.
+        if (mBlockAdapter != nullptr) {
+            int32_t byteCount = buffer.getFrameCount() * getBytesPerDeviceFrame();
+            callbackResult = mBlockAdapter->processVariableBlock(
+                    buffer.data(), byteCount);
+        } else {
+            // Call using the AAudio callback interface.
+            callbackResult = callDataCallbackFrames(buffer.data(),
+                                                    buffer.getFrameCount());
+        }
+        if (callbackResult == AAUDIO_CALLBACK_RESULT_CONTINUE) {
+            written = buffer.getFrameCount() * getBytesPerDeviceFrame();
+        } else {
+            if (callbackResult == AAUDIO_CALLBACK_RESULT_STOP) {
+                ALOGD("%s() callback returned AAUDIO_CALLBACK_RESULT_STOP", __func__);
+            } else {
+                ALOGW("%s() callback returned invalid result = %d",
+                      __func__, callbackResult);
+            }
+            written = 0;
+            systemStopInternal();
+            // Disable the callback just in case the system keeps trying to call us.
+            mCallbackEnabled.store(false);
+        }
+
+        if (updateStateMachine() != AAUDIO_OK) {
             forceDisconnect();
             mCallbackEnabled.store(false);
-            break;
-
-        default:
-            break;
+        }
     }
+    return written;
 }
 
 aaudio_result_t AudioStreamLegacy::checkForDisconnectRequest(bool errorCallbackEnabled) {
@@ -162,7 +213,11 @@ aaudio_result_t AudioStreamLegacy::checkForDisconnectRequest(bool errorCallbackE
 }
 
 void AudioStreamLegacy::forceDisconnect(bool errorCallbackEnabled) {
-    if (getState() != AAUDIO_STREAM_STATE_DISCONNECTED) {
+    // There is no need to disconnect if already in these states.
+    if (getState() != AAUDIO_STREAM_STATE_DISCONNECTED
+            && getState() != AAUDIO_STREAM_STATE_CLOSING
+            && getState() != AAUDIO_STREAM_STATE_CLOSED
+            ) {
         setState(AAUDIO_STREAM_STATE_DISCONNECTED);
         if (errorCallbackEnabled) {
             maybeCallErrorCallback(AAUDIO_ERROR_DISCONNECTED);
@@ -204,22 +259,30 @@ aaudio_result_t AudioStreamLegacy::getBestTimestamp(clockid_t clockId,
     return AAudioConvert_androidToAAudioResult(status);
 }
 
-void AudioStreamLegacy::onAudioDeviceUpdate(audio_port_handle_t deviceId)
-{
-    ALOGD("onAudioDeviceUpdate() deviceId %d", (int)deviceId);
-    if (getDeviceId() != AAUDIO_UNSPECIFIED && getDeviceId() != deviceId &&
-            getState() != AAUDIO_STREAM_STATE_DISCONNECTED) {
+void AudioStreamLegacy::onAudioDeviceUpdate(audio_io_handle_t /* audioIo */,
+            audio_port_handle_t deviceId) {
+    // Device routing is a common source of errors and DISCONNECTS.
+    // Please leave this log in place. If there is a bug then this might
+    // get called after the stream has been deleted so log before we
+    // touch the stream object.
+    ALOGD("%s(deviceId = %d)", __func__, (int)deviceId);
+    if (getDeviceId() != AAUDIO_UNSPECIFIED
+            && getDeviceId() != deviceId
+            && getState() != AAUDIO_STREAM_STATE_DISCONNECTED
+            ) {
         // Note that isDataCallbackActive() is affected by state so call it before DISCONNECTING.
         // If we have a data callback and the stream is active, then ask the data callback
         // to DISCONNECT and call the error callback.
         if (isDataCallbackActive()) {
-            ALOGD("onAudioDeviceUpdate() request DISCONNECT in data callback due to device change");
+            ALOGD("%s() request DISCONNECT in data callback, device %d => %d",
+                  __func__, (int) getDeviceId(), (int) deviceId);
             // If the stream is stopped before the data callback has a chance to handle the
-            // request then the requestStop() and requestPause() methods will handle it after
+            // request then the requestStop_l() and requestPause() methods will handle it after
             // the callback has stopped.
             mRequestDisconnect.request();
         } else {
-            ALOGD("onAudioDeviceUpdate() DISCONNECT the stream now");
+            ALOGD("%s() DISCONNECT the stream now, device %d => %d",
+                  __func__, (int) getDeviceId(), (int) deviceId);
             forceDisconnect();
         }
     }

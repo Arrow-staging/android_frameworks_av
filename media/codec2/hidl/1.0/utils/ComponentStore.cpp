@@ -23,7 +23,6 @@
 #include <codec2/hidl/1.0/types.h>
 
 #include <android-base/file.h>
-#include <media/stagefright/bqhelper/WGraphicBufferProducer.h>
 #include <media/stagefright/bqhelper/GraphicBufferSource.h>
 #include <utils/Errors.h>
 
@@ -35,6 +34,14 @@
 #include <iomanip>
 #include <ostream>
 #include <sstream>
+
+#ifndef __ANDROID_APEX__
+#include <codec2/hidl/plugin/FilterPlugin.h>
+#include <dlfcn.h>
+#include <C2Config.h>
+#include <DefaultFilterPlugin.h>
+#include <FilterWrapper.h>
+#endif
 
 namespace android {
 namespace hardware {
@@ -103,8 +110,29 @@ protected:
 
 } // unnamed namespace
 
+struct ComponentStore::StoreParameterCache : public ParameterCache {
+    std::mutex mStoreMutex;
+    ComponentStore* mStore;
+
+    StoreParameterCache(ComponentStore* store): mStore{store} {
+    }
+
+    virtual c2_status_t validate(
+            const std::vector<std::shared_ptr<C2ParamDescriptor>>& params
+            ) override {
+        std::scoped_lock _lock(mStoreMutex);
+        return mStore ? mStore->validateSupportedParams(params) : C2_NO_INIT;
+    }
+
+    void onStoreDestroyed() {
+        std::scoped_lock _lock(mStoreMutex);
+        mStore = nullptr;
+    }
+};
+
 ComponentStore::ComponentStore(const std::shared_ptr<C2ComponentStore>& store)
       : mConfigurable{new CachedConfigurable(std::make_unique<StoreIntf>(store))},
+        mParameterCache{std::make_shared<StoreParameterCache>(this)},
         mStore{store} {
 
     std::shared_ptr<C2ComponentStore> platformStore = android::GetCodec2PlatformComponentStore();
@@ -114,7 +142,12 @@ ComponentStore::ComponentStore(const std::shared_ptr<C2ComponentStore>& store)
     mParamReflector = mStore->getParamReflector();
 
     // Retrieve supported parameters from store
-    mInit = mConfigurable->init(this);
+    using namespace std::placeholders;
+    mInit = mConfigurable->init(mParameterCache);
+}
+
+ComponentStore::~ComponentStore() {
+    mParameterCache->onStoreDestroyed();
 }
 
 c2_status_t ComponentStore::status() const {
@@ -147,6 +180,20 @@ c2_status_t ComponentStore::validateSupportedParams(
     return res;
 }
 
+std::shared_ptr<ParameterCache> ComponentStore::getParameterCache() const {
+    return mParameterCache;
+}
+
+#ifndef __ANDROID_APEX__
+// static
+std::shared_ptr<FilterWrapper> ComponentStore::GetFilterWrapper() {
+    constexpr const char kPluginPath[] = "libc2filterplugin.so";
+    static std::shared_ptr<FilterWrapper> wrapper = FilterWrapper::Create(
+            std::make_unique<DefaultFilterPlugin>(kPluginPath));
+    return wrapper;
+}
+#endif
+
 // Methods from ::android::hardware::media::c2::V1_0::IComponentStore
 Return<void> ComponentStore::createComponent(
         const hidl_string& name,
@@ -160,6 +207,9 @@ Return<void> ComponentStore::createComponent(
             mStore->createComponent(name, &c2component));
 
     if (status == Status::OK) {
+#ifndef __ANDROID_APEX__
+        c2component = GetFilterWrapper()->maybeWrapComponent(c2component);
+#endif
         onInterfaceLoaded(c2component->intf());
         component = new Component(c2component, listener, this, pool);
         if (!component) {
@@ -185,10 +235,14 @@ Return<void> ComponentStore::createInterface(
         createInterface_cb _hidl_cb) {
     std::shared_ptr<C2ComponentInterface> c2interface;
     c2_status_t res = mStore->createInterface(name, &c2interface);
+
     sp<IComponentInterface> interface;
     if (res == C2_OK) {
+#ifndef __ANDROID_APEX__
+        c2interface = GetFilterWrapper()->maybeWrapInterface(c2interface);
+#endif
         onInterfaceLoaded(c2interface);
-        interface = new ComponentInterface(c2interface, this);
+        interface = new ComponentInterface(c2interface, mParameterCache);
     }
     _hidl_cb(static_cast<Status>(res), interface);
     return Void();
@@ -219,13 +273,11 @@ Return<void> ComponentStore::createInputSurface(createInputSurface_cb _hidl_cb) 
         _hidl_cb(Status::CORRUPTED, nullptr);
         return Void();
     }
-    typedef ::android::hardware::graphics::bufferqueue::V1_0::
-            IGraphicBufferProducer HGbp;
-    typedef ::android::TWGraphicBufferProducer<HGbp> B2HGbp;
+    using namespace std::placeholders;
     sp<InputSurface> inputSurface = new InputSurface(
-            this,
+            mParameterCache,
             std::make_shared<C2ReflectorHelper>(),
-            new B2HGbp(source->getIGraphicBufferProducer()),
+            source->getHGraphicBufferProducer(),
             source);
     _hidl_cb(inputSurface ? Status::OK : Status::NO_MEMORY,
              inputSurface);
@@ -430,7 +482,6 @@ Return<void> ComponentStore::debug(
     }
     return Void();
 }
-
 
 }  // namespace utils
 }  // namespace V1_0

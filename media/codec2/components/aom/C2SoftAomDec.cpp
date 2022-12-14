@@ -29,7 +29,10 @@
 
 namespace android {
 
-constexpr char COMPONENT_NAME[] = "c2.android.av1.decoder";
+constexpr size_t kMinInputBufferSize = 2 * 1024 * 1024;
+
+// codecname set and passed in as a compile flag from Android.bp
+constexpr char COMPONENT_NAME[] = CODECNAME;
 
 class C2SoftAomDec::IntfImpl : public SimpleInterface<void>::BaseParams {
   public:
@@ -78,6 +81,26 @@ class C2SoftAomDec::IntfImpl : public SimpleInterface<void>::BaseParams {
                 .withSetter(ProfileLevelSetter, mSize)
                 .build());
 
+        mHdr10PlusInfoInput = C2StreamHdr10PlusInfo::input::AllocShared(0);
+        addParameter(
+                DefineParam(mHdr10PlusInfoInput, C2_PARAMKEY_INPUT_HDR10_PLUS_INFO)
+                .withDefault(mHdr10PlusInfoInput)
+                .withFields({
+                    C2F(mHdr10PlusInfoInput, m.value).any(),
+                })
+                .withSetter(Hdr10PlusInfoInputSetter)
+                .build());
+
+        mHdr10PlusInfoOutput = C2StreamHdr10PlusInfo::output::AllocShared(0);
+        addParameter(
+                DefineParam(mHdr10PlusInfoOutput, C2_PARAMKEY_OUTPUT_HDR10_PLUS_INFO)
+                .withDefault(mHdr10PlusInfoOutput)
+                .withFields({
+                    C2F(mHdr10PlusInfoOutput, m.value).any(),
+                })
+                .withSetter(Hdr10PlusInfoOutputSetter)
+                .build());
+
         addParameter(DefineParam(mMaxSize, C2_PARAMKEY_MAX_PICTURE_SIZE)
                          .withDefault(new C2StreamMaxPictureSizeTuning::output(
                              0u, 320, 240))
@@ -91,7 +114,7 @@ class C2SoftAomDec::IntfImpl : public SimpleInterface<void>::BaseParams {
         addParameter(
             DefineParam(mMaxInputSize, C2_PARAMKEY_INPUT_MAX_BUFFER_SIZE)
                 .withDefault(
-                    new C2StreamMaxBufferSizeInfo::input(0u, 320 * 240 * 3 / 4))
+                    new C2StreamMaxBufferSizeInfo::input(0u, kMinInputBufferSize))
                 .withFields({
                     C2F(mMaxInputSize, value).any(),
                 })
@@ -171,8 +194,8 @@ class C2SoftAomDec::IntfImpl : public SimpleInterface<void>::BaseParams {
         const C2P<C2StreamMaxPictureSizeTuning::output>& maxSize) {
         (void)mayBlock;
         // assume compression ratio of 2
-        me.set().value = (((maxSize.v.width + 63) / 64) *
-                          ((maxSize.v.height + 63) / 64) * 3072);
+        me.set().value = c2_max((((maxSize.v.width + 63) / 64)
+                * ((maxSize.v.height + 63) / 64) * 3072), kMinInputBufferSize);
         return C2R::Ok();
     }
     static C2R DefaultColorAspectsSetter(bool mayBlock, C2P<C2StreamColorAspectsTuning::output> &me) {
@@ -203,6 +226,18 @@ class C2SoftAomDec::IntfImpl : public SimpleInterface<void>::BaseParams {
         return mDefaultColorAspects;
     }
 
+    static C2R Hdr10PlusInfoInputSetter(bool mayBlock, C2P<C2StreamHdr10PlusInfo::input> &me) {
+        (void)mayBlock;
+        (void)me;  // TODO: validate
+        return C2R::Ok();
+    }
+
+    static C2R Hdr10PlusInfoOutputSetter(bool mayBlock, C2P<C2StreamHdr10PlusInfo::output> &me) {
+        (void)mayBlock;
+        (void)me;  // TODO: validate
+        return C2R::Ok();
+    }
+
   private:
     std::shared_ptr<C2StreamProfileLevelInfo::input> mProfileLevel;
     std::shared_ptr<C2StreamPictureSizeInfo::output> mSize;
@@ -211,6 +246,8 @@ class C2SoftAomDec::IntfImpl : public SimpleInterface<void>::BaseParams {
     std::shared_ptr<C2StreamColorInfo::output> mColorInfo;
     std::shared_ptr<C2StreamPixelFormatInfo::output> mPixelFormat;
     std::shared_ptr<C2StreamColorAspectsTuning::output> mDefaultColorAspects;
+    std::shared_ptr<C2StreamHdr10PlusInfo::input> mHdr10PlusInfoInput;
+    std::shared_ptr<C2StreamHdr10PlusInfo::output> mHdr10PlusInfoOutput;
 };
 
 C2SoftAomDec::C2SoftAomDec(const char* name, c2_node_id_t id,
@@ -224,8 +261,7 @@ C2SoftAomDec::C2SoftAomDec(const char* name, c2_node_id_t id,
     CREATE_DUMP_FILE(mInFile);
     CREATE_DUMP_FILE(mOutFile);
 
-    gettimeofday(&mTimeStart, nullptr);
-    gettimeofday(&mTimeEnd, nullptr);
+    mTimeStart = mTimeEnd = systemTime();
 }
 
 C2SoftAomDec::~C2SoftAomDec() {
@@ -306,6 +342,7 @@ status_t C2SoftAomDec::initDecoder() {
     aom_codec_flags_t flags;
     memset(&flags, 0, sizeof(aom_codec_flags_t));
 
+    ALOGV("Using libaom AV1 software decoder.");
     aom_codec_err_t err;
     if ((err = aom_codec_dec_init(mCodecCtx, aom_codec_av1_dx(), &cfg, 0))) {
         ALOGE("av1 decoder failed to initialize. (%d)", err);
@@ -341,7 +378,8 @@ void C2SoftAomDec::finishWork(uint64_t index,
                               const std::shared_ptr<C2GraphicBlock>& block) {
     std::shared_ptr<C2Buffer> buffer =
         createGraphicBuffer(block, C2Rect(mWidth, mHeight));
-    auto fillWork = [buffer, index](const std::unique_ptr<C2Work>& work) {
+    auto fillWork = [buffer, index, intf = this->mIntf](
+            const std::unique_ptr<C2Work>& work) {
         uint32_t flags = 0;
         if ((work->input.flags & C2FrameData::FLAG_END_OF_STREAM) &&
             (c2_cntr64_t(index) == work->input.ordinal.frameIndex)) {
@@ -353,6 +391,28 @@ void C2SoftAomDec::finishWork(uint64_t index,
         work->worklets.front()->output.buffers.push_back(buffer);
         work->worklets.front()->output.ordinal = work->input.ordinal;
         work->workletsProcessed = 1u;
+
+        for (const std::unique_ptr<C2Param> &param: work->input.configUpdate) {
+            if (param) {
+                C2StreamHdr10PlusInfo::input *hdr10PlusInfo =
+                        C2StreamHdr10PlusInfo::input::From(param.get());
+
+                if (hdr10PlusInfo != nullptr) {
+                    std::vector<std::unique_ptr<C2SettingResult>> failures;
+                    std::unique_ptr<C2Param> outParam = C2Param::CopyAsStream(
+                            *param.get(), true /*output*/, param->stream());
+                    c2_status_t err = intf->config(
+                            { outParam.get() }, C2_MAY_BLOCK, &failures);
+                    if (err == C2_OK) {
+                        work->worklets.front()->output.configUpdate.push_back(
+                                C2Param::Copy(*outParam.get()));
+                    } else {
+                        ALOGE("finishWork: Config update size failed");
+                    }
+                    break;
+                }
+            }
+        }
     };
     if (work && c2_cntr64_t(index) == work->input.ordinal.frameIndex) {
         fillWork(work);
@@ -402,19 +462,17 @@ void C2SoftAomDec::process(const std::unique_ptr<C2Work>& work,
     int64_t frameIndex = work->input.ordinal.frameIndex.peekll();
     if (inSize) {
         uint8_t* bitstream = const_cast<uint8_t*>(rView.data() + inOffset);
-        int32_t decodeTime = 0;
-        int32_t delay = 0;
 
         DUMP_TO_FILE(mOutFile, bitstream, inSize);
-        GETTIME(&mTimeStart, nullptr);
-        TIME_DIFF(mTimeEnd, mTimeStart, delay);
+        mTimeStart = systemTime();
+        nsecs_t delay = mTimeStart - mTimeEnd;
 
         aom_codec_err_t err =
             aom_codec_decode(mCodecCtx, bitstream, inSize, &frameIndex);
 
-        GETTIME(&mTimeEnd, nullptr);
-        TIME_DIFF(mTimeStart, mTimeEnd, decodeTime);
-        ALOGV("decodeTime=%4d delay=%4d\n", decodeTime, delay);
+        mTimeEnd = systemTime();
+        nsecs_t decodeTime = mTimeEnd - mTimeStart;
+        ALOGV("decodeTime=%4" PRId64 " delay=%4" PRId64 "\n", decodeTime, delay);
 
         if (err != AOM_CODEC_OK) {
             ALOGE("av1 decoder failed to decode frame err: %d", err);
@@ -444,133 +502,6 @@ void C2SoftAomDec::process(const std::unique_ptr<C2Work>& work,
     }
 }
 
-static void copyOutputBufferToYV12Frame(uint8_t *dst,
-        const uint8_t *srcY, const uint8_t *srcU, const uint8_t *srcV,
-        size_t srcYStride, size_t srcUStride, size_t srcVStride,
-        uint32_t width, uint32_t height) {
-    size_t dstYStride = align(width, 16);
-    size_t dstUVStride = align(dstYStride / 2, 16);
-    uint8_t* dstStart = dst;
-
-
-    for (size_t i = 0; i < height; ++i) {
-        memcpy(dst, srcY, width);
-        srcY += srcYStride;
-        dst += dstYStride;
-    }
-
-    dst = dstStart + dstYStride * height;
-    for (size_t i = 0; i < height / 2; ++i) {
-         memcpy(dst, srcV, width / 2);
-        srcV += srcVStride;
-        dst += dstUVStride;
-    }
-
-    dst = dstStart + (dstYStride * height) + (dstUVStride * height / 2);
-    for (size_t i = 0; i < height / 2; ++i) {
-         memcpy(dst, srcU, width / 2);
-        srcU += srcUStride;
-        dst += dstUVStride;
-    }
-}
-
-static void convertYUV420Planar16ToY410(uint32_t *dst,
-        const uint16_t *srcY, const uint16_t *srcU, const uint16_t *srcV,
-        size_t srcYStride, size_t srcUStride, size_t srcVStride,
-        size_t dstStride, size_t width, size_t height) {
-
-    // Converting two lines at a time, slightly faster
-    for (size_t y = 0; y < height; y += 2) {
-        uint32_t *dstTop = (uint32_t *) dst;
-        uint32_t *dstBot = (uint32_t *) (dst + dstStride);
-        uint16_t *ySrcTop = (uint16_t*) srcY;
-        uint16_t *ySrcBot = (uint16_t*) (srcY + srcYStride);
-        uint16_t *uSrc = (uint16_t*) srcU;
-        uint16_t *vSrc = (uint16_t*) srcV;
-
-        uint32_t u01, v01, y01, y23, y45, y67, uv0, uv1;
-        size_t x = 0;
-        for (; x < width - 3; x += 4) {
-
-            u01 = *((uint32_t*)uSrc); uSrc += 2;
-            v01 = *((uint32_t*)vSrc); vSrc += 2;
-
-            y01 = *((uint32_t*)ySrcTop); ySrcTop += 2;
-            y23 = *((uint32_t*)ySrcTop); ySrcTop += 2;
-            y45 = *((uint32_t*)ySrcBot); ySrcBot += 2;
-            y67 = *((uint32_t*)ySrcBot); ySrcBot += 2;
-
-            uv0 = (u01 & 0x3FF) | ((v01 & 0x3FF) << 20);
-            uv1 = (u01 >> 16) | ((v01 >> 16) << 20);
-
-            *dstTop++ = 3 << 30 | ((y01 & 0x3FF) << 10) | uv0;
-            *dstTop++ = 3 << 30 | ((y01 >> 16) << 10) | uv0;
-            *dstTop++ = 3 << 30 | ((y23 & 0x3FF) << 10) | uv1;
-            *dstTop++ = 3 << 30 | ((y23 >> 16) << 10) | uv1;
-
-            *dstBot++ = 3 << 30 | ((y45 & 0x3FF) << 10) | uv0;
-            *dstBot++ = 3 << 30 | ((y45 >> 16) << 10) | uv0;
-            *dstBot++ = 3 << 30 | ((y67 & 0x3FF) << 10) | uv1;
-            *dstBot++ = 3 << 30 | ((y67 >> 16) << 10) | uv1;
-        }
-
-        // There should be at most 2 more pixels to process. Note that we don't
-        // need to consider odd case as the buffer is always aligned to even.
-        if (x < width) {
-            u01 = *uSrc;
-            v01 = *vSrc;
-            y01 = *((uint32_t*)ySrcTop);
-            y45 = *((uint32_t*)ySrcBot);
-            uv0 = (u01 & 0x3FF) | ((v01 & 0x3FF) << 20);
-            *dstTop++ = ((y01 & 0x3FF) << 10) | uv0;
-            *dstTop++ = ((y01 >> 16) << 10) | uv0;
-            *dstBot++ = ((y45 & 0x3FF) << 10) | uv0;
-            *dstBot++ = ((y45 >> 16) << 10) | uv0;
-        }
-
-        srcY += srcYStride * 2;
-        srcU += srcUStride;
-        srcV += srcVStride;
-        dst += dstStride * 2;
-    }
-
-    return;
-}
-
-static void convertYUV420Planar16ToYUV420Planar(uint8_t *dst,
-        const uint16_t *srcY, const uint16_t *srcU, const uint16_t *srcV,
-        size_t srcYStride, size_t srcUStride, size_t srcVStride,
-        size_t dstStride, size_t width, size_t height) {
-
-    uint8_t *dstY = (uint8_t *)dst;
-    size_t dstYSize = dstStride * height;
-    size_t dstUVStride = align(dstStride / 2, 16);
-    size_t dstUVSize = dstUVStride * height / 2;
-    uint8_t *dstV = dstY + dstYSize;
-    uint8_t *dstU = dstV + dstUVSize;
-
-    for (size_t y = 0; y < height; ++y) {
-        for (size_t x = 0; x < width; ++x) {
-            dstY[x] = (uint8_t)(srcY[x] >> 2);
-        }
-
-        srcY += srcYStride;
-        dstY += dstStride;
-    }
-
-    for (size_t y = 0; y < (height + 1) / 2; ++y) {
-        for (size_t x = 0; x < (width + 1) / 2; ++x) {
-            dstU[x] = (uint8_t)(srcU[x] >> 2);
-            dstV[x] = (uint8_t)(srcV[x] >> 2);
-        }
-
-        srcU += srcUStride;
-        srcV += srcVStride;
-        dstU += dstUVStride;
-        dstV += dstUVStride;
-    }
-    return;
-}
 bool C2SoftAomDec::outputBuffer(
         const std::shared_ptr<C2BlockPool> &pool,
         const std::unique_ptr<C2Work> &work)
@@ -605,9 +536,10 @@ bool C2SoftAomDec::outputBuffer(
 
     std::shared_ptr<C2GraphicBlock> block;
     uint32_t format = HAL_PIXEL_FORMAT_YV12;
+    std::shared_ptr<C2StreamColorAspectsTuning::output> defaultColorAspects;
     if (img->fmt == AOM_IMG_FMT_I42016) {
         IntfImpl::Lock lock = mIntf->lock();
-        std::shared_ptr<C2StreamColorAspectsTuning::output> defaultColorAspects = mIntf->getDefaultColorAspects_l();
+        defaultColorAspects = mIntf->getDefaultColorAspects_l();
 
         if (defaultColorAspects->primaries == C2Color::PRIMARIES_BT2020 &&
             defaultColorAspects->matrix == C2Color::MATRIX_BT2020 &&
@@ -638,10 +570,15 @@ bool C2SoftAomDec::outputBuffer(
           block->width(), block->height(), mWidth, mHeight,
           (int)*(int64_t*)img->user_priv);
 
-    uint8_t* dst = const_cast<uint8_t*>(wView.data()[C2PlanarLayout::PLANE_Y]);
+    uint8_t* dstY = const_cast<uint8_t*>(wView.data()[C2PlanarLayout::PLANE_Y]);
+    uint8_t* dstU = const_cast<uint8_t*>(wView.data()[C2PlanarLayout::PLANE_U]);
+    uint8_t* dstV = const_cast<uint8_t*>(wView.data()[C2PlanarLayout::PLANE_V]);
     size_t srcYStride = img->stride[AOM_PLANE_Y];
     size_t srcUStride = img->stride[AOM_PLANE_U];
     size_t srcVStride = img->stride[AOM_PLANE_V];
+    C2PlanarLayout layout = wView.layout();
+    size_t dstYStride = layout.planes[C2PlanarLayout::PLANE_Y].rowInc;
+    size_t dstUVStride = layout.planes[C2PlanarLayout::PLANE_U].rowInc;
 
     if (img->fmt == AOM_IMG_FMT_I42016) {
         const uint16_t *srcY = (const uint16_t *)img->planes[AOM_PLANE_Y];
@@ -649,22 +586,21 @@ bool C2SoftAomDec::outputBuffer(
         const uint16_t *srcV = (const uint16_t *)img->planes[AOM_PLANE_V];
 
         if (format == HAL_PIXEL_FORMAT_RGBA_1010102) {
-            convertYUV420Planar16ToY410((uint32_t *)dst, srcY, srcU, srcV, srcYStride / 2,
-                                    srcUStride / 2, srcVStride / 2,
-                                    align(mWidth, 16),
-                                    mWidth, mHeight);
+            convertYUV420Planar16ToY410OrRGBA1010102(
+                    (uint32_t *)dstY, srcY, srcU, srcV, srcYStride / 2, srcUStride / 2,
+                    srcVStride / 2, dstYStride / sizeof(uint32_t), mWidth, mHeight,
+                    std::static_pointer_cast<const C2ColorAspectsStruct>(defaultColorAspects));
         } else {
-            convertYUV420Planar16ToYUV420Planar(dst, srcY, srcU, srcV, srcYStride / 2,
-                                    srcUStride / 2, srcVStride / 2,
-                                    align(mWidth, 16),
-                                    mWidth, mHeight);
+            convertYUV420Planar16ToYV12(dstY, dstU, dstV, srcY, srcU, srcV, srcYStride / 2,
+                                        srcUStride / 2, srcVStride / 2, dstYStride, dstUVStride,
+                                        mWidth, mHeight);
         }
     } else {
         const uint8_t *srcY = (const uint8_t *)img->planes[AOM_PLANE_Y];
         const uint8_t *srcU = (const uint8_t *)img->planes[AOM_PLANE_U];
         const uint8_t *srcV = (const uint8_t *)img->planes[AOM_PLANE_V];
-        copyOutputBufferToYV12Frame(dst, srcY, srcU, srcV,
-                                srcYStride, srcUStride, srcVStride, mWidth, mHeight);
+        convertYUV420Planar8ToYV12(dstY, dstU, dstV, srcY, srcU, srcV, srcYStride, srcUStride,
+                                   srcVStride, dstYStride, dstUVStride, mWidth, mHeight);
     }
     finishWork(*(int64_t*)img->user_priv, work, std::move(block));
     block = nullptr;
@@ -739,11 +675,13 @@ class C2SoftAomFactory : public C2ComponentFactory {
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftAomFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

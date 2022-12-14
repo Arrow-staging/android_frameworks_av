@@ -26,7 +26,7 @@
 #include <media/IMediaSource.h>
 #include <media/stagefright/MediaBuffer.h>
 #include <media/stagefright/MediaBufferGroup.h>
-#include <media/MediaSource.h>
+#include <media/stagefright/MediaSource.h>
 #include <media/stagefright/MetaData.h>
 
 namespace android {
@@ -107,7 +107,7 @@ public:
         data.writeInterfaceToken(BpMediaSource::getInterfaceDescriptor());
         status_t ret = remote()->transact(GETFORMAT, data, &reply);
         if (ret == NO_ERROR) {
-            AutoMutex _l(mLock);
+            AutoMutex _l(mBpLock);
             mMetaData = MetaData::createFromParcel(reply);
             return mMetaData;
         }
@@ -224,7 +224,7 @@ private:
     // XXX: could we use this for caching, or does metadata change on the fly?
     sp<MetaData> mMetaData;
     // ensure synchronize access to mMetaData
-    Mutex mLock;
+    Mutex mBpLock;
 
     // Cache all IMemory objects received from MediaExtractor.
     // We gc IMemory objects that are no longer active (referenced by a MediaBuffer).
@@ -301,6 +301,7 @@ status_t BnMediaSource::onTransact(
             CHECK_INTERFACE(IMediaSource, data, reply);
             mGroup->signalBufferReturned(nullptr);
             status_t status = stop();
+            AutoMutex _l(mBnLock);
             mIndexCache.reset();
             mBuffersSinceStop = 0;
             return status;
@@ -340,6 +341,7 @@ status_t BnMediaSource::onTransact(
                     && len == sizeof(opts)
                     && data.read((void *)&opts, len) == NO_ERROR;
 
+            AutoMutex _l(mBnLock);
             mGroup->signalBufferReturned(nullptr);
             mIndexCache.gc();
             size_t inlineTransferSize = 0;
@@ -368,13 +370,13 @@ status_t BnMediaSource::onTransact(
                         ALOGV("Use shared memory: %zu", length);
                         transferBuf = buf;
                     } else {
-                        ALOGD("Large buffer %zu without IMemory!", length);
+                        ALOGV("Large buffer %zu without IMemory!", length);
                         ret = mGroup->acquire_buffer(
                                 (MediaBufferBase **)&transferBuf, false /* nonBlocking */, length);
                         if (ret != OK
                                 || transferBuf == nullptr
                                 || transferBuf->mMemory == nullptr) {
-                            ALOGW("Failed to acquire shared memory, size %zu, ret %d",
+                            ALOGV("Failed to acquire shared memory, size %zu, ret %d",
                                     length, ret);
                             if (transferBuf != nullptr) {
                                 transferBuf->release();

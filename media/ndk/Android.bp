@@ -16,6 +16,37 @@
 // to refer to headers in parent directories and the headers live in
 // frameworks/av/include.
 
+package {
+    default_applicable_licenses: ["frameworks_av_media_ndk_license"],
+}
+
+// Added automatically by a large-scale-change that took the approach of
+// 'apply every license found to every target'. While this makes sure we respect
+// every license restriction, it may not be entirely correct.
+//
+// e.g. GPL in an MIT project might only apply to the contrib/ directory.
+//
+// Please consider splitting the single license below into multiple licenses,
+// taking care not to lose any license_kind information, and overriding the
+// default license using the 'licenses: [...]' property on targets as needed.
+//
+// For unused files, consider creating a 'fileGroup' with "//visibility:private"
+// to attach the license to, and including a comment whether the files may be
+// used in the current project.
+// See: http://go/android-license-faq
+license {
+    name: "frameworks_av_media_ndk_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+        "SPDX-license-identifier-MIT",
+        "SPDX-license-identifier-Unicode-DFS",
+    ],
+    license_text: [
+        "NOTICE",
+    ],
+}
+
 ndk_library {
     name: "libmediandk",
     symbol_file: "libmediandk.map.txt",
@@ -32,16 +63,35 @@ ndk_headers {
 }
 
 // for use with header_libs
+// supports use as <media/NdkMediaExtractor.h> not <NdkMediaExtractor.h>
 cc_library_headers {
     name: "media_ndk_headers",
     vendor_available: true,
-    export_include_dirs: ["include"]
+    // TODO(b/153609531): remove when no longer needed.
+    native_bridge_supported: true,
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.media",
+        "com.android.media.swcodec",
+    ],
+    min_sdk_version: "29",
+    export_include_dirs: ["include"],
+    host_supported: true,
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
 }
 
 cc_library_shared {
     name: "libmediandk",
+    llndk: {
+        symbol_file: "libmediandk.map.txt",
+    },
 
     srcs: [
+        "NdkJavaVMHelper.cpp",
         "NdkMediaCodec.cpp",
         "NdkMediaCrypto.cpp",
         "NdkMediaDataSource.cpp",
@@ -54,9 +104,6 @@ cc_library_shared {
     ],
 
     include_dirs: [
-        "bionic/libc/private",
-        "frameworks/base/core/jni",
-        "frameworks/native/include/media/openmax",
         "system/media/camera/include",
     ],
 
@@ -68,33 +115,48 @@ cc_library_shared {
 
     static_libs: [
         "libgrallocusage",
+        "libnativehelper_lazy",
+    ],
+
+    header_libs: [
+        "jni_headers",
+        "libmediadrm_headers",
+        "libmediametrics_headers",
     ],
 
     shared_libs: [
         "android.hardware.graphics.bufferqueue@1.0",
         "android.hidl.token@1.0-utils",
-        "libbinder",
+        "libandroid_runtime_lazy",
+        "libbase",
+        "libdatasource",
         "libmedia",
+        "libmediadrm",
         "libmedia_omx",
         "libmedia_jni_utils",
-        "libmediadrm",
         "libstagefright",
         "libstagefright_foundation",
-        "libstagefright_bufferqueue_helper",
         "liblog",
         "libutils",
         "libcutils",
         "libnativewindow",
-        "libandroid_runtime",
-        "libbinder",
         "libhidlbase",
         "libgui",
         "libui",
-        "libmedia2_jni_core",
         "libmediandk_utils",
+        "android.hardware.drm-V1-ndk",
     ],
 
-    export_include_dirs: ["include"],
+    export_header_lib_headers: ["jni_headers"],
+
+    export_include_dirs: [
+        "include",
+        "include_platform",
+    ],
+
+    export_shared_lib_headers: [
+        "libgui",
+    ],
 
     product_variables: {
         pdk: {
@@ -105,19 +167,7 @@ cc_library_shared {
     stubs: {
         symbol_file: "libmediandk.map.txt",
         versions: ["29"],
-    },
-
-    // Bug: http://b/124522995 libmediandk has linker errors when built with
-    // coverage
-    native_coverage: false,
-}
-
-llndk_library {
-    name: "libmediandk",
-    symbol_file: "libmediandk.map.txt",
-    export_include_dirs: [
-        "include",
-    ],
+    }
 }
 
 cc_library {
@@ -127,9 +177,8 @@ cc_library {
         "NdkMediaDataSourceCallbacks.cpp",
     ],
 
-    include_dirs: [
-        "frameworks/av/media/libstagefright/include",
-        "frameworks/av/media/ndk/include",
+    local_include_dirs: [
+        "include",
     ],
 
     export_include_dirs: [
@@ -140,6 +189,12 @@ cc_library {
         "-Werror",
         "-Wno-error=deprecated-declarations",
         "-Wall",
+    ],
+
+    header_libs: [
+        "libstagefright_headers",
+        "libmedia_headers",
+        "libstagefright_headers",
     ],
 
     shared_libs: [
@@ -156,6 +211,7 @@ cc_library {
 
 cc_test {
     name: "AImageReaderWindowHandleTest",
+    test_suites: ["device-tests"],
     srcs: ["tests/AImageReaderWindowHandleTest.cpp"],
     shared_libs: [
         "libbinder",
@@ -168,10 +224,54 @@ cc_test {
         "libcutils",
         "android.hardware.graphics.bufferqueue@1.0",
     ],
+
+    header_libs: [
+        "libstagefright_foundation_headers",
+    ],
+
     cflags: [
         "-D__ANDROID_VNDK__",
     ],
-    include_dirs: [
-        "frameworks/av/media/ndk/",
+}
+
+cc_library_static {
+    name: "libmediandk_format",
+
+    host_supported: true,
+
+    srcs: [
+        "NdkMediaFormat.cpp",
+    ],
+
+    header_libs: [
+        "libstagefright_foundation_headers",
+    ],
+
+    cflags: [
+        "-DEXPORT=__attribute__((visibility(\"default\")))",
+        "-Werror",
+        "-Wall",
+    ],
+
+    export_include_dirs: ["include"],
+
+    sanitize: {
+        misc_undefined: [
+            "unsigned-integer-overflow",
+            "signed-integer-overflow",
+        ],
+        cfi: true,
+    },
+
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
+
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.media",
+        "com.android.media.swcodec",
     ],
 }

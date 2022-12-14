@@ -52,11 +52,12 @@ public:
                                     struct audio_port *ports);
 
     /* Get supported attributes for a given audio port */
-    status_t getAudioPort(struct audio_port *port);
+    status_t getAudioPort(struct audio_port_v7 *port);
 
     /* Create a patch between several source and sink ports */
     status_t createAudioPatch(const struct audio_patch *patch,
-                                       audio_patch_handle_t *handle);
+                              audio_patch_handle_t *handle,
+                              bool endpointPatch = false);
 
     /* Release a patch */
     status_t releaseAudioPatch(audio_patch_handle_t handle);
@@ -71,18 +72,24 @@ public:
             std::vector<SoftwarePatch> *patches) const;
 
     // Notifies patch panel about all opened and closed streams.
-    void notifyStreamOpened(AudioHwDevice *audioHwDevice, audio_io_handle_t stream);
+    void notifyStreamOpened(AudioHwDevice *audioHwDevice, audio_io_handle_t stream,
+                            struct audio_patch *patch);
     void notifyStreamClosed(audio_io_handle_t stream);
 
     void dump(int fd) const;
 
-private:
     template<typename ThreadType, typename TrackType>
-    class Endpoint {
+    class Endpoint final {
     public:
         Endpoint() = default;
         Endpoint(const Endpoint&) = delete;
-        Endpoint& operator=(const Endpoint&) = delete;
+        Endpoint& operator=(const Endpoint& other) noexcept {
+            mThread = other.mThread;
+            mCloseThread = other.mCloseThread;
+            mHandle = other.mHandle;
+            mTrack = other.mTrack;
+            return *this;
+        }
         Endpoint(Endpoint&& other) noexcept { swap(other); }
         Endpoint& operator=(Endpoint&& other) noexcept {
             swap(other);
@@ -98,8 +105,8 @@ private:
             return trackOrNull->initCheck();
         }
         audio_patch_handle_t handle() const { return mHandle; }
-        sp<ThreadType> thread() { return mThread; }
-        sp<TrackType> track() { return mTrack; }
+        sp<ThreadType> thread() const { return mThread; }
+        sp<TrackType> track() const { return mTrack; }
         sp<const ThreadType> const_thread() const { return mThread; }
         sp<const TrackType> const_track() const { return mTrack; }
 
@@ -122,18 +129,21 @@ private:
             mThread = thread;
             mCloseThread = closeThread;
         }
-        void setTrackAndPeer(const sp<TrackType>& track,
-                             ThreadBase::PatchProxyBufferProvider *peer) {
+        template <typename T>
+        void setTrackAndPeer(const sp<TrackType>& track, const sp<T> &peer, bool holdReference) {
             mTrack = track;
             mThread->addPatchTrack(mTrack);
-            mTrack->setPeerProxy(peer);
+            mTrack->setPeerProxy(peer, holdReference);
+            mClearPeerProxy = holdReference;
         }
+        void clearTrackPeer() { if (mClearPeerProxy && mTrack) mTrack->clearPeerProxy(); }
         void stopTrack() { if (mTrack) mTrack->stop(); }
 
         void swap(Endpoint &other) noexcept {
             using std::swap;
             swap(mThread, other.mThread);
             swap(mCloseThread, other.mCloseThread);
+            swap(mClearPeerProxy, other.mClearPeerProxy);
             swap(mHandle, other.mHandle);
             swap(mTrack, other.mTrack);
         }
@@ -145,24 +155,53 @@ private:
     private:
         sp<ThreadType> mThread;
         bool mCloseThread = true;
+        bool mClearPeerProxy = true;
         audio_patch_handle_t mHandle = AUDIO_PATCH_HANDLE_NONE;
         sp<TrackType> mTrack;
     };
 
-    class Patch {
+    class Patch final {
     public:
-        explicit Patch(const struct audio_patch &patch) : mAudioPatch(patch) {}
+        Patch(const struct audio_patch &patch, bool endpointPatch) :
+            mAudioPatch(patch), mIsEndpointPatch(endpointPatch) {}
+        Patch() = default;
         ~Patch();
-        Patch(const Patch&) = delete;
-        Patch(Patch&&) = default;
-        Patch& operator=(const Patch&) = delete;
-        Patch& operator=(Patch&&) = default;
+        Patch(const Patch& other) noexcept {
+            mAudioPatch = other.mAudioPatch;
+            mHalHandle = other.mHalHandle;
+            mPlayback = other.mPlayback;
+            mRecord = other.mRecord;
+            mThread = other.mThread;
+            mIsEndpointPatch = other.mIsEndpointPatch;
+        }
+        Patch(Patch&& other) noexcept { swap(other); }
+        Patch& operator=(Patch&& other) noexcept {
+            swap(other);
+            return *this;
+        }
+
+        void swap(Patch &other) noexcept {
+            using std::swap;
+            swap(mAudioPatch, other.mAudioPatch);
+            swap(mHalHandle, other.mHalHandle);
+            swap(mPlayback, other.mPlayback);
+            swap(mRecord, other.mRecord);
+            swap(mThread, other.mThread);
+            swap(mIsEndpointPatch, other.mIsEndpointPatch);
+        }
+
+        friend void swap(Patch &a, Patch &b) noexcept {
+            a.swap(b);
+        }
 
         status_t createConnections(PatchPanel *panel);
         void clearConnections(PatchPanel *panel);
         bool isSoftware() const {
             return mRecord.handle() != AUDIO_PATCH_HANDLE_NONE ||
                     mPlayback.handle() != AUDIO_PATCH_HANDLE_NONE; }
+
+        void setThread(sp<ThreadBase> thread) { mThread = thread; }
+        wp<ThreadBase> thread() const { return mThread; }
 
         // returns the latency of the patch (from record to playback).
         status_t getLatencyMs(double *latencyMs) const;
@@ -181,13 +220,22 @@ private:
         Endpoint<PlaybackThread, PlaybackThread::PatchTrack> mPlayback;
         // connects source device to record thread input
         Endpoint<RecordThread, RecordThread::PatchRecord> mRecord;
+
+        wp<ThreadBase> mThread;
+        bool mIsEndpointPatch;
     };
 
+    // Call with AudioFlinger mLock held
+    std::map<audio_patch_handle_t, Patch>& patches_l() { return mPatches; }
+
+private:
     AudioHwDevice* findAudioHwDeviceByModule(audio_module_handle_t module);
     sp<DeviceHalInterface> findHwDeviceByModule(audio_module_handle_t module);
     void addSoftwarePatchToInsertedModules(
-            audio_module_handle_t module, audio_patch_handle_t handle);
+            audio_module_handle_t module, audio_patch_handle_t handle,
+            const struct audio_patch *patch);
     void removeSoftwarePatchFromInsertedModules(audio_patch_handle_t handle);
+    void erasePatch(audio_patch_handle_t handle);
 
     AudioFlinger &mAudioFlinger;
     std::map<audio_patch_handle_t, Patch> mPatches;

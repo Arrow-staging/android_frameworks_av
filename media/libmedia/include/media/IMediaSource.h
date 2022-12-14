@@ -22,7 +22,7 @@
 
 #include <binder/IInterface.h>
 #include <binder/IMemory.h>
-#include <media/MediaSource.h>
+#include <media/stagefright/MediaSource.h>
 #include <media/stagefright/MediaBuffer.h>
 #include <media/stagefright/MediaErrors.h>
 
@@ -124,16 +124,18 @@ public:
         return false;
     }
 
-    static const size_t kBinderMediaBuffers = 4; // buffers managed by BnMediaSource
+    // align buffer count with video request size in NuMediaExtractor::selectTrack()
+    static const size_t kBinderMediaBuffers = 8; // buffers managed by BnMediaSource
     static const size_t kTransferSharedAsSharedThreshold = 4 * 1024;  // if >= shared, else inline
-    static const size_t kTransferInlineAsSharedThreshold = 64 * 1024; // if >= shared, else inline
-    static const size_t kInlineMaxTransfer = 256 * 1024; // Binder size limited to BINDER_VM_SIZE.
+    static const size_t kTransferInlineAsSharedThreshold = 8 * 1024; // if >= shared, else inline
+    static const size_t kInlineMaxTransfer = 64 * 1024; // Binder size limited to BINDER_VM_SIZE.
 
 protected:
     virtual ~BnMediaSource();
 
 private:
     uint32_t mBuffersSinceStop; // Buffer tracking variable
+    Mutex mBnLock; // to guard readMultiple against concurrent access to the buffer cache
 
     std::unique_ptr<MediaBufferGroup> mGroup;
 

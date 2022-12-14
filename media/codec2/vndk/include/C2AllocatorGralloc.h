@@ -37,12 +37,23 @@ native_handle_t *UnwrapNativeCodec2GrallocHandle(const C2Handle *const handle);
  * Wrap the gralloc handle and metadata into Codec2 handle recognized by
  * C2AllocatorGralloc.
  *
- * @return a new NON-OWNING C2Handle that must be deleted using native_handle_delete.
+ * @return a new NON-OWNING C2Handle that must be closed and deleted using native_handle_close and
+ * native_handle_delete.
  */
 C2Handle *WrapNativeCodec2GrallocHandle(
         const native_handle_t *const handle,
         uint32_t width, uint32_t height, uint32_t format, uint64_t usage, uint32_t stride,
         uint32_t generation = 0, uint64_t igbp_id = 0, uint32_t igbp_slot = 0);
+
+/**
+ * When the gralloc handle is migrated to another bufferqueue, update
+ * bufferqueue information.
+ *
+ * @return {@code true} when native_handle is a wrapped codec2 handle.
+ */
+bool MigrateNativeCodec2GrallocHandle(
+        native_handle_t *handle,
+        uint32_t generation, uint64_t igbp_id, uint32_t igbp_slot);
 
 /**
  * \todo Get this from the buffer
@@ -74,7 +85,12 @@ public:
 
     virtual ~C2AllocatorGralloc() override;
 
-    static bool isValid(const C2Handle* const o);
+    virtual bool checkHandle(const C2Handle* const o) const override { return CheckHandle(o); }
+
+    static bool CheckHandle(const C2Handle* const o);
+
+    // deprecated
+    static bool isValid(const C2Handle* const o) { return CheckHandle(o); }
 
 private:
     class Impl;

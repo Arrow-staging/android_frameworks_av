@@ -21,34 +21,84 @@
 
 //--- Audio Effect Management
 
-// EffectModule and EffectChain classes both have their own mutex to protect
+// Interface implemented by the EffectModule parent or owner (e.g an EffectChain) to abstract
+// interactions between the EffectModule and the reset of the audio framework.
+class EffectCallbackInterface : public RefBase {
+public:
+            ~EffectCallbackInterface() override = default;
+
+    // Trivial methods usually implemented with help from ThreadBase
+    virtual audio_io_handle_t io() const = 0;
+    virtual bool isOutput() const = 0;
+    virtual bool isOffload() const = 0;
+    virtual bool isOffloadOrDirect() const = 0;
+    virtual bool isOffloadOrMmap() const = 0;
+    virtual bool isSpatializer() const = 0;
+    virtual uint32_t sampleRate() const = 0;
+    virtual audio_channel_mask_t inChannelMask(int id) const = 0;
+    virtual uint32_t inChannelCount(int id) const = 0;
+    virtual audio_channel_mask_t outChannelMask() const = 0;
+    virtual uint32_t outChannelCount() const = 0;
+    virtual audio_channel_mask_t hapticChannelMask() const = 0;
+    virtual size_t frameCount() const = 0;
+
+    // Non trivial methods usually implemented with help from ThreadBase:
+    //   pay attention to mutex locking order
+    virtual uint32_t latency() const { return 0; }
+    virtual status_t addEffectToHal(sp<EffectHalInterface> effect) = 0;
+    virtual status_t removeEffectFromHal(sp<EffectHalInterface> effect) = 0;
+    virtual void setVolumeForOutput(float left, float right) const = 0;
+    virtual bool disconnectEffectHandle(EffectHandle *handle, bool unpinIfLast) = 0;
+    virtual void checkSuspendOnEffectEnabled(const sp<EffectBase>& effect,
+                                             bool enabled,
+                                             bool threadLocked) = 0;
+    virtual void onEffectEnable(const sp<EffectBase>& effect) = 0;
+    virtual void onEffectDisable(const sp<EffectBase>& effect) = 0;
+
+    // Methods usually implemented with help from AudioFlinger: pay attention to mutex locking order
+    virtual status_t createEffectHal(const effect_uuid_t *pEffectUuid,
+                    int32_t sessionId, int32_t deviceId, sp<EffectHalInterface> *effect) = 0;
+    virtual status_t allocateHalBuffer(size_t size, sp<EffectBufferHalInterface>* buffer) = 0;
+    virtual bool updateOrphanEffectChains(const sp<EffectBase>& effect) = 0;
+
+    // Methods usually implemented with help from EffectChain: pay attention to mutex locking order
+    virtual product_strategy_t strategy() const = 0;
+    virtual int32_t activeTrackCnt() const = 0;
+    virtual void resetVolume() = 0;
+
+    virtual wp<EffectChain> chain() const = 0;
+
+    virtual bool isAudioPolicyReady() const = 0;
+};
+
+// EffectBase(EffectModule) and EffectChain classes both have their own mutex to protect
 // state changes or resource modifications. Always respect the following order
 // if multiple mutexes must be acquired to avoid cross deadlock:
-// AudioFlinger -> ThreadBase -> EffectChain -> EffectModule
-// AudioHandle -> ThreadBase -> EffectChain -> EffectModule
+// AudioFlinger -> ThreadBase -> EffectChain -> EffectBase(EffectModule)
+// AudioHandle -> ThreadBase -> EffectChain -> EffectBase(EffectModule)
+
+// NOTE: When implementing the EffectCallbackInterface, in an EffectChain or other, it is important
+// to pay attention to this locking order as some callback methods can be called from a state where
+// EffectModule and/or EffectChain mutexes are held.
+
 // In addition, methods that lock the AudioPolicyService mutex (getOutputForEffect(),
 // startOutput(), getInputForAttr(), releaseInput()...) should never be called with AudioFlinger or
 // Threadbase mutex locked to avoid cross deadlock with other clients calling AudioPolicyService
 // methods that in turn call AudioFlinger thus locking the same mutexes in the reverse order.
 
-// The EffectModule class is a wrapper object controlling the effect engine implementation
-// in the effect library. It prevents concurrent calls to process() and command() functions
-// from different client threads. It keeps a list of EffectHandle objects corresponding
-// to all client applications using this effect and notifies applications of effect state,
-// control or parameter changes. It manages the activation state machine to send appropriate
-// reset, enable, disable commands to effect engine and provide volume
-// ramping when effects are activated/deactivated.
-// When controlling an auxiliary effect, the EffectModule also provides an input buffer used by
-// the attached track(s) to accumulate their auxiliary channel.
-class EffectModule : public RefBase {
+
+// The EffectBase class contains common properties, state and behavior for and EffectModule or
+// other derived classes managing an audio effect instance within the effect framework.
+// It also contains the class mutex (see comment on locking order above).
+class EffectBase : public RefBase {
 public:
-    EffectModule(ThreadBase *thread,
-                    const wp<AudioFlinger::EffectChain>& chain,
-                    effect_descriptor_t *desc,
-                    int id,
-                    audio_session_t sessionId,
-                    bool pinned);
-    virtual ~EffectModule();
+    EffectBase(const sp<EffectCallbackInterface>& callback,
+               effect_descriptor_t *desc,
+               int id,
+               audio_session_t sessionId,
+               bool pinned);
+
+    ~EffectBase() override = default;
 
     enum effect_state {
         IDLE,
@@ -60,71 +110,14 @@ public:
         DESTROYED
     };
 
-    int         id() const { return mId; }
-    void process();
-    bool updateState();
-    status_t command(uint32_t cmdCode,
-                     uint32_t cmdSize,
-                     void *pCmdData,
-                     uint32_t *replySize,
-                     void *pReplyData);
-
-    void reset_l();
-    status_t configure();
-    status_t init();
+    int id() const { return mId; }
     effect_state state() const {
         return mState;
-    }
-    uint32_t status() {
-        return mStatus;
     }
     audio_session_t sessionId() const {
         return mSessionId;
     }
-    status_t    setEnabled(bool enabled);
-    status_t    setEnabled_l(bool enabled);
-    bool isEnabled() const;
-    bool isProcessEnabled() const;
-    bool isOffloadedOrDirect() const;
-    bool isVolumeControlEnabled() const;
-
-    void        setInBuffer(const sp<EffectBufferHalInterface>& buffer);
-    int16_t     *inBuffer() const {
-        return mInBuffer != 0 ? reinterpret_cast<int16_t*>(mInBuffer->ptr()) : NULL;
-    }
-    void        setOutBuffer(const sp<EffectBufferHalInterface>& buffer);
-    int16_t     *outBuffer() const {
-        return mOutBuffer != 0 ? reinterpret_cast<int16_t*>(mOutBuffer->ptr()) : NULL;
-    }
-    void        setChain(const wp<EffectChain>& chain) { mChain = chain; }
-    void        setThread(const wp<ThreadBase>& thread)
-                    { mThread = thread; mThreadType = thread.promote()->type(); }
-    const wp<ThreadBase>& thread() { return mThread; }
-
-    status_t addHandle(EffectHandle *handle);
-    ssize_t  disconnectHandle(EffectHandle *handle, bool unpinIfLast);
-    ssize_t removeHandle(EffectHandle *handle);
-    ssize_t removeHandle_l(EffectHandle *handle);
-
     const effect_descriptor_t& desc() const { return mDescriptor; }
-    wp<EffectChain>&     chain() { return mChain; }
-
-    status_t         setDevice(audio_devices_t device);
-    status_t         setVolume(uint32_t *left, uint32_t *right, bool controller);
-    status_t         setMode(audio_mode_t mode);
-    status_t         setAudioSource(audio_source_t source);
-    status_t         start();
-    status_t         stop();
-    void             setSuspended(bool suspended);
-    bool             suspended() const;
-
-    EffectHandle*    controlHandle_l();
-
-    bool             isPinned() const { return mPinned; }
-    void             unPin() { mPinned = false; }
-    bool             purgeHandles();
-    void             lock() { mLock.lock(); }
-    void             unlock() { mLock.unlock(); }
     bool             isOffloadable() const
                         { return (mDescriptor.flags & EFFECT_FLAG_OFFLOAD_SUPPORTED) != 0; }
     bool             isImplementationSoftware() const
@@ -137,16 +130,163 @@ public:
     bool             isVolumeMonitor() const
                         { return (mDescriptor.flags & EFFECT_FLAG_VOLUME_MASK)
                             == EFFECT_FLAG_VOLUME_MONITOR; }
+
+    virtual status_t setEnabled(bool enabled, bool fromHandle);
+    status_t    setEnabled_l(bool enabled);
+    bool isEnabled() const;
+
+    void             setSuspended(bool suspended);
+    bool             suspended() const;
+
+    virtual status_t command(int32_t __unused,
+                             const std::vector<uint8_t>& __unused,
+                             int32_t __unused,
+                             std::vector<uint8_t>* __unused) { return NO_ERROR; };
+
+    // mCallback is atomic so this can be lock-free.
+    void setCallback(const sp<EffectCallbackInterface>& callback) { mCallback = callback; }
+    sp<EffectCallbackInterface> getCallback() const { return mCallback.load(); }
+
+    status_t addHandle(EffectHandle *handle);
+    ssize_t disconnectHandle(EffectHandle *handle, bool unpinIfLast);
+    ssize_t removeHandle(EffectHandle *handle);
+    ssize_t removeHandle_l(EffectHandle *handle);
+    EffectHandle* controlHandle_l();
+    bool purgeHandles();
+
+    void             checkSuspendOnEffectEnabled(bool enabled, bool threadLocked);
+
+    bool             isPinned() const { return mPinned; }
+    void             unPin() { mPinned = false; }
+
+    void             lock() { mLock.lock(); }
+    void             unlock() { mLock.unlock(); }
+
+    status_t         updatePolicyState();
+
+    virtual          sp<EffectModule> asEffectModule() { return nullptr; }
+    virtual          sp<DeviceEffectProxy> asDeviceEffectProxy() { return nullptr; }
+
+    void             dump(int fd, const Vector<String16>& args);
+
+protected:
+    bool             isInternal_l() const {
+                         for (auto handle : mHandles) {
+                            if (handle->client() != nullptr) {
+                                return false;
+                            }
+                         }
+                         return true;
+                     }
+
+private:
+    friend class AudioFlinger;      // for mHandles
+    bool             mPinned = false;
+
+    DISALLOW_COPY_AND_ASSIGN(EffectBase);
+
+mutable Mutex                 mLock;      // mutex for process, commands and handles list protection
+    mediautils::atomic_sp<EffectCallbackInterface> mCallback; // parent effect chain
+    const int                 mId;        // this instance unique ID
+    const audio_session_t     mSessionId; // audio session ID
+    const effect_descriptor_t mDescriptor;// effect descriptor received from effect engine
+    effect_state              mState = IDLE; // current activation state
+    // effect is suspended: temporarily disabled by framework
+    bool                      mSuspended = false;
+
+    Vector<EffectHandle *>    mHandles;   // list of client handles
+                // First handle in mHandles has highest priority and controls the effect module
+
+    // Audio policy effect state management
+    // Mutex protecting transactions with audio policy manager as mLock cannot
+    // be held to avoid cross deadlocks with audio policy mutex
+    Mutex                     mPolicyLock;
+    // Effect is registered in APM or not
+    bool                      mPolicyRegistered = false;
+    // Effect enabled state communicated to APM. Enabled state corresponds to
+    // state requested by the EffectHandle with control
+    bool                      mPolicyEnabled = false;
+};
+
+// The EffectModule class is a wrapper object controlling the effect engine implementation
+// in the effect library. It prevents concurrent calls to process() and command() functions
+// from different client threads. It keeps a list of EffectHandle objects corresponding
+// to all client applications using this effect and notifies applications of effect state,
+// control or parameter changes. It manages the activation state machine to send appropriate
+// reset, enable, disable commands to effect engine and provide volume
+// ramping when effects are activated/deactivated.
+// When controlling an auxiliary effect, the EffectModule also provides an input buffer used by
+// the attached track(s) to accumulate their auxiliary channel.
+class EffectModule : public EffectBase {
+public:
+    EffectModule(const sp<EffectCallbackInterface>& callabck,
+                    effect_descriptor_t *desc,
+                    int id,
+                    audio_session_t sessionId,
+                    bool pinned,
+                    audio_port_handle_t deviceId);
+    virtual ~EffectModule();
+
+    void process();
+    bool updateState();
+    status_t command(int32_t cmdCode,
+                     const std::vector<uint8_t>& cmdData,
+                     int32_t maxReplySize,
+                     std::vector<uint8_t>* reply) override;
+
+    void reset_l();
+    status_t configure();
+    status_t init();
+
+    uint32_t status() {
+        return mStatus;
+    }
+
+    bool isProcessEnabled() const;
+    bool isOffloadedOrDirect() const;
+    bool isVolumeControlEnabled() const;
+
+    void        setInBuffer(const sp<EffectBufferHalInterface>& buffer);
+    int16_t     *inBuffer() const {
+        return mInBuffer != 0 ? reinterpret_cast<int16_t*>(mInBuffer->ptr()) : NULL;
+    }
+    void        setOutBuffer(const sp<EffectBufferHalInterface>& buffer);
+    int16_t     *outBuffer() const {
+        return mOutBuffer != 0 ? reinterpret_cast<int16_t*>(mOutBuffer->ptr()) : NULL;
+    }
+
+    // Updates the access mode if it is out of date.  May issue a new effect configure.
+    void        updateAccessMode() {
+                    if (requiredEffectBufferAccessMode() != mConfig.outputCfg.accessMode) {
+                        configure();
+                    }
+                }
+
+    status_t         setDevices(const AudioDeviceTypeAddrVector &devices);
+    status_t         setInputDevice(const AudioDeviceTypeAddr &device);
+    status_t         setVolume(uint32_t *left, uint32_t *right, bool controller);
+    status_t         setMode(audio_mode_t mode);
+    status_t         setAudioSource(audio_source_t source);
+    status_t         start();
+    status_t         stop();
+
     status_t         setOffloaded(bool offloaded, audio_io_handle_t io);
     bool             isOffloaded() const;
     void             addEffectToHal_l();
     void             release_l();
 
+    sp<EffectModule> asEffectModule() override { return this; }
+
+    static bool      isHapticGenerator(const effect_uuid_t* type);
+    bool             isHapticGenerator() const;
+
+    status_t         setHapticIntensity(int id, int intensity);
+    status_t         setVibratorInfo(const media::AudioVibratorInfo& vibratorInfo);
+
     void             dump(int fd, const Vector<String16>& args);
 
 private:
     friend class AudioFlinger;      // for mHandles
-    bool                mPinned;
 
     // Maximum time allocated to effect engines to complete the turn off sequence
     static const uint32_t MAX_DISABLE_TIME_MS = 10000;
@@ -155,29 +295,25 @@ private:
 
     status_t start_l();
     status_t stop_l();
-    status_t remove_effect_from_hal_l();
+    status_t removeEffectFromHal_l();
+    status_t sendSetAudioDevicesCommand(const AudioDeviceTypeAddrVector &devices, uint32_t cmdCode);
+    effect_buffer_access_e requiredEffectBufferAccessMode() const {
+        return mConfig.inputCfg.buffer.raw == mConfig.outputCfg.buffer.raw
+                ? EFFECT_BUFFER_ACCESS_WRITE : EFFECT_BUFFER_ACCESS_ACCUMULATE;
+    }
 
-mutable Mutex               mLock;      // mutex for process, commands and handles list protection
-    wp<ThreadBase>      mThread;    // parent thread
-    ThreadBase::type_t  mThreadType; // parent thread type
-    wp<EffectChain>     mChain;     // parent effect chain
-    const int           mId;        // this instance unique ID
-    const audio_session_t mSessionId; // audio session ID
-    const effect_descriptor_t mDescriptor;// effect descriptor received from effect engine
+
     effect_config_t     mConfig;    // input and output audio configuration
     sp<EffectHalInterface> mEffectInterface; // Effect module HAL
     sp<EffectBufferHalInterface> mInBuffer;  // Buffers for interacting with HAL
     sp<EffectBufferHalInterface> mOutBuffer;
     status_t            mStatus;    // initialization status
-    effect_state        mState;     // current activation state
-    Vector<EffectHandle *> mHandles;    // list of client handles
                 // First handle in mHandles has highest priority and controls the effect module
     uint32_t mMaxDisableWaitCnt;    // maximum grace period before forcing an effect off after
                                     // sending disable command.
     uint32_t mDisableWaitCnt;       // current process() calls count during disable period.
-    bool     mSuspended;            // effect is suspended: temporarily disabled by framework
     bool     mOffloaded;            // effect is currently offloaded to the audio DSP
-    wp<AudioFlinger>    mAudioFlinger;
+    bool     mAddedToHal;           // effect has been added to the audio HAL
 
 #ifdef FLOAT_EFFECT_CHAIN
     bool    mSupportsFloat;         // effect supports float processing
@@ -212,32 +348,33 @@ mutable Mutex               mLock;      // mutex for process, commands and handl
 // There is one EffectHandle object for each application controlling (or using)
 // an effect module.
 // The EffectHandle is obtained by calling AudioFlinger::createEffect().
-class EffectHandle: public android::BnEffect {
+class EffectHandle: public android::media::BnEffect {
 public:
 
-    EffectHandle(const sp<EffectModule>& effect,
+    EffectHandle(const sp<EffectBase>& effect,
             const sp<AudioFlinger::Client>& client,
-            const sp<IEffectClient>& effectClient,
-            int32_t priority);
+            const sp<media::IEffectClient>& effectClient,
+            int32_t priority, bool notifyFramesProcessed);
     virtual ~EffectHandle();
+    status_t onTransact(
+            uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags) override;
     virtual status_t initCheck();
 
     // IEffect
-    virtual status_t enable();
-    virtual status_t disable();
-    virtual status_t command(uint32_t cmdCode,
-                             uint32_t cmdSize,
-                             void *pCmdData,
-                             uint32_t *replySize,
-                             void *pReplyData);
-    virtual void disconnect();
-private:
-            void disconnect(bool unpinIfLast);
-public:
-    virtual sp<IMemory> getCblk() const { return mCblkMemory; }
-    virtual status_t onTransact(uint32_t code, const Parcel& data,
-            Parcel* reply, uint32_t flags);
+    android::binder::Status enable(int32_t* _aidl_return) override;
+    android::binder::Status disable(int32_t* _aidl_return) override;
+    android::binder::Status command(int32_t cmdCode,
+                                    const std::vector<uint8_t>& cmdData,
+                                    int32_t maxResponseSize,
+                                    std::vector<uint8_t>* response,
+                                    int32_t* _aidl_return) override;
+    android::binder::Status disconnect() override;
+    android::binder::Status getCblk(media::SharedFileRegion* _aidl_return) override;
 
+    sp<Client> client() const { return mClient; }
+
+private:
+    void disconnect(bool unpinIfLast);
 
     // Give or take control of effect module
     // - hasControl: true if control is given, false if removed
@@ -245,17 +382,17 @@ public:
     // - enabled: state of the effect when control is passed
     void setControl(bool hasControl, bool signal, bool enabled);
     void commandExecuted(uint32_t cmdCode,
-                         uint32_t cmdSize,
-                         void *pCmdData,
-                         uint32_t replySize,
-                         void *pReplyData);
+                         const std::vector<uint8_t>& cmdData,
+                         const std::vector<uint8_t>& replyData);
     void setEnabled(bool enabled);
     bool enabled() const { return mEnabled; }
 
+    void framesProcessed(int32_t frames) const;
+
     // Getters
-    wp<EffectModule> effect() const { return mEffect; }
+    wp<EffectBase> effect() const { return mEffect; }
     int id() const {
-        sp<EffectModule> effect = mEffect.promote();
+        sp<EffectBase> effect = mEffect.promote();
         if (effect == 0) {
             return 0;
         }
@@ -271,19 +408,22 @@ private:
     friend class AudioFlinger;          // for mEffect, mHasControl, mEnabled
     DISALLOW_COPY_AND_ASSIGN(EffectHandle);
 
-    Mutex mLock;                        // protects IEffect method calls
-    wp<EffectModule> mEffect;           // pointer to controlled EffectModule
-    sp<IEffectClient> mEffectClient;    // callback interface for client notifications
-    /*const*/ sp<Client> mClient;       // client for shared memory allocation, see disconnect()
-    sp<IMemory>         mCblkMemory;    // shared memory for control block
-    effect_param_cblk_t* mCblk;         // control block for deferred parameter setting via
-                                        // shared memory
-    uint8_t*            mBuffer;        // pointer to parameter area in shared memory
-    int mPriority;                      // client application priority to control the effect
-    bool mHasControl;                   // true if this handle is controlling the effect
-    bool mEnabled;                      // cached enable state: needed when the effect is
-                                        // restored after being suspended
-    bool mDisconnected;                 // Set to true by disconnect()
+    Mutex mLock;                             // protects IEffect method calls
+    const wp<EffectBase> mEffect;            // pointer to controlled EffectModule
+    const sp<media::IEffectClient> mEffectClient;  // callback interface for client notifications
+    /*const*/ sp<Client> mClient;            // client for shared memory allocation, see
+                                             //   disconnect()
+    sp<IMemory> mCblkMemory;                 // shared memory for control block
+    effect_param_cblk_t* mCblk;              // control block for deferred parameter setting via
+                                             // shared memory
+    uint8_t* mBuffer;                        // pointer to parameter area in shared memory
+    int mPriority;                           // client application priority to control the effect
+    bool mHasControl;                        // true if this handle is controlling the effect
+    bool mEnabled;                           // cached enable state: needed when the effect is
+                                             // restored after being suspended
+    bool mDisconnected;                      // Set to true by disconnect()
+    const bool mNotifyFramesProcessed;       // true if the client callback event
+                                             // EVENT_FRAMES_PROCESSED must be generated
 };
 
 // the EffectChain class represents a group of effects associated to one audio session.
@@ -298,7 +438,6 @@ private:
 class EffectChain : public RefBase {
 public:
     EffectChain(const wp<ThreadBase>& wThread, audio_session_t sessionId);
-    EffectChain(ThreadBase *thread, audio_session_t sessionId);
     virtual ~EffectChain();
 
     // special key used for an entry in mSuspendedEffects keyed vector
@@ -319,7 +458,6 @@ public:
     }
 
     status_t createEffect_l(sp<EffectModule>& effect,
-                            ThreadBase *thread,
                             effect_descriptor_t *desc,
                             int id,
                             audio_session_t sessionId,
@@ -334,10 +472,12 @@ public:
     sp<EffectModule> getEffectFromDesc_l(effect_descriptor_t *descriptor);
     sp<EffectModule> getEffectFromId_l(int id);
     sp<EffectModule> getEffectFromType_l(const effect_uuid_t *type);
+    std::vector<int> getEffectIds();
     // FIXME use float to improve the dynamic range
     bool setVolume_l(uint32_t *left, uint32_t *right, bool force = false);
     void resetVolume_l();
-    void setDevice_l(audio_devices_t device);
+    void setDevices_l(const AudioDeviceTypeAddrVector &devices);
+    void setInputDevice_l(const AudioDeviceTypeAddr &device);
     void setMode_l(audio_mode_t mode);
     void setAudioSource_l(audio_source_t source);
 
@@ -363,8 +503,8 @@ public:
     void decActiveTrackCnt() { android_atomic_dec(&mActiveTrackCnt); }
     int32_t activeTrackCnt() const { return android_atomic_acquire_load(&mActiveTrackCnt); }
 
-    uint32_t strategy() const { return mStrategy; }
-    void setStrategy(uint32_t strategy)
+    product_strategy_t strategy() const { return mStrategy; }
+    void setStrategy(product_strategy_t strategy)
             { mStrategy = strategy; }
 
     // suspend or restore effects of the specified type. The number of suspend requests is counted
@@ -373,9 +513,8 @@ public:
                               bool suspend);
     // suspend all eligible effects
     void setEffectSuspendedAll_l(bool suspend);
-    // check if effects should be suspend or restored when a given effect is enable or disabled
-    void checkSuspendOnEffectEnabled(const sp<EffectModule>& effect,
-                                          bool enabled);
+    // check if effects should be suspended or restored when a given effect is enable or disabled
+    void checkSuspendOnEffectEnabled(const sp<EffectModule>& effect, bool enabled);
 
     void clearInputBuffer();
 
@@ -400,9 +539,97 @@ public:
     // isCompatibleWithThread_l() must be called with thread->mLock held
     bool isCompatibleWithThread_l(const sp<ThreadBase>& thread) const;
 
+    bool containsHapticGeneratingEffect_l();
+
+    void setHapticIntensity_l(int id, int intensity);
+
+    sp<EffectCallbackInterface> effectCallback() const { return mEffectCallback; }
+    wp<ThreadBase> thread() const { return mEffectCallback->thread(); }
+
+    bool isFirstEffect(int id) const { return !mEffects.isEmpty() && id == mEffects[0]->id(); }
+
     void dump(int fd, const Vector<String16>& args);
 
 private:
+
+    // For transaction consistency, please consider holding the EffectChain lock before
+    // calling the EffectChain::EffectCallback methods, excepting
+    // createEffectHal and allocateHalBuffer.
+    //
+    // This prevents migration of the EffectChain to another PlaybackThread
+    // for the purposes of the EffectCallback.
+    class EffectCallback :  public EffectCallbackInterface {
+    public:
+        // Note: ctors taking a weak pointer to their owner must not promote it
+        // during construction (but may keep a reference for later promotion).
+        EffectCallback(const wp<EffectChain>& owner,
+                       const wp<ThreadBase>& thread)
+            : mChain(owner)
+            , mThread(thread)
+            , mAudioFlinger(*gAudioFlinger) {
+            sp<ThreadBase> base = thread.promote();
+            if (base != nullptr) {
+                mThreadType = base->type();
+            } else {
+                mThreadType = ThreadBase::MIXER;  // assure a consistent value.
+            }
+        }
+
+        status_t createEffectHal(const effect_uuid_t *pEffectUuid,
+               int32_t sessionId, int32_t deviceId, sp<EffectHalInterface> *effect) override;
+        status_t allocateHalBuffer(size_t size, sp<EffectBufferHalInterface>* buffer) override;
+        bool updateOrphanEffectChains(const sp<EffectBase>& effect) override;
+
+        audio_io_handle_t io() const override;
+        bool isOutput() const override;
+        bool isOffload() const override;
+        bool isOffloadOrDirect() const override;
+        bool isOffloadOrMmap() const override;
+        bool isSpatializer() const override;
+
+        uint32_t sampleRate() const override;
+        audio_channel_mask_t inChannelMask(int id) const override;
+        uint32_t inChannelCount(int id) const override;
+        audio_channel_mask_t outChannelMask() const override;
+        uint32_t outChannelCount() const override;
+        audio_channel_mask_t hapticChannelMask() const override;
+        size_t frameCount() const override;
+        uint32_t latency() const override;
+
+        status_t addEffectToHal(sp<EffectHalInterface> effect) override;
+        status_t removeEffectFromHal(sp<EffectHalInterface> effect) override;
+        bool disconnectEffectHandle(EffectHandle *handle, bool unpinIfLast) override;
+        void setVolumeForOutput(float left, float right) const override;
+
+        // check if effects should be suspended/restored when a given effect is enable/disabled
+        void checkSuspendOnEffectEnabled(const sp<EffectBase>& effect,
+                              bool enabled, bool threadLocked) override;
+        void resetVolume() override;
+        product_strategy_t strategy() const override;
+        int32_t activeTrackCnt() const override;
+        void onEffectEnable(const sp<EffectBase>& effect) override;
+        void onEffectDisable(const sp<EffectBase>& effect) override;
+
+        wp<EffectChain> chain() const override { return mChain; }
+
+        bool isAudioPolicyReady() const override {
+            return mAudioFlinger.isAudioPolicyReady();
+        }
+
+        wp<ThreadBase> thread() const { return mThread.load(); }
+
+        void setThread(const sp<ThreadBase>& thread) {
+            mThread = thread;
+            mThreadType = thread->type();
+        }
+
+    private:
+        const wp<EffectChain> mChain;
+        mediautils::atomic_wp<ThreadBase> mThread;
+        AudioFlinger &mAudioFlinger;  // implementation detail: outer instance always exists.
+        ThreadBase::type_t mThreadType;
+    };
+
     friend class AudioFlinger;  // for mThread, mEffects
     DISALLOW_COPY_AND_ASSIGN(EffectChain);
 
@@ -428,13 +655,17 @@ private:
 
     static bool isEffectEligibleForBtNrecSuspend(const effect_uuid_t *type);
 
-    void clearInputBuffer_l(const sp<ThreadBase>& thread);
+    void clearInputBuffer_l();
 
     void setThread(const sp<ThreadBase>& thread);
 
+    // true if any effect module within the chain has volume control
+    bool hasVolumeControlEnabled_l() const;
+
     void setVolumeForOutput_l(uint32_t left, uint32_t right);
 
-             wp<ThreadBase> mThread;     // parent mixer thread
+    ssize_t getInsertIndex(const effect_descriptor_t& desc);
+
     mutable  Mutex mLock;        // mutex protecting effect list
              Vector< sp<EffectModule> > mEffects; // list of effect modules
              audio_session_t mSessionId; // audio session ID
@@ -452,10 +683,117 @@ private:
              uint32_t mRightVolume;      // previous volume on right channel
              uint32_t mNewLeftVolume;       // new volume on left channel
              uint32_t mNewRightVolume;      // new volume on right channel
-             uint32_t mStrategy; // strategy for this effect chain
+             product_strategy_t mStrategy; // strategy for this effect chain
              // mSuspendedEffects lists all effects currently suspended in the chain.
              // Use effect type UUID timelow field as key. There is no real risk of identical
              // timeLow fields among effect type UUIDs.
              // Updated by setEffectSuspended_l() and setEffectSuspendedAll_l() only.
              KeyedVector< int, sp<SuspendedEffectDesc> > mSuspendedEffects;
+
+             const sp<EffectCallback> mEffectCallback;
+};
+
+class DeviceEffectProxy : public EffectBase {
+public:
+        DeviceEffectProxy (const AudioDeviceTypeAddr& device,
+                const sp<DeviceEffectManagerCallback>& callback,
+                effect_descriptor_t *desc, int id, bool notifyFramesProcessed)
+            : EffectBase(callback, desc, id, AUDIO_SESSION_DEVICE, false),
+                mDevice(device), mManagerCallback(callback),
+                mMyCallback(new ProxyCallback(wp<DeviceEffectProxy>(this), callback)),
+                mNotifyFramesProcessed(notifyFramesProcessed) {}
+
+    status_t setEnabled(bool enabled, bool fromHandle) override;
+    sp<DeviceEffectProxy> asDeviceEffectProxy() override { return this; }
+
+    status_t init(const std::map<audio_patch_handle_t, PatchPanel::Patch>& patches);
+    status_t onCreatePatch(audio_patch_handle_t patchHandle, const PatchPanel::Patch& patch);
+    void onReleasePatch(audio_patch_handle_t patchHandle);
+
+    size_t removeEffect(const sp<EffectModule>& effect);
+
+    status_t addEffectToHal(sp<EffectHalInterface> effect);
+    status_t removeEffectFromHal(sp<EffectHalInterface> effect);
+
+    const AudioDeviceTypeAddr& device() { return mDevice; };
+    bool isOutput() const;
+    uint32_t sampleRate() const;
+    audio_channel_mask_t channelMask() const;
+    uint32_t channelCount() const;
+
+    void dump(int fd, int spaces);
+
+private:
+
+    class ProxyCallback :  public EffectCallbackInterface {
+    public:
+        // Note: ctors taking a weak pointer to their owner must not promote it
+        // during construction (but may keep a reference for later promotion).
+        ProxyCallback(const wp<DeviceEffectProxy>& owner,
+                const sp<DeviceEffectManagerCallback>& callback)
+            : mProxy(owner), mManagerCallback(callback) {}
+
+        status_t createEffectHal(const effect_uuid_t *pEffectUuid,
+               int32_t sessionId, int32_t deviceId, sp<EffectHalInterface> *effect) override;
+        status_t allocateHalBuffer(size_t size __unused,
+                sp<EffectBufferHalInterface>* buffer __unused) override { return NO_ERROR; }
+        bool updateOrphanEffectChains(const sp<EffectBase>& effect __unused) override {
+                    return false;
+        }
+
+        audio_io_handle_t io() const override { return AUDIO_IO_HANDLE_NONE; }
+        bool isOutput() const override;
+        bool isOffload() const override { return false; }
+        bool isOffloadOrDirect() const override { return false; }
+        bool isOffloadOrMmap() const override { return false; }
+        bool isSpatializer() const override { return false; }
+
+        uint32_t sampleRate() const override;
+        audio_channel_mask_t inChannelMask(int id) const override;
+        uint32_t inChannelCount(int id) const override;
+        audio_channel_mask_t outChannelMask() const override;
+        uint32_t outChannelCount() const override;
+        audio_channel_mask_t hapticChannelMask() const override { return AUDIO_CHANNEL_NONE; }
+        size_t frameCount() const override  { return 0; }
+        uint32_t latency() const override  { return 0; }
+
+        status_t addEffectToHal(sp<EffectHalInterface> effect) override;
+        status_t removeEffectFromHal(sp<EffectHalInterface> effect) override;
+
+        bool disconnectEffectHandle(EffectHandle *handle, bool unpinIfLast) override;
+        void setVolumeForOutput(float left __unused, float right __unused) const override {}
+
+        void checkSuspendOnEffectEnabled(const sp<EffectBase>& effect __unused,
+                              bool enabled __unused, bool threadLocked __unused) override {}
+        void resetVolume() override {}
+        product_strategy_t strategy() const override  { return static_cast<product_strategy_t>(0); }
+        int32_t activeTrackCnt() const override { return 0; }
+        void onEffectEnable(const sp<EffectBase>& effect __unused) override;
+        void onEffectDisable(const sp<EffectBase>& effect __unused) override;
+
+        wp<EffectChain> chain() const override { return nullptr; }
+
+        bool isAudioPolicyReady() const override {
+            return mManagerCallback->isAudioPolicyReady();
+        }
+
+        int newEffectId();
+
+    private:
+        const wp<DeviceEffectProxy> mProxy;
+        const sp<DeviceEffectManagerCallback> mManagerCallback;
+    };
+
+    status_t checkPort(const PatchPanel::Patch& patch, const struct audio_port_config *port,
+            sp<EffectHandle> *handle);
+
+    const AudioDeviceTypeAddr mDevice;
+    const sp<DeviceEffectManagerCallback> mManagerCallback;
+    const sp<ProxyCallback> mMyCallback;
+
+    Mutex mProxyLock;
+    std::map<audio_patch_handle_t, sp<EffectHandle>> mEffectHandles; // protected by mProxyLock
+    sp<EffectModule> mHalEffect; // protected by mProxyLock
+    struct audio_port_config mDevicePort = { .id = AUDIO_PORT_HANDLE_NONE };
+    const bool mNotifyFramesProcessed;
 };

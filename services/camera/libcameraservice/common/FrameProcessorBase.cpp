@@ -18,20 +18,21 @@
 #define ATRACE_TAG ATRACE_TAG_CAMERA
 //#define LOG_NDEBUG 0
 
+#include <map>
 #include <utils/Log.h>
 #include <utils/Trace.h>
 
+#include "common/FrameProducer.h"
 #include "common/FrameProcessorBase.h"
-#include "common/CameraDeviceBase.h"
 
 namespace android {
 namespace camera2 {
 
-FrameProcessorBase::FrameProcessorBase(wp<CameraDeviceBase> device) :
+FrameProcessorBase::FrameProcessorBase(wp<FrameProducer> device) :
     Thread(/*canCallJava*/false),
     mDevice(device),
     mNumPartialResults(1) {
-    sp<CameraDeviceBase> cameraDevice = device.promote();
+    sp<FrameProducer> cameraDevice = device.promote();
     if (cameraDevice != 0) {
         CameraMetadata staticInfo = cameraDevice->info();
         camera_metadata_entry_t entry = staticInfo.find(ANDROID_REQUEST_PARTIAL_RESULT_COUNT);
@@ -89,18 +90,33 @@ void FrameProcessorBase::dump(int fd, const Vector<String16>& /*args*/) {
     write(fd, result.string(), result.size());
 
     CameraMetadata lastFrame;
+    std::map<std::string, CameraMetadata> lastPhysicalFrames;
     {
         // Don't race while dumping metadata
         Mutex::Autolock al(mLastFrameMutex);
         lastFrame = CameraMetadata(mLastFrame);
+
+        for (const auto& physicalFrame : mLastPhysicalFrames) {
+            lastPhysicalFrames.emplace(String8(physicalFrame.mPhysicalCameraId),
+                    physicalFrame.mPhysicalCameraMetadata);
+        }
     }
-    lastFrame.dump(fd, 2, 6);
+    lastFrame.dump(fd, /*verbosity*/2, /*indentation*/6);
+
+    for (const auto& physicalFrame : lastPhysicalFrames) {
+        result = String8::format("   Latest received frame for physical camera %s:\n",
+                physicalFrame.first.c_str());
+        write(fd, result.string(), result.size());
+        CameraMetadata lastPhysicalMetadata = CameraMetadata(physicalFrame.second);
+        lastPhysicalMetadata.sort();
+        lastPhysicalMetadata.dump(fd, /*verbosity*/2, /*indentation*/6);
+    }
 }
 
 bool FrameProcessorBase::threadLoop() {
     status_t res;
 
-    sp<CameraDeviceBase> device;
+    sp<FrameProducer> device;
     {
         device = mDevice.promote();
         if (device == 0) return false;
@@ -117,7 +133,7 @@ bool FrameProcessorBase::threadLoop() {
     return true;
 }
 
-void FrameProcessorBase::processNewFrames(const sp<CameraDeviceBase> &device) {
+void FrameProcessorBase::processNewFrames(const sp<FrameProducer> &device) {
     status_t res;
     ATRACE_CALL();
     CaptureResult result;
@@ -127,7 +143,7 @@ void FrameProcessorBase::processNewFrames(const sp<CameraDeviceBase> &device) {
     while ( (res = device->getNextResult(&result)) == OK) {
 
         // TODO: instead of getting frame number from metadata, we should read
-        // this from result.mResultExtras when CameraDeviceBase interface is fixed.
+        // this from result.mResultExtras when FrameProducer interface is fixed.
         camera_metadata_entry_t entry;
 
         entry = result.mMetadata.find(ANDROID_REQUEST_FRAME_COUNT);
@@ -145,6 +161,8 @@ void FrameProcessorBase::processNewFrames(const sp<CameraDeviceBase> &device) {
         if (!result.mMetadata.isEmpty()) {
             Mutex::Autolock al(mLastFrameMutex);
             mLastFrame.acquire(result.mMetadata);
+
+            mLastPhysicalFrames = std::move(result.mPhysicalMetadatas);
         }
     }
     if (res != NOT_ENOUGH_DATA) {
@@ -157,14 +175,14 @@ void FrameProcessorBase::processNewFrames(const sp<CameraDeviceBase> &device) {
 }
 
 bool FrameProcessorBase::processSingleFrame(CaptureResult &result,
-                                            const sp<CameraDeviceBase> &device) {
+                                            const sp<FrameProducer> &device) {
     ALOGV("%s: Camera %s: Process single frame (is empty? %d)",
             __FUNCTION__, device->getId().string(), result.mMetadata.isEmpty());
     return processListeners(result, device) == OK;
 }
 
 status_t FrameProcessorBase::processListeners(const CaptureResult &result,
-        const sp<CameraDeviceBase> &device) {
+        const sp<FrameProducer> &device) {
     ATRACE_CALL();
 
     camera_metadata_ro_entry_t entry;

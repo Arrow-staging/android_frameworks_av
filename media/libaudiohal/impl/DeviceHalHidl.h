@@ -20,17 +20,13 @@
 #include PATH(android/hardware/audio/FILE_VERSION/IDevice.h)
 #include PATH(android/hardware/audio/FILE_VERSION/IPrimaryDevice.h)
 #include <media/audiohal/DeviceHalInterface.h>
+#include <media/audiohal/EffectHalInterface.h>
 
-#include "ConversionHelperHidl.h"
-
-using ::android::hardware::audio::CPP_VERSION::IDevice;
-using ::android::hardware::audio::CPP_VERSION::IPrimaryDevice;
-using ::android::hardware::Return;
+#include "CoreConversionHelperHidl.h"
 
 namespace android {
-namespace CPP_VERSION {
 
-class DeviceHalHidl : public DeviceHalInterface, public ConversionHelperHidl
+class DeviceHalHidl : public DeviceHalInterface, public CoreConversionHelperHidl
 {
   public:
     // Sets the value of 'devices' to a bitmask of 1 or more values of audio_devices_t.
@@ -107,27 +103,59 @@ class DeviceHalHidl : public DeviceHalInterface, public ConversionHelperHidl
     // Fills the list of supported attributes for a given audio port.
     virtual status_t getAudioPort(struct audio_port *port);
 
+    // Fills the list of supported attributes for a given audio port.
+    virtual status_t getAudioPort(struct audio_port_v7 *port);
+
     // Set audio port configuration.
     virtual status_t setAudioPortConfig(const struct audio_port_config *config);
 
     // List microphones
     virtual status_t getMicrophones(std::vector<media::MicrophoneInfo> *microphones);
 
-    virtual status_t dump(int fd);
+    status_t addDeviceEffect(audio_port_handle_t device, sp<EffectHalInterface> effect) override;
+    status_t removeDeviceEffect(audio_port_handle_t device, sp<EffectHalInterface> effect) override;
+
+    status_t getMmapPolicyInfos(
+            media::audio::common::AudioMMapPolicyType policyType __unused,
+            std::vector<media::audio::common::AudioMMapPolicyInfo> *policyInfos __unused) override {
+        // TODO: Implement the HAL query when moving to AIDL HAL.
+        return INVALID_OPERATION;
+    }
+
+    int32_t getAAudioMixerBurstCount() override {
+        // TODO: Implement the HAL query when moving to AIDL HAL.
+        return INVALID_OPERATION;
+    }
+
+    int32_t getAAudioHardwareBurstMinUsec() override {
+        // TODO: Implement the HAL query when moving to AIDL HAL.
+        return INVALID_OPERATION;
+    }
+
+    status_t setConnectedState(const struct audio_port_v7 *port, bool connected) override;
+
+    error::Result<audio_hw_sync_t> getHwAvSync() override;
+
+    status_t dump(int fd, const Vector<String16>& args) override;
 
   private:
     friend class DevicesFactoryHalHidl;
-    sp<IDevice> mDevice;
-    sp<IPrimaryDevice> mPrimaryDevice;  // Null if it's not a primary device.
+    sp<::android::hardware::audio::CPP_VERSION::IDevice> mDevice;
+    // Null if it's not a primary device.
+    sp<::android::hardware::audio::CPP_VERSION::IPrimaryDevice> mPrimaryDevice;
+    bool supportsSetConnectedState7_1 = true;
 
     // Can not be constructed directly by clients.
-    explicit DeviceHalHidl(const sp<IDevice>& device);
+    explicit DeviceHalHidl(const sp<::android::hardware::audio::CPP_VERSION::IDevice>& device);
+    explicit DeviceHalHidl(
+            const sp<::android::hardware::audio::CPP_VERSION::IPrimaryDevice>& device);
 
     // The destructor automatically closes the device.
     virtual ~DeviceHalHidl();
+
+    template <typename HalPort> status_t getAudioPortImpl(HalPort *port);
 };
 
-} // namespace CPP_VERSION
 } // namespace android
 
 #endif // ANDROID_HARDWARE_DEVICE_HAL_HIDL_H

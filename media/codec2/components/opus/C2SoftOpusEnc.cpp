@@ -32,35 +32,34 @@ extern "C" {
 #define DEFAULT_FRAME_DURATION_MS 20
 namespace android {
 
+namespace {
+
 constexpr char COMPONENT_NAME[] = "c2.android.opus.encoder";
 
-class C2SoftOpusEnc::IntfImpl : public C2InterfaceHelper {
+}  // namespace
+
+static const int kMaxNumChannelsSupported = 2;
+
+class C2SoftOpusEnc::IntfImpl : public SimpleInterface<void>::BaseParams {
 public:
     explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
-        : C2InterfaceHelper(helper) {
-
+        : SimpleInterface<void>::BaseParams(
+                helper,
+                COMPONENT_NAME,
+                C2Component::KIND_ENCODER,
+                C2Component::DOMAIN_AUDIO,
+                MEDIA_MIMETYPE_AUDIO_OPUS) {
+        noPrivateBuffers();
+        noInputReferences();
+        noOutputReferences();
+        noInputLatency();
+        noTimeStretch();
         setDerivedInstance(this);
 
         addParameter(
-                DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::input(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mInputMediaType, C2_PARAMKEY_INPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::input>(
-                        MEDIA_MIMETYPE_AUDIO_RAW))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputMediaType, C2_PARAMKEY_OUTPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::output>(
-                        MEDIA_MIMETYPE_AUDIO_OPUS))
+                DefineParam(mAttrib, C2_PARAMKEY_COMPONENT_ATTRIBUTES)
+                .withConstValue(new C2ComponentAttributesSetting(
+                    C2Component::ATTRIB_IS_TEMPORAL))
                 .build());
 
         addParameter(
@@ -74,8 +73,21 @@ public:
         addParameter(
                 DefineParam(mChannelCount, C2_PARAMKEY_CHANNEL_COUNT)
                 .withDefault(new C2StreamChannelCountInfo::input(0u, 1))
-                .withFields({C2F(mChannelCount, value).inRange(1, 8)})
+                .withFields({C2F(mChannelCount, value).inRange(1, kMaxNumChannelsSupported)})
                 .withSetter((Setter<decltype(*mChannelCount)>::StrictValueWithNoDeps))
+                .build());
+
+        addParameter(
+            DefineParam(mBitrateMode, C2_PARAMKEY_BITRATE_MODE)
+                .withDefault(new C2StreamBitrateModeTuning::output(
+                        0u, C2Config::BITRATE_VARIABLE))
+                .withFields({
+                    C2F(mBitrateMode, value).oneOf({
+                        C2Config::BITRATE_CONST,
+                        C2Config::BITRATE_VARIABLE})
+                })
+                .withSetter(
+                    Setter<decltype(*mBitrateMode)>::StrictValueWithNoDeps)
                 .build());
 
         addParameter(
@@ -101,16 +113,14 @@ public:
     uint32_t getSampleRate() const { return mSampleRate->value; }
     uint32_t getChannelCount() const { return mChannelCount->value; }
     uint32_t getBitrate() const { return mBitrate->value; }
+    uint32_t getBitrateMode() const { return mBitrateMode->value; }
     uint32_t getComplexity() const { return mComplexity->value; }
 
 private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
     std::shared_ptr<C2StreamSampleRateInfo::input> mSampleRate;
     std::shared_ptr<C2StreamChannelCountInfo::input> mChannelCount;
     std::shared_ptr<C2StreamBitrateInfo::output> mBitrate;
+    std::shared_ptr<C2StreamBitrateModeTuning::output> mBitrateMode;
     std::shared_ptr<C2StreamComplexityTuning::output> mComplexity;
     std::shared_ptr<C2StreamMaxBufferSizeInfo::input> mInputMaxBufSize;
 };
@@ -135,25 +145,26 @@ c2_status_t C2SoftOpusEnc::onInit() {
 }
 
 c2_status_t C2SoftOpusEnc::configureEncoder() {
-    unsigned char mono_mapping[256] = {0};
-    unsigned char stereo_mapping[256] = {0, 1};
-    unsigned char surround_mapping[256] = {0, 1, 255};
+    static const unsigned char mono_mapping[256] = {0};
+    static const unsigned char stereo_mapping[256] = {0, 1};
     mSampleRate = mIntf->getSampleRate();
     mChannelCount = mIntf->getChannelCount();
     uint32_t bitrate = mIntf->getBitrate();
+    uint32_t bitrateMode = mIntf->getBitrateMode();
     int complexity = mIntf->getComplexity();
     mNumSamplesPerFrame = mSampleRate / (1000 / mFrameDurationMs);
     mNumPcmBytesPerInputFrame =
         mChannelCount * mNumSamplesPerFrame * sizeof(int16_t);
     int err = C2_OK;
 
-    unsigned char* mapping;
-    if (mChannelCount < 2) {
+    const unsigned char* mapping;
+    if (mChannelCount == 1) {
         mapping = mono_mapping;
     } else if (mChannelCount == 2) {
         mapping = stereo_mapping;
     } else {
-        mapping = surround_mapping;
+        ALOGE("Number of channels (%d) is not supported", mChannelCount);
+        return C2_BAD_VALUE;
     }
 
     if (mEncoder != nullptr) {
@@ -161,7 +172,7 @@ c2_status_t C2SoftOpusEnc::configureEncoder() {
     }
 
     mEncoder = opus_multistream_encoder_create(mSampleRate, mChannelCount,
-        1, 1, mapping, OPUS_APPLICATION_AUDIO, &err);
+        1, mChannelCount - 1, mapping, OPUS_APPLICATION_AUDIO, &err);
     if (err) {
         ALOGE("Could not create libopus encoder. Error code: %i", err);
         return C2_CORRUPTED;
@@ -194,14 +205,24 @@ c2_status_t C2SoftOpusEnc::configureEncoder() {
         return C2_BAD_VALUE;
     }
 
-    // Unconstrained VBR
-    if (opus_multistream_encoder_ctl(mEncoder, OPUS_SET_VBR(0) != OPUS_OK)) {
-        ALOGE("failed to set vbr type");
-        return C2_BAD_VALUE;
-    }
-    if (opus_multistream_encoder_ctl(mEncoder, OPUS_SET_VBR_CONSTRAINT(0) !=
-            OPUS_OK)) {
-        ALOGE("failed to set vbr constraint");
+    if (bitrateMode == C2Config::BITRATE_VARIABLE) {
+        // Constrained VBR
+        if (opus_multistream_encoder_ctl(mEncoder, OPUS_SET_VBR(1) != OPUS_OK)) {
+            ALOGE("failed to set vbr type");
+            return C2_BAD_VALUE;
+        }
+        if (opus_multistream_encoder_ctl(mEncoder, OPUS_SET_VBR_CONSTRAINT(1) !=
+                OPUS_OK)) {
+            ALOGE("failed to set vbr constraint");
+            return C2_BAD_VALUE;
+        }
+    } else if (bitrateMode == C2Config::BITRATE_CONST) {
+        if (opus_multistream_encoder_ctl(mEncoder, OPUS_SET_VBR(0) != OPUS_OK)) {
+            ALOGE("failed to set cbr type");
+            return C2_BAD_VALUE;
+        }
+    } else {
+        ALOGE("unknown bitrate mode");
         return C2_BAD_VALUE;
     }
 
@@ -211,15 +232,6 @@ c2_status_t C2SoftOpusEnc::configureEncoder() {
         ALOGE("failed to set bitrate");
         return C2_BAD_VALUE;
     }
-
-    // Get codecDelay
-    int32_t lookahead;
-    if (opus_multistream_encoder_ctl(mEncoder, OPUS_GET_LOOKAHEAD(&lookahead)) !=
-            OPUS_OK) {
-        ALOGE("failed to get lookahead");
-        return C2_BAD_VALUE;
-    }
-    mCodecDelay = lookahead * 1000000000ll / mSampleRate;
 
     // Set seek preroll to 80 ms
     mSeekPreRoll = 80000000;
@@ -233,7 +245,7 @@ c2_status_t C2SoftOpusEnc::initEncoder() {
     mIsFirstFrame = true;
     mEncoderFlushed = false;
     mBufferAvailable = false;
-    mAnchorTimeStamp = 0ull;
+    mAnchorTimeStamp = 0;
     mProcessedSamples = 0;
     mFilledLen = 0;
     mFrameDurationMs = DEFAULT_FRAME_DURATION_MS;
@@ -254,7 +266,7 @@ c2_status_t C2SoftOpusEnc::onStop() {
     mIsFirstFrame = true;
     mEncoderFlushed = false;
     mBufferAvailable = false;
-    mAnchorTimeStamp = 0ull;
+    mAnchorTimeStamp = 0;
     mProcessedSamples = 0u;
     mFilledLen = 0;
     if (mEncoder) {
@@ -351,7 +363,7 @@ void C2SoftOpusEnc::process(const std::unique_ptr<C2Work>& work,
         }
     }
     if (mIsFirstFrame && inSize > 0) {
-        mAnchorTimeStamp = work->input.ordinal.timestamp.peekull();
+        mAnchorTimeStamp = work->input.ordinal.timestamp.peekll();
         mIsFirstFrame = false;
     }
 
@@ -374,7 +386,7 @@ void C2SoftOpusEnc::process(const std::unique_ptr<C2Work>& work,
     size_t inPos = 0;
     size_t processSize = 0;
     mBytesEncoded = 0;
-    uint64_t outTimeStamp = 0u;
+    int64_t outTimeStamp = 0;
     std::shared_ptr<C2Buffer> buffer;
     uint64_t inputIndex = work->input.ordinal.frameIndex.peeku();
     const uint8_t* inPtr = rView.data() + inOffset;
@@ -413,13 +425,26 @@ void C2SoftOpusEnc::process(const std::unique_ptr<C2Work>& work,
     if (!mHeaderGenerated) {
         uint8_t header[AOPUS_UNIFIED_CSD_MAXSIZE];
         memset(header, 0, sizeof(header));
+
+        // Get codecDelay
+        int32_t lookahead;
+        if (opus_multistream_encoder_ctl(mEncoder, OPUS_GET_LOOKAHEAD(&lookahead)) !=
+                OPUS_OK) {
+            ALOGE("failed to get lookahead");
+            mSignalledError = true;
+            work->result = C2_CORRUPTED;
+            return;
+        }
+        mCodecDelay = lookahead * 1000000000ll / mSampleRate;
+
         OpusHeader opusHeader;
+        memset(&opusHeader, 0, sizeof(opusHeader));
         opusHeader.channels = mChannelCount;
         opusHeader.num_streams = mChannelCount;
         opusHeader.num_coupled = 0;
         opusHeader.channel_mapping = ((mChannelCount > 8) ? 255 : (mChannelCount > 2));
         opusHeader.gain_db = 0;
-        opusHeader.skip_samples = 0;
+        opusHeader.skip_samples = lookahead;
         int headerLen = WriteOpusHeaders(opusHeader, mSampleRate, header,
             sizeof(header), mCodecDelay, mSeekPreRoll);
 
@@ -472,11 +497,11 @@ void C2SoftOpusEnc::process(const std::unique_ptr<C2Work>& work,
         uint8_t* outPtr = wView.data() + mBytesEncoded;
         int encodedBytes =
             opus_multistream_encode(mEncoder, mInputBufferPcm16,
-                                    mNumSamplesPerFrame, outPtr, kMaxPayload);
+                                    mNumSamplesPerFrame, outPtr, kMaxPayload - mBytesEncoded);
         ALOGV("encoded %i Opus bytes from %zu PCM bytes", encodedBytes,
               processSize);
 
-        if (encodedBytes < 0 || encodedBytes > kMaxPayload) {
+        if (encodedBytes < 0 || encodedBytes > (kMaxPayload - mBytesEncoded)) {
             ALOGE("opus_encode failed, encodedBytes : %d", encodedBytes);
             mSignalledError = true;
             work->result = C2_CORRUPTED;
@@ -559,7 +584,7 @@ c2_status_t C2SoftOpusEnc::drainInternal(
         mOutputBlock.reset();
     }
     mProcessedSamples += (mNumPcmBytesPerInputFrame / sizeof(int16_t));
-    uint64_t outTimeStamp =
+    int64_t outTimeStamp =
         mProcessedSamples * 1000000ll / mChannelCount / mSampleRate;
     outOrdinal.frameIndex = mOutIndex++;
     outOrdinal.timestamp = mAnchorTimeStamp + outTimeStamp;
@@ -587,7 +612,7 @@ c2_status_t C2SoftOpusEnc::drain(uint32_t drainMode,
         return C2_OMITTED;
     }
     mIsFirstFrame = true;
-    mAnchorTimeStamp = 0ull;
+    mAnchorTimeStamp = 0;
     mProcessedSamples = 0u;
     return drainInternal(pool, nullptr);
 }
@@ -627,11 +652,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftOpusEncFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

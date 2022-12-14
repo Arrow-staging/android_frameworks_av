@@ -28,7 +28,7 @@
 #include "NuPlayerSource.h"
 
 #include <cutils/properties.h>
-#include <media/ICrypto.h>
+#include <mediadrm/ICrypto.h>
 #include <media/MediaBufferHolder.h>
 #include <media/MediaCodecBuffer.h>
 #include <media/stagefright/foundation/ABuffer.h>
@@ -40,9 +40,8 @@
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/SurfaceUtils.h>
+#include <mpeg2ts/ATSParser.h>
 #include <gui/Surface.h>
-
-#include "ATSParser.h"
 
 namespace android {
 
@@ -106,16 +105,17 @@ NuPlayer::Decoder::~Decoder() {
     releaseAndResetMediaBuffers();
 }
 
-sp<AMessage> NuPlayer::Decoder::getStats() const {
+sp<AMessage> NuPlayer::Decoder::getStats() {
 
+    Mutex::Autolock autolock(mStatsLock);
     mStats->setInt64("frames-total", mNumFramesTotal);
     mStats->setInt64("frames-dropped-input", mNumInputFramesDropped);
     mStats->setInt64("frames-dropped-output", mNumOutputFramesDropped);
     mStats->setFloat("frame-rate-total", mFrameRateTotal);
 
-    // i'm mutexed right now.
     // make our own copy, so we aren't victim to any later changes.
     sp<AMessage> copiedStats = mStats->dup();
+
     return copiedStats;
 }
 
@@ -301,7 +301,7 @@ void NuPlayer::Decoder::onConfigure(const sp<AMessage> &format) {
     ALOGV("[%s] onConfigure (surface=%p)", mComponentName.c_str(), mSurface.get());
 
     mCodec = MediaCodec::CreateByType(
-            mCodecLooper, mime.c_str(), false /* encoder */, NULL /* err */, mPid, mUid);
+            mCodecLooper, mime.c_str(), false /* encoder */, NULL /* err */, mPid, mUid, format);
     int32_t secure = 0;
     if (format->findInt32("secure", &secure) && secure != 0) {
         if (mCodec != NULL) {
@@ -362,13 +362,17 @@ void NuPlayer::Decoder::onConfigure(const sp<AMessage> &format) {
     CHECK_EQ((status_t)OK, mCodec->getOutputFormat(&mOutputFormat));
     CHECK_EQ((status_t)OK, mCodec->getInputFormat(&mInputFormat));
 
-    mStats->setString("mime", mime.c_str());
-    mStats->setString("component-name", mComponentName.c_str());
+    {
+        Mutex::Autolock autolock(mStatsLock);
+        mStats->setString("mime", mime.c_str());
+        mStats->setString("component-name", mComponentName.c_str());
+    }
 
     if (!mIsAudio) {
         int32_t width, height;
         if (mOutputFormat->findInt32("width", &width)
                 && mOutputFormat->findInt32("height", &height)) {
+            Mutex::Autolock autolock(mStatsLock);
             mStats->setInt32("width", width);
             mStats->setInt32("height", height);
         }
@@ -741,9 +745,15 @@ bool NuPlayer::Decoder::handleAnOutputBuffer(
 
     mOutputBuffers.editItemAt(index) = buffer;
 
+    int64_t frameIndex;
+    bool frameIndexFound = buffer->meta()->findInt64("frameIndex", &frameIndex);
+
     buffer->setRange(offset, size);
     buffer->meta()->clear();
     buffer->meta()->setInt64("timeUs", timeUs);
+    if (frameIndexFound) {
+        buffer->meta()->setInt64("frameIndex", frameIndex);
+    }
 
     bool eos = flags & MediaCodec::BUFFER_FLAG_EOS;
     // we do not expect CODECCONFIG or SYNCFRAME for decoder
@@ -799,6 +809,7 @@ void NuPlayer::Decoder::handleOutputFormatChange(const sp<AMessage> &format) {
         int32_t width, height;
         if (format->findInt32("width", &width)
                 && format->findInt32("height", &height)) {
+            Mutex::Autolock autolock(mStatsLock);
             mStats->setInt32("width", width);
             mStats->setInt32("height", height);
         }
@@ -1044,12 +1055,30 @@ bool NuPlayer::Decoder::onInputBufferFetched(const sp<AMessage> &msg) {
         uint32_t flags = 0;
         CHECK(buffer->meta()->findInt64("timeUs", &timeUs));
 
-        int32_t eos, csd;
+        int32_t eos, csd, cvo;
         // we do not expect SYNCFRAME for decoder
         if (buffer->meta()->findInt32("eos", &eos) && eos) {
             flags |= MediaCodec::BUFFER_FLAG_EOS;
         } else if (buffer->meta()->findInt32("csd", &csd) && csd) {
             flags |= MediaCodec::BUFFER_FLAG_CODECCONFIG;
+        }
+
+        if (buffer->meta()->findInt32("cvo", (int32_t*)&cvo)) {
+            ALOGV("[%s] cvo(%d) found at %lld us", mComponentName.c_str(), cvo, (long long)timeUs);
+            switch (cvo) {
+                case 0:
+                    codecBuffer->meta()->setInt32("cvo", MediaCodec::CVO_DEGREE_0);
+                    break;
+                case 1:
+                    codecBuffer->meta()->setInt32("cvo", MediaCodec::CVO_DEGREE_90);
+                    break;
+                case 2:
+                    codecBuffer->meta()->setInt32("cvo", MediaCodec::CVO_DEGREE_180);
+                    break;
+                case 3:
+                    codecBuffer->meta()->setInt32("cvo", MediaCodec::CVO_DEGREE_270);
+                    break;
+            }
         }
 
         // Modular DRM

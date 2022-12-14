@@ -19,15 +19,30 @@
 #define CODEC2_BUFFER_H_
 
 #include <C2Buffer.h>
+#include <C2Config.h>
 
-#include <android/hardware/cas/native/1.0/types.h>
 #include <binder/IMemory.h>
 #include <media/hardware/VideoAPI.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/MediaCodecBuffer.h>
-#include <media/ICrypto.h>
 
 namespace android {
+
+namespace hardware {
+class HidlMemory;
+namespace cas {
+namespace native {
+namespace V1_0 {
+struct SharedBuffer;
+}  // namespace V1_0
+}  // namespace native
+}  // namespace cas
+namespace drm {
+namespace V1_0 {
+struct SharedBuffer;
+}  // namespace V1_0
+}  // namespace drm
+}  // namespace hardware
 
 /**
  * Copies a graphic view into a media image.
@@ -56,37 +71,9 @@ public:
     using MediaCodecBuffer::MediaCodecBuffer;
     ~Codec2Buffer() override = default;
 
-    /**
-     * \return  C2Buffer object represents this buffer.
-     */
-    virtual std::shared_ptr<C2Buffer> asC2Buffer() = 0;
-
-    /**
-     * Test if we can copy the content of |buffer| into this object.
-     *
-     * \param   buffer  C2Buffer object to copy.
-     * \return  true    if the content of buffer can be copied over to this buffer
-     *          false   otherwise.
-     */
-    virtual bool canCopy(const std::shared_ptr<C2Buffer> &buffer) const {
-        (void)buffer;
-        return false;
-    }
-
-    /**
-     * Copy the content of |buffer| into this object. This method assumes that
-     * canCopy() check already passed.
-     *
-     * \param   buffer  C2Buffer object to copy.
-     * \return  true    if successful
-     *          false   otherwise.
-     */
-    virtual bool copy(const std::shared_ptr<C2Buffer> &buffer) {
-        (void)buffer;
-        return false;
-    }
-
     sp<ABuffer> getImageData() const { return mImageData; }
+
+    virtual void clearC2BufferRefs() {}
 
 protected:
     /**
@@ -131,6 +118,7 @@ public:
             const std::shared_ptr<C2Buffer> &buffer = nullptr);
 
     std::shared_ptr<C2Buffer> asC2Buffer() override;
+    void clearC2BufferRefs() override;
     bool canCopy(const std::shared_ptr<C2Buffer> &buffer) const override;
     bool copy(const std::shared_ptr<C2Buffer> &buffer) override;
 
@@ -190,6 +178,7 @@ public:
     virtual ~ConstLinearBlockBuffer() = default;
 
     std::shared_ptr<C2Buffer> asC2Buffer() override;
+    void clearC2BufferRefs() override;
 
 private:
     ConstLinearBlockBuffer(
@@ -226,9 +215,9 @@ public:
             const std::shared_ptr<C2GraphicBlock> &block,
             std::function<sp<ABuffer>(size_t)> alloc);
 
-    std::shared_ptr<C2Buffer> asC2Buffer() override;
-
     virtual ~GraphicBlockBuffer() = default;
+
+    std::shared_ptr<C2Buffer> asC2Buffer() override;
 
 private:
     GraphicBlockBuffer(
@@ -260,10 +249,9 @@ public:
      */
     GraphicMetadataBuffer(
             const sp<AMessage> &format, const std::shared_ptr<C2Allocator> &alloc);
+    virtual ~GraphicMetadataBuffer() = default;
 
     std::shared_ptr<C2Buffer> asC2Buffer() override;
-
-    virtual ~GraphicMetadataBuffer() = default;
 
 private:
     GraphicMetadataBuffer() = delete;
@@ -307,11 +295,12 @@ public:
             const sp<AMessage> &format,
             std::function<sp<ABuffer>(size_t)> alloc);
 
+    virtual ~ConstGraphicBlockBuffer() = default;
+
     std::shared_ptr<C2Buffer> asC2Buffer() override;
+    void clearC2BufferRefs() override;
     bool canCopy(const std::shared_ptr<C2Buffer> &buffer) const override;
     bool copy(const std::shared_ptr<C2Buffer> &buffer) override;
-
-    virtual ~ConstGraphicBlockBuffer() = default;
 
 private:
     ConstGraphicBlockBuffer(
@@ -362,7 +351,8 @@ public:
      *
      * \param source  source buffer structure to fill.
      */
-    void fillSourceBuffer(ICrypto::SourceBuffer *source);
+    void fillSourceBuffer(
+            hardware::drm::V1_0::SharedBuffer *source);
     void fillSourceBuffer(
             hardware::cas::native::V1_0::SharedBuffer *source);
 
@@ -401,6 +391,38 @@ private:
     sp<hardware::HidlMemory> mHidlMemory;
     int32_t mHeapSeqNum;
 };
+
+/**
+ * Get HDR metadata from Gralloc4 handle.
+ *
+ * \param[in]   handle      handle of the allocation
+ * \param[out]  staticInfo  HDR static info to be filled. Ignored if null;
+ *                          if |handle| is invalid or does not contain the metadata,
+ *                          the shared_ptr is reset.
+ * \param[out]  dynamicInfo HDR dynamic info to be filled. Ignored if null;
+ *                          if |handle| is invalid or does not contain the metadata,
+ *                          the shared_ptr is reset.
+ * \return C2_OK if successful
+ */
+c2_status_t GetHdrMetadataFromGralloc4Handle(
+        const C2Handle *const handle,
+        std::shared_ptr<C2StreamHdrStaticMetadataInfo::input> *staticInfo,
+        std::shared_ptr<C2StreamHdrDynamicMetadataInfo::input> *dynamicInfo);
+
+/**
+ * Set metadata to Gralloc4 handle.
+ *
+ * \param[in]   dataSpace   Dataspace to set.
+ * \param[in]   staticInfo  HDR static info to set. Ignored if null or invalid.
+ * \param[in]   dynamicInfo HDR dynamic info to set. Ignored if null or invalid.
+ * \param[out]  handle      handle of the allocation.
+ * \return C2_OK if successful
+ */
+c2_status_t SetMetadataToGralloc4Handle(
+        const android_dataspace_t dataSpace,
+        const std::shared_ptr<const C2StreamHdrStaticMetadataInfo::output> &staticInfo,
+        const std::shared_ptr<const C2StreamHdrDynamicMetadataInfo::output> &dynamicInfo,
+        const C2Handle *const handle);
 
 }  // namespace android
 

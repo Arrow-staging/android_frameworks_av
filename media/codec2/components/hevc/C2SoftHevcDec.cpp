@@ -26,14 +26,15 @@
 #include <SimpleC2Interface.h>
 
 #include "C2SoftHevcDec.h"
-#include "ihevcd_cxa.h"
 
 namespace android {
 
 namespace {
 
 constexpr char COMPONENT_NAME[] = "c2.android.hevc.decoder";
-
+constexpr uint32_t kDefaultOutputDelay = 8;
+constexpr uint32_t kMaxOutputDelay = 16;
+constexpr size_t kMinInputBufferSize = 2 * 1024 * 1024;
 }  // namespace
 
 class C2SoftHevcDec::IntfImpl : public SimpleInterface<void>::BaseParams {
@@ -54,7 +55,9 @@ public:
         // TODO: Proper support for reorder depth.
         addParameter(
                 DefineParam(mActualOutputDelay, C2_PARAMKEY_OUTPUT_DELAY)
-                .withConstValue(new C2PortActualDelayTuning::output(8u))
+                .withDefault(new C2PortActualDelayTuning::output(kDefaultOutputDelay))
+                .withFields({C2F(mActualOutputDelay, value).inRange(0, kMaxOutputDelay)})
+                .withSetter(Setter<decltype(*mActualOutputDelay)>::StrictValueWithNoDeps)
                 .build());
 
         addParameter(
@@ -106,7 +109,7 @@ public:
 
         addParameter(
                 DefineParam(mMaxInputSize, C2_PARAMKEY_INPUT_MAX_BUFFER_SIZE)
-                .withDefault(new C2StreamMaxBufferSizeInfo::input(0u, 320 * 240 * 3 / 4))
+                .withDefault(new C2StreamMaxBufferSizeInfo::input(0u, kMinInputBufferSize))
                 .withFields({
                     C2F(mMaxInputSize, value).any(),
                 })
@@ -218,8 +221,9 @@ public:
     static C2R MaxInputSizeSetter(bool mayBlock, C2P<C2StreamMaxBufferSizeInfo::input> &me,
                                   const C2P<C2StreamMaxPictureSizeTuning::output> &maxSize) {
         (void)mayBlock;
-        // assume compression ratio of 2
-        me.set().value = (((maxSize.v.width + 63) / 64) * ((maxSize.v.height + 63) / 64) * 3072);
+        // assume compression ratio of 2, but enforce a floor
+        me.set().value = c2_max((((maxSize.v.width + 63) / 64)
+                    * ((maxSize.v.height + 63) / 64) * 3072), kMinInputBufferSize);
         return C2R::Ok();
     }
 
@@ -327,9 +331,11 @@ C2SoftHevcDec::C2SoftHevcDec(
         mDecHandle(nullptr),
         mOutBufferFlush(nullptr),
         mIvColorformat(IV_YUV_420P),
+        mOutputDelay(kDefaultOutputDelay),
         mWidth(320),
         mHeight(240),
-        mHeaderDecoded(false) {
+        mHeaderDecoded(false),
+        mOutIndex(0u) {
 }
 
 C2SoftHevcDec::~C2SoftHevcDec() {
@@ -375,12 +381,14 @@ c2_status_t C2SoftHevcDec::onFlush_sm() {
     }
 
     while (true) {
-        ivd_video_decode_ip_t s_decode_ip;
-        ivd_video_decode_op_t s_decode_op;
+        ihevcd_cxa_video_decode_ip_t s_hevcd_decode_ip = {};
+        ihevcd_cxa_video_decode_op_t s_hevcd_decode_op = {};
+        ivd_video_decode_ip_t *ps_decode_ip = &s_hevcd_decode_ip.s_ivd_video_decode_ip_t;
+        ivd_video_decode_op_t *ps_decode_op = &s_hevcd_decode_op.s_ivd_video_decode_op_t;
 
-        setDecodeArgs(&s_decode_ip, &s_decode_op, nullptr, nullptr, 0, 0, 0);
-        (void) ivdec_api_function(mDecHandle, &s_decode_ip, &s_decode_op);
-        if (0 == s_decode_op.u4_output_present) {
+        setDecodeArgs(ps_decode_ip, ps_decode_op, nullptr, nullptr, 0, 0, 0);
+        (void) ivdec_api_function(mDecHandle, ps_decode_ip, ps_decode_op);
+        if (0 == ps_decode_op->u4_output_present) {
             resetPlugin();
             break;
         }
@@ -395,8 +403,8 @@ c2_status_t C2SoftHevcDec::onFlush_sm() {
 }
 
 status_t C2SoftHevcDec::createDecoder() {
-    ivdext_create_ip_t s_create_ip;
-    ivdext_create_op_t s_create_op;
+    ivdext_create_ip_t s_create_ip = {};
+    ivdext_create_op_t s_create_op = {};
 
     s_create_ip.s_ivd_create_ip_t.u4_size = sizeof(ivdext_create_ip_t);
     s_create_ip.s_ivd_create_ip_t.e_cmd = IVD_CMD_CREATE;
@@ -422,8 +430,8 @@ status_t C2SoftHevcDec::createDecoder() {
 }
 
 status_t C2SoftHevcDec::setNumCores() {
-    ivdext_ctl_set_num_cores_ip_t s_set_num_cores_ip;
-    ivdext_ctl_set_num_cores_op_t s_set_num_cores_op;
+    ivdext_ctl_set_num_cores_ip_t s_set_num_cores_ip = {};
+    ivdext_ctl_set_num_cores_op_t s_set_num_cores_op = {};
 
     s_set_num_cores_ip.u4_size = sizeof(ivdext_ctl_set_num_cores_ip_t);
     s_set_num_cores_ip.e_cmd = IVD_CMD_VIDEO_CTL;
@@ -442,22 +450,26 @@ status_t C2SoftHevcDec::setNumCores() {
 }
 
 status_t C2SoftHevcDec::setParams(size_t stride, IVD_VIDEO_DECODE_MODE_T dec_mode) {
-    ivd_ctl_set_config_ip_t s_set_dyn_params_ip;
-    ivd_ctl_set_config_op_t s_set_dyn_params_op;
+    ihevcd_cxa_ctl_set_config_ip_t s_hevcd_set_dyn_params_ip = {};
+    ihevcd_cxa_ctl_set_config_op_t s_hevcd_set_dyn_params_op = {};
+    ivd_ctl_set_config_ip_t *ps_set_dyn_params_ip =
+        &s_hevcd_set_dyn_params_ip.s_ivd_ctl_set_config_ip_t;
+    ivd_ctl_set_config_op_t *ps_set_dyn_params_op =
+        &s_hevcd_set_dyn_params_op.s_ivd_ctl_set_config_op_t;
 
-    s_set_dyn_params_ip.u4_size = sizeof(ivd_ctl_set_config_ip_t);
-    s_set_dyn_params_ip.e_cmd = IVD_CMD_VIDEO_CTL;
-    s_set_dyn_params_ip.e_sub_cmd = IVD_CMD_CTL_SETPARAMS;
-    s_set_dyn_params_ip.u4_disp_wd = (UWORD32) stride;
-    s_set_dyn_params_ip.e_frm_skip_mode = IVD_SKIP_NONE;
-    s_set_dyn_params_ip.e_frm_out_mode = IVD_DISPLAY_FRAME_OUT;
-    s_set_dyn_params_ip.e_vid_dec_mode = dec_mode;
-    s_set_dyn_params_op.u4_size = sizeof(ivd_ctl_set_config_op_t);
+    ps_set_dyn_params_ip->u4_size = sizeof(ihevcd_cxa_ctl_set_config_ip_t);
+    ps_set_dyn_params_ip->e_cmd = IVD_CMD_VIDEO_CTL;
+    ps_set_dyn_params_ip->e_sub_cmd = IVD_CMD_CTL_SETPARAMS;
+    ps_set_dyn_params_ip->u4_disp_wd = (UWORD32) stride;
+    ps_set_dyn_params_ip->e_frm_skip_mode = IVD_SKIP_NONE;
+    ps_set_dyn_params_ip->e_frm_out_mode = IVD_DISPLAY_FRAME_OUT;
+    ps_set_dyn_params_ip->e_vid_dec_mode = dec_mode;
+    ps_set_dyn_params_op->u4_size = sizeof(ihevcd_cxa_ctl_set_config_op_t);
     IV_API_CALL_STATUS_T status = ivdec_api_function(mDecHandle,
-                                                     &s_set_dyn_params_ip,
-                                                     &s_set_dyn_params_op);
+                                                     ps_set_dyn_params_ip,
+                                                     ps_set_dyn_params_op);
     if (status != IV_SUCCESS) {
-        ALOGE("error in %s: 0x%x", __func__, s_set_dyn_params_op.u4_error_code);
+        ALOGE("error in %s: 0x%x", __func__, ps_set_dyn_params_op->u4_error_code);
         return UNKNOWN_ERROR;
     }
 
@@ -465,8 +477,8 @@ status_t C2SoftHevcDec::setParams(size_t stride, IVD_VIDEO_DECODE_MODE_T dec_mod
 }
 
 status_t C2SoftHevcDec::getVersion() {
-    ivd_ctl_getversioninfo_ip_t s_get_versioninfo_ip;
-    ivd_ctl_getversioninfo_op_t s_get_versioninfo_op;
+    ivd_ctl_getversioninfo_ip_t s_get_versioninfo_ip = {};
+    ivd_ctl_getversioninfo_op_t s_get_versioninfo_op = {};
     UWORD8 au1_buf[512];
 
     s_get_versioninfo_ip.u4_size = sizeof(ivd_ctl_getversioninfo_ip_t);
@@ -492,7 +504,7 @@ status_t C2SoftHevcDec::getVersion() {
 status_t C2SoftHevcDec::initDecoder() {
     if (OK != createDecoder()) return UNKNOWN_ERROR;
     mNumCores = MIN(getCpuCoreCount(), MAX_NUM_CORES);
-    mStride = ALIGN64(mWidth);
+    mStride = ALIGN128(mWidth);
     mSignalledError = false;
     resetPlugin();
     (void) setNumCores();
@@ -510,11 +522,21 @@ bool C2SoftHevcDec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
                                   size_t inSize,
                                   uint32_t tsMarker) {
     uint32_t displayStride = mStride;
+    if (outBuffer) {
+        C2PlanarLayout layout;
+        layout = outBuffer->layout();
+        displayStride = layout.planes[C2PlanarLayout::PLANE_Y].rowInc;
+    }
     uint32_t displayHeight = mHeight;
     size_t lumaSize = displayStride * displayHeight;
     size_t chromaSize = lumaSize >> 2;
 
-    ps_decode_ip->u4_size = sizeof(ivd_video_decode_ip_t);
+    if (mStride != displayStride) {
+        mStride = displayStride;
+        if (OK != setParams(mStride, IVD_DECODE_FRAME)) return false;
+    }
+
+    ps_decode_ip->u4_size = sizeof(ihevcd_cxa_video_decode_ip_t);
     ps_decode_ip->e_cmd = IVD_CMD_VIDEO_DECODE;
     if (inBuffer) {
         ps_decode_ip->u4_ts = tsMarker;
@@ -529,7 +551,7 @@ bool C2SoftHevcDec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
     ps_decode_ip->s_out_buffer.u4_min_out_buf_size[1] = chromaSize;
     ps_decode_ip->s_out_buffer.u4_min_out_buf_size[2] = chromaSize;
     if (outBuffer) {
-        if (outBuffer->width() < displayStride || outBuffer->height() < displayHeight) {
+        if (outBuffer->height() < displayHeight) {
             ALOGE("Output buffer too small: provided (%dx%d) required (%ux%u)",
                   outBuffer->width(), outBuffer->height(), displayStride, displayHeight);
             return false;
@@ -543,15 +565,15 @@ bool C2SoftHevcDec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
         ps_decode_ip->s_out_buffer.pu1_bufs[2] = mOutBufferFlush + lumaSize + chromaSize;
     }
     ps_decode_ip->s_out_buffer.u4_num_bufs = 3;
-    ps_decode_op->u4_size = sizeof(ivd_video_decode_op_t);
+    ps_decode_op->u4_size = sizeof(ihevcd_cxa_video_decode_op_t);
     ps_decode_op->u4_output_present = 0;
 
     return true;
 }
 
 bool C2SoftHevcDec::getVuiParams() {
-    ivdext_ctl_get_vui_params_ip_t s_get_vui_params_ip;
-    ivdext_ctl_get_vui_params_op_t s_get_vui_params_op;
+    ivdext_ctl_get_vui_params_ip_t s_get_vui_params_ip = {};
+    ivdext_ctl_get_vui_params_op_t s_get_vui_params_op = {};
 
     s_get_vui_params_ip.u4_size = sizeof(ivdext_ctl_get_vui_params_ip_t);
     s_get_vui_params_ip.e_cmd = IVD_CMD_VIDEO_CTL;
@@ -599,8 +621,8 @@ bool C2SoftHevcDec::getVuiParams() {
 }
 
 status_t C2SoftHevcDec::setFlushMode() {
-    ivd_ctl_flush_ip_t s_set_flush_ip;
-    ivd_ctl_flush_op_t s_set_flush_op;
+    ivd_ctl_flush_ip_t s_set_flush_ip = {};
+    ivd_ctl_flush_op_t s_set_flush_op = {};
 
     s_set_flush_ip.u4_size = sizeof(ivd_ctl_flush_ip_t);
     s_set_flush_ip.e_cmd = IVD_CMD_VIDEO_CTL;
@@ -618,8 +640,8 @@ status_t C2SoftHevcDec::setFlushMode() {
 }
 
 status_t C2SoftHevcDec::resetDecoder() {
-    ivd_ctl_reset_ip_t s_reset_ip;
-    ivd_ctl_reset_op_t s_reset_op;
+    ivd_ctl_reset_ip_t s_reset_ip = {};
+    ivd_ctl_reset_op_t s_reset_op = {};
 
     s_reset_ip.u4_size = sizeof(ivd_ctl_reset_ip_t);
     s_reset_ip.e_cmd = IVD_CMD_VIDEO_CTL;
@@ -641,14 +663,13 @@ status_t C2SoftHevcDec::resetDecoder() {
 
 void C2SoftHevcDec::resetPlugin() {
     mSignalledOutputEos = false;
-    gettimeofday(&mTimeStart, nullptr);
-    gettimeofday(&mTimeEnd, nullptr);
+    mTimeStart = mTimeEnd = systemTime();
 }
 
 status_t C2SoftHevcDec::deleteDecoder() {
     if (mDecHandle) {
-        ivdext_delete_ip_t s_delete_ip;
-        ivdext_delete_op_t s_delete_op;
+        ivdext_delete_ip_t s_delete_ip = {};
+        ivdext_delete_op_t s_delete_op = {};
 
         s_delete_ip.s_ivd_delete_ip_t.u4_size = sizeof(ivdext_delete_ip_t);
         s_delete_ip.s_ivd_delete_ip_t.e_cmd = IVD_CMD_DELETE;
@@ -688,6 +709,33 @@ void C2SoftHevcDec::finishWork(uint64_t index, const std::unique_ptr<C2Work> &wo
         buffer->setInfo(mIntf->getColorAspects_l());
     }
 
+    class FillWork {
+       public:
+        FillWork(uint32_t flags, C2WorkOrdinalStruct ordinal,
+                 const std::shared_ptr<C2Buffer>& buffer)
+            : mFlags(flags), mOrdinal(ordinal), mBuffer(buffer) {}
+        ~FillWork() = default;
+
+        void operator()(const std::unique_ptr<C2Work>& work) {
+            work->worklets.front()->output.flags = (C2FrameData::flags_t)mFlags;
+            work->worklets.front()->output.buffers.clear();
+            work->worklets.front()->output.ordinal = mOrdinal;
+            work->workletsProcessed = 1u;
+            work->result = C2_OK;
+            if (mBuffer) {
+                work->worklets.front()->output.buffers.push_back(mBuffer);
+            }
+            ALOGV("timestamp = %lld, index = %lld, w/%s buffer",
+                  mOrdinal.timestamp.peekll(), mOrdinal.frameIndex.peekll(),
+                  mBuffer ? "" : "o");
+        }
+
+       private:
+        const uint32_t mFlags;
+        const C2WorkOrdinalStruct mOrdinal;
+        const std::shared_ptr<C2Buffer> mBuffer;
+    };
+
     auto fillWork = [buffer](const std::unique_ptr<C2Work> &work) {
         work->worklets.front()->output.flags = (C2FrameData::flags_t)0;
         work->worklets.front()->output.buffers.clear();
@@ -696,7 +744,20 @@ void C2SoftHevcDec::finishWork(uint64_t index, const std::unique_ptr<C2Work> &wo
         work->workletsProcessed = 1u;
     };
     if (work && c2_cntr64_t(index) == work->input.ordinal.frameIndex) {
-        fillWork(work);
+        bool eos = ((work->input.flags & C2FrameData::FLAG_END_OF_STREAM) != 0);
+        // TODO: Check if cloneAndSend can be avoided by tracking number of frames remaining
+        if (eos) {
+            if (buffer) {
+                mOutIndex = index;
+                C2WorkOrdinalStruct outOrdinal = work->input.ordinal;
+                cloneAndSend(
+                    mOutIndex, work,
+                    FillWork(C2FrameData::FLAG_INCOMPLETE, outOrdinal, buffer));
+                buffer.reset();
+            }
+        } else {
+            fillWork(work);
+        }
     } else {
         finish(index, fillWork);
     }
@@ -707,24 +768,21 @@ c2_status_t C2SoftHevcDec::ensureDecoderState(const std::shared_ptr<C2BlockPool>
         ALOGE("not supposed to be here, invalid decoder context");
         return C2_CORRUPTED;
     }
-    if (mStride != ALIGN64(mWidth)) {
-        mStride = ALIGN64(mWidth);
-        if (OK != setParams(mStride, IVD_DECODE_FRAME)) return C2_CORRUPTED;
-    }
     if (mOutBlock &&
-            (mOutBlock->width() != mStride || mOutBlock->height() != mHeight)) {
+            (mOutBlock->width() != ALIGN128(mWidth) || mOutBlock->height() != mHeight)) {
         mOutBlock.reset();
     }
     if (!mOutBlock) {
         uint32_t format = HAL_PIXEL_FORMAT_YV12;
         C2MemoryUsage usage = { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE };
-        c2_status_t err = pool->fetchGraphicBlock(mStride, mHeight, format, usage, &mOutBlock);
+        c2_status_t err =
+            pool->fetchGraphicBlock(ALIGN128(mWidth), mHeight, format, usage, &mOutBlock);
         if (err != C2_OK) {
             ALOGE("fetchGraphicBlock for Output failed with status %d", err);
             return err;
         }
         ALOGV("provided (%dx%d) required (%dx%d)",
-              mOutBlock->width(), mOutBlock->height(), mStride, mHeight);
+              mOutBlock->width(), mOutBlock->height(), ALIGN128(mWidth), mHeight);
     }
 
     return C2_OK;
@@ -783,9 +841,11 @@ void C2SoftHevcDec::process(
             work->result = wView.error();
             return;
         }
-        ivd_video_decode_ip_t s_decode_ip;
-        ivd_video_decode_op_t s_decode_op;
-        if (!setDecodeArgs(&s_decode_ip, &s_decode_op, &rView, &wView,
+        ihevcd_cxa_video_decode_ip_t s_hevcd_decode_ip = {};
+        ihevcd_cxa_video_decode_op_t s_hevcd_decode_op = {};
+        ivd_video_decode_ip_t *ps_decode_ip = &s_hevcd_decode_ip.s_ivd_video_decode_ip_t;
+        ivd_video_decode_op_t *ps_decode_op = &s_hevcd_decode_op.s_ivd_video_decode_op_t;
+        if (!setDecodeArgs(ps_decode_ip, ps_decode_op, &rView, &wView,
                            inOffset + inPos, inSize - inPos, workIndex)) {
             mSignalledError = true;
             work->workletsProcessed = 1u;
@@ -797,28 +857,28 @@ void C2SoftHevcDec::process(
             /* Decode header and get dimensions */
             setParams(mStride, IVD_DECODE_HEADER);
         }
-        WORD32 delay;
-        GETTIME(&mTimeStart, nullptr);
-        TIME_DIFF(mTimeEnd, mTimeStart, delay);
-        (void) ivdec_api_function(mDecHandle, &s_decode_ip, &s_decode_op);
-        WORD32 decodeTime;
-        GETTIME(&mTimeEnd, nullptr);
-        TIME_DIFF(mTimeStart, mTimeEnd, decodeTime);
-        ALOGV("decodeTime=%6d delay=%6d numBytes=%6d", decodeTime, delay,
-              s_decode_op.u4_num_bytes_consumed);
-        if (IVD_MEM_ALLOC_FAILED == (s_decode_op.u4_error_code & 0xFF)) {
+
+        mTimeStart = systemTime();
+        nsecs_t delay = mTimeStart - mTimeEnd;
+        (void) ivdec_api_function(mDecHandle, ps_decode_ip, ps_decode_op);
+        mTimeEnd = systemTime();
+        nsecs_t decodeTime = mTimeEnd - mTimeStart;
+        ALOGV("decodeTime=%6" PRId64 " delay=%6" PRId64 " numBytes=%6d", decodeTime, delay,
+              ps_decode_op->u4_num_bytes_consumed);
+        if (IVD_MEM_ALLOC_FAILED == (ps_decode_op->u4_error_code & IVD_ERROR_MASK)) {
             ALOGE("allocation failure in decoder");
             mSignalledError = true;
             work->workletsProcessed = 1u;
             work->result = C2_CORRUPTED;
             return;
-        } else if (IVD_STREAM_WIDTH_HEIGHT_NOT_SUPPORTED == (s_decode_op.u4_error_code & 0xFF)) {
+        } else if (IVD_STREAM_WIDTH_HEIGHT_NOT_SUPPORTED ==
+                   (ps_decode_op->u4_error_code & IVD_ERROR_MASK)) {
             ALOGE("unsupported resolution : %dx%d", mWidth, mHeight);
             mSignalledError = true;
             work->workletsProcessed = 1u;
             work->result = C2_CORRUPTED;
             return;
-        } else if (IVD_RES_CHANGED == (s_decode_op.u4_error_code & 0xFF)) {
+        } else if (IVD_RES_CHANGED == (ps_decode_op->u4_error_code & IVD_ERROR_MASK)) {
             ALOGV("resolution changed");
             drainInternal(DRAIN_COMPONENT_NO_EOS, pool, work);
             resetDecoder();
@@ -827,17 +887,42 @@ void C2SoftHevcDec::process(
 
             /* Decode header and get new dimensions */
             setParams(mStride, IVD_DECODE_HEADER);
-            (void) ivdec_api_function(mDecHandle, &s_decode_ip, &s_decode_op);
+            (void) ivdec_api_function(mDecHandle, ps_decode_ip, ps_decode_op);
+        } else if (IS_IVD_FATAL_ERROR(ps_decode_op->u4_error_code)) {
+            ALOGE("Fatal error in decoder 0x%x", ps_decode_op->u4_error_code);
+            mSignalledError = true;
+            work->workletsProcessed = 1u;
+            work->result = C2_CORRUPTED;
+            return;
         }
-        if (0 < s_decode_op.u4_pic_wd && 0 < s_decode_op.u4_pic_ht) {
+        if (ps_decode_op->i4_reorder_depth >= 0 && mOutputDelay != ps_decode_op->i4_reorder_depth) {
+            mOutputDelay = ps_decode_op->i4_reorder_depth;
+            ALOGV("New Output delay %d ", mOutputDelay);
+
+            C2PortActualDelayTuning::output outputDelay(mOutputDelay);
+            std::vector<std::unique_ptr<C2SettingResult>> failures;
+            c2_status_t err =
+                mIntf->config({&outputDelay}, C2_MAY_BLOCK, &failures);
+            if (err == OK) {
+                work->worklets.front()->output.configUpdate.push_back(
+                    C2Param::Copy(outputDelay));
+            } else {
+                ALOGE("Cannot set output delay");
+                mSignalledError = true;
+                work->workletsProcessed = 1u;
+                work->result = C2_CORRUPTED;
+                return;
+            }
+        }
+        if (0 < ps_decode_op->u4_pic_wd && 0 < ps_decode_op->u4_pic_ht) {
             if (mHeaderDecoded == false) {
                 mHeaderDecoded = true;
-                setParams(ALIGN64(s_decode_op.u4_pic_wd), IVD_DECODE_FRAME);
+                setParams(ALIGN128(ps_decode_op->u4_pic_wd), IVD_DECODE_FRAME);
             }
-            if (s_decode_op.u4_pic_wd != mWidth ||  s_decode_op.u4_pic_ht != mHeight) {
-                mWidth = s_decode_op.u4_pic_wd;
-                mHeight = s_decode_op.u4_pic_ht;
-                CHECK_EQ(0u, s_decode_op.u4_output_present);
+            if (ps_decode_op->u4_pic_wd != mWidth ||  ps_decode_op->u4_pic_ht != mHeight) {
+                mWidth = ps_decode_op->u4_pic_wd;
+                mHeight = ps_decode_op->u4_pic_ht;
+                CHECK_EQ(0u, ps_decode_op->u4_output_present);
 
                 C2StreamPictureSizeInfo::output size(0u, mWidth, mHeight);
                 std::vector<std::unique_ptr<C2SettingResult>> failures;
@@ -857,15 +942,15 @@ void C2SoftHevcDec::process(
             }
         }
         (void) getVuiParams();
-        hasPicture |= (1 == s_decode_op.u4_frame_decoded_flag);
-        if (s_decode_op.u4_output_present) {
-            finishWork(s_decode_op.u4_ts, work);
+        hasPicture |= (1 == ps_decode_op->u4_frame_decoded_flag);
+        if (ps_decode_op->u4_output_present) {
+            finishWork(ps_decode_op->u4_ts, work);
         }
-        if (0 == s_decode_op.u4_num_bytes_consumed) {
+        if (0 == ps_decode_op->u4_num_bytes_consumed) {
             ALOGD("Bytes consumed is zero. Ignoring remaining bytes");
             break;
         }
-        inPos += s_decode_op.u4_num_bytes_consumed;
+        inPos += ps_decode_op->u4_num_bytes_consumed;
         if (hasPicture && (inSize - inPos)) {
             ALOGD("decoded frame in current access nal, ignoring further trailing bytes %d",
                   (int)inSize - (int)inPos);
@@ -907,16 +992,18 @@ c2_status_t C2SoftHevcDec::drainInternal(
             ALOGE("graphic view map failed %d", wView.error());
             return C2_CORRUPTED;
         }
-        ivd_video_decode_ip_t s_decode_ip;
-        ivd_video_decode_op_t s_decode_op;
-        if (!setDecodeArgs(&s_decode_ip, &s_decode_op, nullptr, &wView, 0, 0, 0)) {
+        ihevcd_cxa_video_decode_ip_t s_hevcd_decode_ip = {};
+        ihevcd_cxa_video_decode_op_t s_hevcd_decode_op = {};
+        ivd_video_decode_ip_t *ps_decode_ip = &s_hevcd_decode_ip.s_ivd_video_decode_ip_t;
+        ivd_video_decode_op_t *ps_decode_op = &s_hevcd_decode_op.s_ivd_video_decode_op_t;
+        if (!setDecodeArgs(ps_decode_ip, ps_decode_op, nullptr, &wView, 0, 0, 0)) {
             mSignalledError = true;
             work->workletsProcessed = 1u;
             return C2_CORRUPTED;
         }
-        (void) ivdec_api_function(mDecHandle, &s_decode_ip, &s_decode_op);
-        if (s_decode_op.u4_output_present) {
-            finishWork(s_decode_op.u4_ts, work);
+        (void) ivdec_api_function(mDecHandle, ps_decode_ip, ps_decode_op);
+        if (ps_decode_op->u4_output_present) {
+            finishWork(ps_decode_op->u4_ts, work);
         } else {
             fillEmptyWork(work);
             break;
@@ -969,11 +1056,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftHevcDecFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

@@ -158,7 +158,8 @@ public:
     struct CoreIndex {
     //public:
         enum : uint32_t {
-            IS_FLEX_FLAG = 0x00010000,
+            IS_FLEX_FLAG    = 0x00010000,
+            IS_REQUEST_FLAG = 0x00020000,
         };
 
     protected:
@@ -176,8 +177,8 @@ public:
             DIR_OUTPUT     = 0x10000000,
 
             IS_STREAM_FLAG  = 0x02000000,
-            STREAM_ID_MASK  = 0x01FE0000,
-            STREAM_ID_SHIFT = 17,
+            STREAM_ID_MASK  = 0x01F00000,
+            STREAM_ID_SHIFT = 20,
             MAX_STREAM_ID   = STREAM_ID_MASK >> STREAM_ID_SHIFT,
             STREAM_MASK     = IS_STREAM_FLAG | STREAM_ID_MASK,
 
@@ -316,7 +317,8 @@ public:
         DEFINE_FIELD_BASED_COMPARISON_OPERATORS(Index, mIndex)
 
     private:
-        friend struct C2Param;           // for setStream, MakeStreamId, isValid
+        friend class C2InfoBuffer;       // for convertTo*
+        friend struct C2Param;           // for setStream, MakeStreamId, isValid, convertTo*
         friend struct _C2ParamInspector; // for testing
 
         /**
@@ -358,6 +360,10 @@ public:
 
         inline void convertToGlobal() {
             mIndex = (mIndex & ~(DIR_MASK | IS_STREAM_FLAG)) | DIR_GLOBAL;
+        }
+
+        inline void convertToRequest() {
+            mIndex = mIndex | IS_REQUEST_FLAG;
         }
 
         /**
@@ -476,6 +482,15 @@ public:
         return copy;
     }
 
+    /// Returns managed clone of |orig| as a stream parameter at heap.
+    inline static std::unique_ptr<C2Param> CopyAsRequest(const C2Param &orig) {
+        std::unique_ptr<C2Param> copy = Copy(orig);
+        if (copy) {
+            copy->_mIndex.convertToRequest();
+        }
+        return copy;
+    }
+
 #if 0
     template<typename P, class=decltype(C2Param(P()))>
     P *As() { return P::From(this); }
@@ -492,6 +507,14 @@ protected:
     /// sets the port (direction). Returns true iff successful.
     inline bool setPort(bool output) {
         return _mIndex.setPort(output);
+    }
+
+    /// sets the size of this parameter.
+    inline void setSize(size_t size) {
+        if (size < sizeof(C2Param)) {
+            size = 0;
+        }
+        _mSize = c2_min(size, _mSize);
     }
 
 public:

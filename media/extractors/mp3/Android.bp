@@ -1,18 +1,23 @@
-cc_library_shared {
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_av_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_av_license"],
+}
 
+cc_library {
+    name: "libmp3extractor",
+    defaults: ["extractor-defaults"],
     srcs: [
             "MP3Extractor.cpp",
             "VBRISeeker.cpp",
             "XINGSeeker.cpp",
     ],
 
-    include_dirs: [
-        "frameworks/av/media/libstagefright/include",
-    ],
-
-    shared_libs: [
-        "liblog",
-        "libmediandk",
+    export_include_dirs: [
+        "include",
     ],
 
     static_libs: [
@@ -21,24 +26,11 @@ cc_library_shared {
         "libstagefright_foundation",
     ],
 
-    name: "libmp3extractor",
-    relative_install_path: "extractors",
+    host_supported: true,
 
-    compile_multilib: "first",
-
-    cflags: [
-        "-Werror",
-        "-Wall",
-        "-fvisibility=hidden",
-    ],
-    version_script: "exports.lds",
-
-    sanitize: {
-        cfi: true,
-        misc_undefined: [
-            "unsigned-integer-overflow",
-            "signed-integer-overflow",
-        ],
+    target: {
+        darwin: {
+            enabled: false,
+        },
     },
-
 }

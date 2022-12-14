@@ -24,6 +24,7 @@
 #include <android/frameworks/cameraservice/common/2.0/types.h>
 #include <android/frameworks/cameraservice/service/2.0/types.h>
 #include <android/frameworks/cameraservice/device/2.0/ICameraDeviceUser.h>
+#include <android/frameworks/cameraservice/device/2.1/ICameraDeviceUser.h>
 #include <android/frameworks/cameraservice/device/2.0/types.h>
 #include <android/hardware/camera2/ICameraDeviceCallbacks.h>
 #include <fmq/MessageQueue.h>
@@ -36,7 +37,7 @@ namespace android {
 namespace frameworks {
 namespace cameraservice {
 namespace device {
-namespace V2_0 {
+namespace V2_1 {
 namespace implementation {
 
 using frameworks::cameraservice::device::V2_0::StreamConfigurationMode;
@@ -50,9 +51,10 @@ using CaptureResultMetadataQueue = MessageQueue<uint8_t, kSynchronizedReadWrite>
 using CaptureRequestMetadataQueue = MessageQueue<uint8_t, kSynchronizedReadWrite>;
 using TemplateId = frameworks::cameraservice::device::V2_0::TemplateId;
 
-using HCameraDeviceUser = device::V2_0::ICameraDeviceUser;
+using HCameraDeviceUser = device::V2_1::ICameraDeviceUser;
 using HCameraMetadata = cameraservice::service::V2_0::CameraMetadata;
 using HCaptureRequest = device::V2_0::CaptureRequest;
+using HSessionConfiguration = frameworks::cameraservice::device::V2_0::SessionConfiguration;
 using HOutputConfiguration = frameworks::cameraservice::device::V2_0::OutputConfiguration;
 using HPhysicalCameraSettings = frameworks::cameraservice::device::V2_0::PhysicalCameraSettings;
 using HStatus = frameworks::cameraservice::common::V2_0::Status;
@@ -82,6 +84,10 @@ struct HidlCameraDeviceUser final : public HCameraDeviceUser {
     virtual Return<HStatus> endConfigure(StreamConfigurationMode operatingMode,
                                          const hidl_vec<uint8_t>& sessionParams);
 
+    virtual Return<HStatus> endConfigure_2_1(StreamConfigurationMode operatingMode,
+                                         const hidl_vec<uint8_t>& sessionParams,
+                                         nsecs_t startTimeNs);
+
     virtual Return<HStatus> deleteStream(int32_t streamId) override;
 
     virtual Return<void> createStream(const HOutputConfiguration& outputConfiguration,
@@ -96,6 +102,10 @@ struct HidlCameraDeviceUser final : public HCameraDeviceUser {
 
     virtual Return<HStatus> updateOutputConfiguration(
         int32_t streamId, const HOutputConfiguration& outputConfiguration) override;
+
+    virtual Return<void> isSessionConfigurationSupported(
+        const HSessionConfiguration& sessionConfiguration,
+        isSessionConfigurationSupported_cb _hidl_cb) override;
 
     bool initStatus() { return mInitSuccess; }
 

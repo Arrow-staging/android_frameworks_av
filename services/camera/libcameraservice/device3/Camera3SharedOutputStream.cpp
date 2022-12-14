@@ -30,12 +30,17 @@ Camera3SharedOutputStream::Camera3SharedOutputStream(int id,
         const std::vector<sp<Surface>>& surfaces,
         uint32_t width, uint32_t height, int format,
         uint64_t consumerUsage, android_dataspace dataSpace,
-        camera3_stream_rotation_t rotation,
+        camera_stream_rotation_t rotation,
         nsecs_t timestampOffset, const String8& physicalCameraId,
-        int setId, bool useHalBufManager) :
-        Camera3OutputStream(id, CAMERA3_STREAM_OUTPUT, width, height,
-                            format, dataSpace, rotation, physicalCameraId,
-                            consumerUsage, timestampOffset, setId),
+        const std::unordered_set<int32_t> &sensorPixelModesUsed, IPCTransport transport,
+        int setId, bool useHalBufManager, int64_t dynamicProfile,
+        int64_t streamUseCase, bool deviceTimeBaseIsRealtime, int timestampBase,
+        int mirrorMode) :
+        Camera3OutputStream(id, CAMERA_STREAM_OUTPUT, width, height,
+                            format, dataSpace, rotation, physicalCameraId, sensorPixelModesUsed,
+                            transport, consumerUsage, timestampOffset, setId,
+                            /*isMultiResolution*/false, dynamicProfile, streamUseCase,
+                            deviceTimeBaseIsRealtime, timestampBase, mirrorMode),
         mUseHalBufManager(useHalBufManager) {
     size_t consumerCount = std::min(surfaces.size(), kMaxOutputs);
     if (surfaces.size() > consumerCount) {
@@ -55,7 +60,7 @@ status_t Camera3SharedOutputStream::connectStreamSplitterLocked() {
 
     mStreamSplitter = new Camera3StreamSplitter(mUseHalBufManager);
 
-    uint64_t usage;
+    uint64_t usage = 0;
     getEndpointUsage(&usage);
 
     std::unordered_map<size_t, sp<Surface>> initialSurfaces;
@@ -65,8 +70,8 @@ status_t Camera3SharedOutputStream::connectStreamSplitterLocked() {
         }
     }
 
-    res = mStreamSplitter->connect(initialSurfaces, usage, mUsage, camera3_stream::max_buffers,
-            getWidth(), getHeight(), getFormat(), &mConsumer);
+    res = mStreamSplitter->connect(initialSurfaces, usage, mUsage, camera_stream::max_buffers,
+            getWidth(), getHeight(), getFormat(), &mConsumer, camera_stream::dynamic_range_profile);
     if (res != OK) {
         ALOGE("%s: Failed to connect to stream splitter: %s(%d)",
                 __FUNCTION__, strerror(-res), res);
@@ -157,7 +162,7 @@ status_t Camera3SharedOutputStream::setConsumers(const std::vector<sp<Surface>>&
     return ret;
 }
 
-status_t Camera3SharedOutputStream::getBufferLocked(camera3_stream_buffer *buffer,
+status_t Camera3SharedOutputStream::getBufferLocked(camera_stream_buffer *buffer,
         const std::vector<size_t>& surfaceIds) {
     ANativeWindowBuffer* anb;
     int fenceFd = -1;
@@ -180,7 +185,7 @@ status_t Camera3SharedOutputStream::getBufferLocked(camera3_stream_buffer *buffe
      * in which case we reassign it to acquire_fence
      */
     handoutBufferLocked(*buffer, &(anb->handle), /*acquireFence*/fenceFd,
-                        /*releaseFence*/-1, CAMERA3_BUFFER_STATUS_OK, /*output*/true);
+                        /*releaseFence*/-1, CAMERA_BUFFER_STATUS_OK, /*output*/true);
 
     return OK;
 }
@@ -246,7 +251,7 @@ status_t Camera3SharedOutputStream::configureQueueLocked() {
         return res;
     }
 
-    res = configureConsumerQueueLocked();
+    res = configureConsumerQueueLocked(false/*allowPreviewRespace*/);
     if (res != OK) {
         ALOGE("Failed to configureConsumerQueueLocked: %s(%d)", strerror(-res), res);
         return res;
@@ -387,13 +392,15 @@ status_t Camera3SharedOutputStream::updateStream(const std::vector<sp<Surface>> 
         bool sizeMismatch = ((static_cast<uint32_t>(infoIt.width) != getWidth()) ||
                                 (static_cast<uint32_t> (infoIt.height) != getHeight())) ?
                                 true : false;
-        if ((imgReaderUsage && sizeMismatch) ||
+        bool dynamicRangeMismatch = dynamic_range_profile != infoIt.dynamicRangeProfile;
+        if ((imgReaderUsage && sizeMismatch) || dynamicRangeMismatch ||
                 (infoIt.format != getOriginalFormat() && infoIt.format != getFormat()) ||
                 (infoIt.dataSpace != getDataSpace() &&
                  infoIt.dataSpace != getOriginalDataSpace())) {
-            ALOGE("%s: Shared surface parameters format: 0x%x dataSpace: 0x%x "
-                    " don't match source stream format: 0x%x  dataSpace: 0x%x", __FUNCTION__,
-                    infoIt.format, infoIt.dataSpace, getFormat(), getDataSpace());
+            ALOGE("%s: Shared surface parameters format: 0x%x dataSpace: 0x%x dynamic range 0x%"
+                    PRIx64 " don't match source stream format: 0x%x  dataSpace: 0x%x dynamic"
+                    " range 0x%" PRIx64 , __FUNCTION__, infoIt.format, infoIt.dataSpace,
+                    infoIt.dynamicRangeProfile, getFormat(), getDataSpace(), dynamic_range_profile);
             return BAD_VALUE;
         }
     }

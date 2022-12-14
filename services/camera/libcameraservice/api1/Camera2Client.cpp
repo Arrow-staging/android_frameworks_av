@@ -22,6 +22,7 @@
 #include <utils/Log.h>
 #include <utils/Trace.h>
 
+#include <camera/CameraUtils.h>
 #include <cutils/properties.h>
 #include <gui/Surface.h>
 #include <android/hardware/camera2/ICameraDeviceCallbacks.h>
@@ -33,7 +34,9 @@
 #include "api1/client2/CaptureSequencer.h"
 #include "api1/client2/CallbackProcessor.h"
 #include "api1/client2/ZslProcessor.h"
+#include "device3/RotateAndCropMapper.h"
 #include "utils/CameraThreadState.h"
+#include "utils/CameraServiceProxyWrapper.h"
 
 #define ALOG1(...) ALOGD_IF(gLogLevel >= 1, __VA_ARGS__);
 #define ALOG2(...) ALOGD_IF(gLogLevel >= 2, __VA_ARGS__);
@@ -50,18 +53,26 @@ using namespace camera2;
 Camera2Client::Camera2Client(const sp<CameraService>& cameraService,
         const sp<hardware::ICameraClient>& cameraClient,
         const String16& clientPackageName,
+        const std::optional<String16>& clientFeatureId,
         const String8& cameraDeviceId,
         int api1CameraId,
         int cameraFacing,
+        int sensorOrientation,
         int clientPid,
         uid_t clientUid,
-        int servicePid):
+        int servicePid,
+        bool overrideForPerfClass):
         Camera2ClientBase(cameraService, cameraClient, clientPackageName,
-                cameraDeviceId, api1CameraId, cameraFacing,
-                clientPid, clientUid, servicePid),
+                false/*systemNativeClient - since no ndk for api1*/, clientFeatureId,
+                cameraDeviceId, api1CameraId, cameraFacing, sensorOrientation, clientPid,
+                clientUid, servicePid, overrideForPerfClass, /*legacyClient*/ true),
         mParameters(api1CameraId, cameraFacing)
 {
     ATRACE_CALL();
+
+    mRotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_NONE;
+    mRotateAndCropIsSupported = false;
+    mRotateAndCropPreviewTransform = 0;
 
     SharedParameters::Lock l(mParameters);
     l.mParameters.state = Parameters::DISCONNECTED;
@@ -74,7 +85,8 @@ status_t Camera2Client::initialize(sp<CameraProviderManager> manager, const Stri
 bool Camera2Client::isZslEnabledInStillTemplate() {
     bool zslEnabled = false;
     CameraMetadata stillTemplate;
-    status_t res = mDevice->createDefaultRequest(CAMERA2_TEMPLATE_STILL_CAPTURE, &stillTemplate);
+    status_t res = mDevice->createDefaultRequest(
+            camera_request_template_t::CAMERA_TEMPLATE_STILL_CAPTURE, &stillTemplate);
     if (res == OK) {
         camera_metadata_entry_t enableZsl = stillTemplate.find(ANDROID_CONTROL_ENABLE_ZSL);
         if (enableZsl.count == 1) {
@@ -100,7 +112,7 @@ status_t Camera2Client::initializeImpl(TProviderPtr providerPtr, const String8& 
     {
         SharedParameters::Lock l(mParameters);
 
-        res = l.mParameters.initialize(mDevice.get(), mDeviceVersion);
+        res = l.mParameters.initialize(mDevice.get());
         if (res != OK) {
             ALOGE("%s: Camera %d: unable to build defaults: %s (%d)",
                     __FUNCTION__, mCameraId, strerror(-res), res);
@@ -109,6 +121,14 @@ status_t Camera2Client::initializeImpl(TProviderPtr providerPtr, const String8& 
 
         l.mParameters.isDeviceZslSupported = isZslEnabledInStillTemplate();
     }
+
+    const CameraMetadata& staticInfo = mDevice->info();
+    mRotateAndCropIsSupported = camera3::RotateAndCropMapper::isNeeded(&staticInfo);
+    // The 'mRotateAndCropMode' value only accounts for the necessary adjustment
+    // when the display rotates. The sensor orientation still needs to be calculated
+    // and applied similar to the Camera2 path.
+    CameraUtils::getRotationTransform(staticInfo, OutputConfiguration::MIRROR_MODE_AUTO,
+            &mRotateAndCropPreviewTransform);
 
     String8 threadName;
 
@@ -395,6 +415,7 @@ status_t Camera2Client::dumpClient(int fd, const Vector<String16>& args) {
 
 binder::Status Camera2Client::disconnect() {
     ATRACE_CALL();
+    nsecs_t startTime = systemTime();
     Mutex::Autolock icl(mBinderSerializationLock);
 
     binder::Status res = binder::Status::ok();
@@ -455,6 +476,9 @@ binder::Status Camera2Client::disconnect() {
     mDevice->disconnect();
 
     CameraService::Client::disconnect();
+
+    int32_t closeLatencyMs = ns2ms(systemTime() - startTime);
+    CameraServiceProxyWrapper::logClose(mCameraIdStr, closeLatencyMs);
 
     return res;
 }
@@ -732,6 +756,10 @@ status_t Camera2Client::startPreviewL(Parameters &params, bool restart) {
 
     ALOGV("%s: state == %d, restart = %d", __FUNCTION__, params.state, restart);
 
+    if (params.state == Parameters::DISCONNECTED) {
+        ALOGE("%s: Camera %d has been disconnected.", __FUNCTION__, mCameraId);
+        return INVALID_OPERATION;
+    }
     if ( (params.state == Parameters::PREVIEW ||
                     params.state == Parameters::RECORD ||
                     params.state == Parameters::VIDEO_SNAPSHOT)
@@ -924,6 +952,7 @@ status_t Camera2Client::startPreviewL(Parameters &params, bool restart) {
         return res;
     }
 
+    mCallbackProcessor->unpauseCallback();
     params.state = Parameters::PREVIEW;
     return OK;
 }
@@ -958,7 +987,13 @@ void Camera2Client::stopPreviewL() {
             FALLTHROUGH_INTENDED;
         case Parameters::RECORD:
         case Parameters::PREVIEW:
+            mCallbackProcessor->pauseCallback();
             syncWithDevice();
+            // Due to flush a camera device sync is not a sufficient
+            // guarantee that the current client parameters are
+            // correctly applied. To resolve this wait for the current
+            // request id to return in the results.
+            waitUntilCurrentRequestIdLocked();
             res = stopStream();
             if (res != OK) {
                 ALOGE("%s: Camera %d: Can't stop streaming: %s (%d)",
@@ -1654,6 +1689,14 @@ status_t Camera2Client::commandSetDisplayOrientationL(int degrees) {
                 __FUNCTION__, mCameraId, degrees);
         return BAD_VALUE;
     }
+    {
+        Mutex::Autolock icl(mRotateAndCropLock);
+        if (mRotateAndCropMode != ANDROID_SCALER_ROTATE_AND_CROP_NONE) {
+            ALOGI("%s: Rotate and crop set to: %d, skipping display orientation!", __FUNCTION__,
+                    mRotateAndCropMode);
+            transform = mRotateAndCropPreviewTransform;
+        }
+    }
     SharedParameters::Lock l(mParameters);
     if (transform != l.mParameters.previewTransform &&
             getPreviewStreamId() != NO_STREAM) {
@@ -1767,6 +1810,14 @@ void Camera2Client::notifyError(int32_t errorCode,
         case hardware::camera2::ICameraDeviceCallbacks::ERROR_CAMERA_BUFFER:
             ALOGW("%s: Received recoverable error %d from HAL - ignoring, requestId %" PRId32,
                     __FUNCTION__, errorCode, resultExtras.requestId);
+
+            if ((hardware::camera2::ICameraDeviceCallbacks::ERROR_CAMERA_REQUEST == errorCode) ||
+                    (hardware::camera2::ICameraDeviceCallbacks::ERROR_CAMERA_RESULT == errorCode)) {
+                Mutex::Autolock al(mLatestRequestMutex);
+
+                mLatestFailedRequestId = resultExtras.requestId;
+                mLatestRequestSignal.signal();
+            }
             mCaptureSequencer->notifyError(errorCode, resultExtras);
             return;
         default:
@@ -2251,6 +2302,87 @@ status_t Camera2Client::setVideoTarget(const sp<IGraphicBufferProducer>& bufferP
     }
 
     return OK;
+}
+
+status_t Camera2Client::setAudioRestriction(int /*mode*/) {
+    // Empty implementation. setAudioRestriction is hidden interface and not
+    // supported by android.hardware.Camera API
+    return INVALID_OPERATION;
+}
+
+int32_t Camera2Client::getGlobalAudioRestriction() {
+    // Empty implementation. getAudioRestriction is hidden interface and not
+    // supported by android.hardware.Camera API
+    return INVALID_OPERATION;
+}
+
+status_t Camera2Client::setCameraServiceWatchdog(bool enabled) {
+    return mDevice->setCameraServiceWatchdog(enabled);
+}
+
+status_t Camera2Client::setRotateAndCropOverride(uint8_t rotateAndCrop) {
+    if (rotateAndCrop > ANDROID_SCALER_ROTATE_AND_CROP_AUTO) return BAD_VALUE;
+
+    {
+        Mutex::Autolock icl(mRotateAndCropLock);
+        if (mRotateAndCropIsSupported) {
+            mRotateAndCropMode = rotateAndCrop;
+        } else {
+            mRotateAndCropMode = ANDROID_SCALER_ROTATE_AND_CROP_NONE;
+            return OK;
+        }
+    }
+
+    return mDevice->setRotateAndCropAutoBehavior(
+        static_cast<camera_metadata_enum_android_scaler_rotate_and_crop_t>(rotateAndCrop));
+}
+
+bool Camera2Client::supportsCameraMute() {
+    return mDevice->supportsCameraMute();
+}
+
+status_t Camera2Client::setCameraMute(bool enabled) {
+    return mDevice->setCameraMute(enabled);
+}
+
+status_t Camera2Client::waitUntilCurrentRequestIdLocked() {
+    int32_t activeRequestId = mStreamingProcessor->getActiveRequestId();
+    if (activeRequestId != 0) {
+        auto res = waitUntilRequestIdApplied(activeRequestId,
+                mDevice->getExpectedInFlightDuration());
+        if (res == TIMED_OUT) {
+            ALOGE("%s: Camera %d: Timed out waiting for current request id to return in results!",
+                    __FUNCTION__, mCameraId);
+            return res;
+        } else if (res != OK) {
+            ALOGE("%s: Camera %d: Error while waiting for current request id to return in results!",
+                    __FUNCTION__, mCameraId);
+            return res;
+        }
+    }
+
+    return OK;
+}
+
+status_t Camera2Client::waitUntilRequestIdApplied(int32_t requestId, nsecs_t timeout) {
+    Mutex::Autolock l(mLatestRequestMutex);
+    while ((mLatestRequestId != requestId) && (mLatestFailedRequestId != requestId)) {
+        nsecs_t startTime = systemTime();
+
+        auto res = mLatestRequestSignal.waitRelative(mLatestRequestMutex, timeout);
+        if (res != OK) return res;
+
+        timeout -= (systemTime() - startTime);
+    }
+
+    return (mLatestRequestId == requestId) ? OK : DEAD_OBJECT;
+}
+
+void Camera2Client::notifyRequestId(int32_t requestId) {
+    Mutex::Autolock al(mLatestRequestMutex);
+
+    mLatestRequestId = requestId;
+    mLatestRequestSignal.signal();
 }
 
 const char* Camera2Client::kAutofocusLabel = "autofocus";

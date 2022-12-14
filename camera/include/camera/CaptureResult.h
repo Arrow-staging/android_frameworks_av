@@ -70,6 +70,52 @@ struct CaptureResultExtras : public android::Parcelable {
     int32_t errorStreamId;
 
     /**
+     * For capture result errors, the physical camera ID in case the respective request contains
+     * a reference to physical camera device.
+     * Empty otherwise.
+     */
+    String16  errorPhysicalCameraId;
+
+    // The last completed frame numbers shouldn't be checked in onResultReceived() and notifyError()
+    // because the output buffers could be arriving after onResultReceived() and
+    // notifyError(). Given this constraint, we check it for each
+    // onCaptureStarted, and if there is no further onCaptureStarted(),
+    // check for onDeviceIdle() to clear out all pending frame numbers.
+
+    /**
+     * The latest regular request frameNumber for which all buffers and capture result have been
+     * returned or notified as an BUFFER_ERROR/RESULT_ERROR/REQUEST_ERROR. -1 if
+     * none has completed.
+     */
+    int64_t lastCompletedRegularFrameNumber;
+
+    /**
+     * The latest reprocess request frameNumber for which all buffers and capture result have been
+     * returned or notified as an BUFFER_ERROR/RESULT_ERROR/REQUEST_ERROR. -1 if
+     * none has completed.
+     */
+    int64_t lastCompletedReprocessFrameNumber;
+
+    /**
+     * The latest Zsl request frameNumber for which all buffers and capture result have been
+     * returned or notified as an BUFFER_ERROR/RESULT_ERROR/REQUEST_ERROR. -1 if
+     * none has completed.
+     */
+    int64_t lastCompletedZslFrameNumber;
+
+    /**
+     * Whether the readoutTimestamp variable is valid and should be used.
+     */
+    bool hasReadoutTimestamp;
+
+    /**
+     * The readout timestamp of the capture. Its value is equal to the
+     * start-of-exposure timestamp plus the exposure time (and a possible fixed
+     * offset due to sensor crop).
+     */
+    int64_t readoutTimestamp;
+
+    /**
      * Constructor initializes object as invalid by setting requestId to be -1.
      */
     CaptureResultExtras()
@@ -79,7 +125,13 @@ struct CaptureResultExtras : public android::Parcelable {
           precaptureTriggerId(0),
           frameNumber(0),
           partialResultCount(0),
-          errorStreamId(-1) {
+          errorStreamId(-1),
+          errorPhysicalCameraId(),
+          lastCompletedRegularFrameNumber(-1),
+          lastCompletedReprocessFrameNumber(-1),
+          lastCompletedZslFrameNumber(-1),
+          hasReadoutTimestamp(false),
+          readoutTimestamp(0) {
     }
 
     /**
@@ -126,6 +178,8 @@ struct CaptureResult : public virtual LightRefBase<CaptureResult> {
     CaptureResult();
 
     CaptureResult(const CaptureResult& otherResult);
+
+    CaptureResult(CaptureResult &&captureResult);
 
     status_t                readFromParcel(android::Parcel* parcel);
     status_t                writeToParcel(android::Parcel* parcel) const;

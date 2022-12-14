@@ -25,20 +25,20 @@
 #include "client/AudioStreamInternal.h"
 
 using android::sp;
-using android::IAAudioService;
 
 namespace aaudio {
 
 class AudioStreamInternalPlay : public AudioStreamInternal {
 public:
-    AudioStreamInternalPlay(AAudioServiceInterface  &serviceInterface, bool inService = false);
-    virtual ~AudioStreamInternalPlay();
+    explicit AudioStreamInternalPlay(AAudioServiceInterface  &serviceInterface,
+                                     bool inService = false);
+    virtual ~AudioStreamInternalPlay() = default;
 
     aaudio_result_t open(const AudioStreamBuilder &builder) override;
 
-    aaudio_result_t requestPause() override;
+    aaudio_result_t requestPause_l() override;
 
-    aaudio_result_t requestFlush() override;
+    aaudio_result_t requestFlush_l() override;
 
     bool isFlushSupported() const override {
         // Only implement FLUSH for OUTPUT streams.
@@ -65,7 +65,9 @@ public:
 
 protected:
 
-    void advanceClientToMatchServerPosition() override;
+    void prepareBuffersForStart() override;
+
+    void advanceClientToMatchServerPosition(int32_t serverMargin) override;
 
     void onFlushFromServer() override;
 
@@ -91,8 +93,6 @@ private:
      */
     aaudio_result_t writeNowWithConversion(const void *buffer,
                                            int32_t numFrames);
-
-    int64_t                  mLastFramesRead = 0; // used to prevent retrograde motion
 
     AAudioFlowGraph          mFlowGraph;
 

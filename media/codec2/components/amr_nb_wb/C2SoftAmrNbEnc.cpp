@@ -27,36 +27,33 @@
 
 namespace android {
 
+namespace {
+
 constexpr char COMPONENT_NAME[] = "c2.android.amrnb.encoder";
 
-class C2SoftAmrNbEnc::IntfImpl : public C2InterfaceHelper {
-   public:
-    explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper>& helper)
-        : C2InterfaceHelper(helper) {
+}  // namespace
+
+
+class C2SoftAmrNbEnc::IntfImpl : public SimpleInterface<void>::BaseParams {
+public:
+    explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
+        : SimpleInterface<void>::BaseParams(
+                helper,
+                COMPONENT_NAME,
+                C2Component::KIND_ENCODER,
+                C2Component::DOMAIN_AUDIO,
+                MEDIA_MIMETYPE_AUDIO_AMR_NB) {
+        noPrivateBuffers();
+        noInputReferences();
+        noOutputReferences();
+        noInputLatency();
+        noTimeStretch();
         setDerivedInstance(this);
 
         addParameter(
-            DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(
-                    new C2StreamBufferTypeSetting::input(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-            DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(
-                    new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-            DefineParam(mInputMediaType, C2_PARAMKEY_INPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::input>(
-                    MEDIA_MIMETYPE_AUDIO_RAW))
-                .build());
-
-        addParameter(
-            DefineParam(mOutputMediaType, C2_PARAMKEY_OUTPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::output>(
-                    MEDIA_MIMETYPE_AUDIO_AMR_NB))
+                DefineParam(mAttrib, C2_PARAMKEY_COMPONENT_ATTRIBUTES)
+                .withConstValue(new C2ComponentAttributesSetting(
+                    C2Component::ATTRIB_IS_TEMPORAL))
                 .build());
 
         addParameter(
@@ -91,11 +88,7 @@ class C2SoftAmrNbEnc::IntfImpl : public C2InterfaceHelper {
     uint32_t getChannelCount() const { return mChannelCount->value; }
     uint32_t getBitrate() const { return mBitrate->value; }
 
-   private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
+private:
     std::shared_ptr<C2StreamSampleRateInfo::input> mSampleRate;
     std::shared_ptr<C2StreamChannelCountInfo::input> mChannelCount;
     std::shared_ptr<C2StreamBitrateInfo::output> mBitrate;
@@ -232,7 +225,7 @@ void C2SoftAmrNbEnc::process(
         work->result = C2_CORRUPTED;
         return;
     }
-    uint64_t outTimeStamp =
+    int64_t outTimeStamp =
         mProcessedSamples * 1000000ll / mIntf->getSampleRate();
     size_t inPos = 0;
     size_t outPos = 0;
@@ -273,7 +266,7 @@ void C2SoftAmrNbEnc::process(
     ALOGV("causal sample size %d", mFilledLen);
     if (mIsFirst && outPos != 0) {
         mIsFirst = false;
-        mAnchorTimeStamp = work->input.ordinal.timestamp.peekull();
+        mAnchorTimeStamp = work->input.ordinal.timestamp.peekll();
     }
     fillEmptyWork(work);
     if (outPos != 0) {
@@ -344,11 +337,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftAmrNbEncFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

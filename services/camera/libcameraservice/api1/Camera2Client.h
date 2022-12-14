@@ -83,6 +83,14 @@ public:
     virtual void            notifyError(int32_t errorCode,
                                         const CaptureResultExtras& resultExtras);
     virtual status_t        setVideoTarget(const sp<IGraphicBufferProducer>& bufferProducer);
+    virtual status_t        setAudioRestriction(int mode);
+    virtual int32_t         getGlobalAudioRestriction();
+    virtual status_t        setRotateAndCropOverride(uint8_t rotateAndCrop);
+
+    virtual bool            supportsCameraMute();
+    virtual status_t        setCameraMute(bool enabled);
+
+    virtual status_t        setCameraServiceWatchdog(bool enabled);
 
     /**
      * Interface used by CameraService
@@ -91,12 +99,15 @@ public:
     Camera2Client(const sp<CameraService>& cameraService,
             const sp<hardware::ICameraClient>& cameraClient,
             const String16& clientPackageName,
+            const std::optional<String16>& clientFeatureId,
             const String8& cameraDeviceId,
             int api1CameraId,
             int cameraFacing,
+            int sensorOrientation,
             int clientPid,
             uid_t clientUid,
-            int servicePid);
+            int servicePid,
+            bool overrideForPerfClass);
 
     virtual ~Camera2Client();
 
@@ -121,6 +132,8 @@ public:
      */
 
     camera2::SharedParameters& getParameters();
+
+    void notifyRequestId(int32_t requestId);
 
     int getPreviewStreamId() const;
     int getCaptureStreamId() const;
@@ -227,6 +240,22 @@ private:
     status_t initializeImpl(TProviderPtr providerPtr, const String8& monitorTags);
 
     bool isZslEnabledInStillTemplate();
+    // The current rotate & crop mode passed by camera service
+    uint8_t mRotateAndCropMode;
+    // Synchronize access to 'mRotateAndCropMode'
+    mutable Mutex mRotateAndCropLock;
+    // Contains the preview stream transformation that would normally be applied
+    // when the display rotation is 0
+    int mRotateAndCropPreviewTransform;
+    // Flag indicating camera device support for the rotate & crop interface
+    bool mRotateAndCropIsSupported;
+
+    mutable Mutex mLatestRequestMutex;
+    Condition mLatestRequestSignal;
+    int32_t mLatestRequestId = -1;
+    int32_t mLatestFailedRequestId = -1;
+    status_t waitUntilRequestIdApplied(int32_t requestId, nsecs_t timeout);
+    status_t waitUntilCurrentRequestIdLocked();
 };
 
 }; // namespace android

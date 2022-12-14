@@ -19,10 +19,9 @@
 
 #include <codec2/hidl/1.0/ComponentStore.h>
 
-#include <android/hardware/graphics/bufferqueue/1.0/IGraphicBufferProducer.h>
+#include <android/hardware/graphics/bufferqueue/2.0/IGraphicBufferProducer.h>
 #include <android/hardware/media/c2/1.0/IInputSink.h>
 #include <android/hardware/media/c2/1.0/IInputSurface.h>
-#include <gui/IGraphicBufferProducer.h>
 #include <hidl/Status.h>
 #include <media/stagefright/bqhelper/GraphicBufferSource.h>
 
@@ -44,7 +43,7 @@ using ::android::sp;
 
 struct InputSurface : public IInputSurface {
 
-    typedef ::android::hardware::graphics::bufferqueue::V1_0::
+    typedef ::android::hardware::graphics::bufferqueue::V2_0::
             IGraphicBufferProducer HGraphicBufferProducer;
 
     typedef ::android::
@@ -58,29 +57,25 @@ struct InputSurface : public IInputSurface {
             const sp<IInputSink>& sink,
             connect_cb _hidl_cb) override;
 
+    InputSurface(
+            const std::shared_ptr<ParameterCache>& cache,
+            const std::shared_ptr<C2ReflectorHelper>& reflector,
+            const sp<HGraphicBufferProducer>& base,
+            const sp<GraphicBufferSource>& source);
+
 protected:
 
     class Interface;
     class ConfigurableIntf;
 
-    sp<ComponentStore> mStore;
+    std::shared_ptr<ParameterCache> mParameterCache;
     sp<HGraphicBufferProducer> mProducer;
     sp<GraphicBufferSource> mSource;
     std::shared_ptr<Interface> mIntf;
     sp<CachedConfigurable> mConfigurable;
 
-    InputSurface(
-            const sp<ComponentStore>& store,
-            const std::shared_ptr<C2ReflectorHelper>& reflector,
-            const sp<HGraphicBufferProducer>& base,
-            const sp<GraphicBufferSource>& source);
-
     virtual ~InputSurface() override = default;
-
-    friend struct ComponentStore;
-
 };
-
 
 }  // namespace utils
 }  // namespace V1_0

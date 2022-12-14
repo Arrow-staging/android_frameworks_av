@@ -53,15 +53,17 @@ class Camera3InputStream : public Camera3IOStreamBase,
     sp<IGraphicBufferProducer> mProducer;
     Vector<BufferItem> mBuffersInFlight;
 
-    static const String8 DUMMY_ID;
+    static const String8 FAKE_ID;
 
     /**
      * Camera3IOStreamBase
      */
     virtual status_t returnBufferCheckedLocked(
-            const camera3_stream_buffer &buffer,
+            const camera_stream_buffer &buffer,
             nsecs_t timestamp,
+            nsecs_t readoutTimestamp,
             bool output,
+            int32_t transform,
             const std::vector<size_t>& surface_ids,
             /*out*/
             sp<Fence> *releaseFenceOut);
@@ -70,9 +72,9 @@ class Camera3InputStream : public Camera3IOStreamBase,
      * Camera3Stream interface
      */
 
-    virtual status_t getInputBufferLocked(camera3_stream_buffer *buffer);
+    virtual status_t getInputBufferLocked(camera_stream_buffer *buffer, Size *size);
     virtual status_t returnInputBufferLocked(
-            const camera3_stream_buffer &buffer);
+            const camera_stream_buffer &buffer);
     virtual status_t getInputBufferProducerLocked(
             sp<IGraphicBufferProducer> *producer);
     virtual status_t disconnectLocked();

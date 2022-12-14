@@ -21,20 +21,21 @@
 
 #include <sys/types.h>
 
+#include <media/AudioContainers.h>
 #include <utils/Errors.h>
 #include <utils/Timers.h>
 #include <utils/KeyedVector.h>
 #include <system/audio.h>
 #include "AudioIODescriptorInterface.h"
-#include "AudioPort.h"
 #include "ClientDescriptor.h"
 #include "DeviceDescriptor.h"
+#include "PolicyAudioPort.h"
 #include <vector>
 
 namespace android {
 
 class IOProfile;
-class AudioMix;
+class AudioPolicyMix;
 class AudioPolicyClientInterface;
 
 class ActivityTracking
@@ -98,7 +99,7 @@ public:
         ActivityTracking::dump(dst, spaces);
         dst->appendFormat(", Volume: %.03f, MuteCount: %02d\n", mCurVolumeDb, mMuteCount);
     }
-    void setVolume(float volume) { mCurVolumeDb = volume; }
+    void setVolume(float volumeDb) { mCurVolumeDb = volumeDb; }
     float getVolume() const { return mCurVolumeDb; }
 
 private:
@@ -107,7 +108,7 @@ private:
 };
 /**
  * Note: volume activities shall be indexed by CurvesId if we want to allow multiple
- * curves per volume group, inferring a mute management or volume balancing between HW and SW is
+ * curves per volume source, inferring a mute management or volume balancing between HW and SW is
  * done
  */
 using VolumeActivities = std::map<VolumeSource, VolumeActivity>;
@@ -138,27 +139,28 @@ using RoutingActivities = std::map<product_strategy_t, RoutingActivity>;
 
 // descriptor for audio outputs. Used to maintain current configuration of each opened audio output
 // and keep track of the usage of this output by each audio stream type.
-class AudioOutputDescriptor: public AudioPortConfig, public AudioIODescriptorInterface
-    , public ClientMapHandler<TrackClientDescriptor>
+class AudioOutputDescriptor: public AudioPortConfig,
+        public PolicyAudioPortConfig,
+        public AudioIODescriptorInterface,
+        public ClientMapHandler<TrackClientDescriptor>
 {
 public:
-    AudioOutputDescriptor(const sp<AudioPort>& port,
+    AudioOutputDescriptor(const sp<PolicyAudioPort>& policyAudioPort,
                           AudioPolicyClientInterface *clientInterface);
     virtual ~AudioOutputDescriptor() {}
 
-    void dump(String8 *dst) const override;
+    void dump(String8 *dst, int spaces, const char* extraInfo = nullptr) const override;
     void        log(const char* indent);
 
-    audio_port_handle_t getId() const;
     virtual DeviceVector devices() const { return mDevices; }
     bool sharesHwModuleWith(const sp<AudioOutputDescriptor>& outputDesc);
     virtual DeviceVector supportedDevices() const  { return mDevices; }
     virtual bool isDuplicated() const { return false; }
     virtual uint32_t latency() { return 0; }
-    virtual bool isFixedVolume(audio_devices_t device);
-    virtual bool setVolume(float volume,
-                           audio_stream_type_t stream,
-                           audio_devices_t device,
+    virtual bool isFixedVolume(const DeviceTypeSet& deviceTypes);
+    virtual bool setVolume(float volumeDb, bool muted,
+                           VolumeSource volumeSource, const StreamTypeVector &streams,
+                           const DeviceTypeSet& deviceTypes,
                            uint32_t delayMs,
                            bool force);
 
@@ -180,6 +182,7 @@ public:
      * Active ref count of the client will be incremented/decremented through setActive API
      */
     virtual void setClientActive(const sp<TrackClientDescriptor>& client, bool active);
+    bool isClientActive(const sp<TrackClientDescriptor>& client);
 
     bool isActive(uint32_t inPastMs) const;
     bool isActive(VolumeSource volumeSource = VOLUME_SOURCE_NONE,
@@ -219,10 +222,10 @@ public:
     {
         return mVolumeActivities[vs].decMuteCount();
     }
-    void setCurVolume(VolumeSource vs, float volume)
+    void setCurVolume(VolumeSource vs, float volumeDb)
     {
-        // Even if not activity for this group registered, need to create anyway
-        mVolumeActivities[vs].setVolume(volume);
+        // Even if not activity for this source registered, need to create anyway
+        mVolumeActivities[vs].setVolume(volumeDb);
     }
     float getCurVolume(VolumeSource vs) const
     {
@@ -245,10 +248,20 @@ public:
         mRoutingActivities[ps].setMutedByDevice(isMuted);
     }
 
+    // PolicyAudioPortConfig
+    virtual sp<PolicyAudioPort> getPolicyAudioPort() const
+    {
+        return mPolicyAudioPort;
+    }
+
+    // AudioPortConfig
+    virtual status_t applyAudioPortConfig(const struct audio_port_config *config,
+                                          struct audio_port_config *backupConfig = NULL);
     virtual void toAudioPortConfig(struct audio_port_config *dstConfig,
                            const struct audio_port_config *srcConfig = NULL) const;
-    virtual sp<AudioPort> getAudioPort() const { return mPort; }
-    virtual void toAudioPort(struct audio_port *port) const;
+    virtual sp<AudioPort> getAudioPort() const { return mPolicyAudioPort->asAudioPort(); }
+
+    virtual void toAudioPort(struct audio_port_v7 *port) const;
 
     audio_module_handle_t getModuleHandle() const;
 
@@ -256,6 +269,14 @@ public:
     audio_config_base_t getConfig() const override;
     audio_patch_handle_t getPatchHandle() const override;
     void setPatchHandle(audio_patch_handle_t handle) override;
+    bool isMmap() override {
+        if (const auto policyPort = getPolicyAudioPort(); policyPort != nullptr) {
+            if (const auto port = policyPort->asAudioPort(); port != nullptr) {
+                return port->isMmap();
+            }
+        }
+        return false;
+    }
 
     TrackClientVector clientsList(bool activeOnly = false,
                                   product_strategy_t strategy = PRODUCT_STRATEGY_NONE,
@@ -280,15 +301,23 @@ public:
         return mActiveClients;
     }
 
+    bool useHwGain() const
+    {
+        return !devices().isEmpty() ? devices().itemAt(0)->hasGainController() : false;
+    }
+    bool isRouted() const { return mPatchHandle != AUDIO_PATCH_HANDLE_NONE; }
+
     DeviceVector mDevices; /**< current devices this output is routed to */
-    AudioMix *mPolicyMix = nullptr;              // non NULL when used by a dynamic policy
+    wp<AudioPolicyMix> mPolicyMix;  // non NULL when used by a dynamic policy
+
+    virtual uint32_t getRecommendedMuteDurationMs() const { return 0; }
 
 protected:
-    const sp<AudioPort> mPort;
+    const sp<PolicyAudioPort> mPolicyAudioPort;
     AudioPolicyClientInterface * const mClientInterface;
     uint32_t mGlobalActiveCount = 0;  // non-client-specific active count
     audio_patch_handle_t mPatchHandle = AUDIO_PATCH_HANDLE_NONE;
-    audio_port_handle_t mId = AUDIO_PORT_HANDLE_NONE;
+    audio_output_flags_t& mFlags = AudioPortConfig::mFlags.output;
 
     // The ActiveClients shows the clients that contribute to the @VolumeSource counts
     // and may include upstream clients from a duplicating thread.
@@ -309,15 +338,17 @@ public:
                             AudioPolicyClientInterface *clientInterface);
     virtual ~SwAudioOutputDescriptor() {}
 
-            void dump(String8 *dst) const override;
+    void dump(String8 *dst, int spaces, const char* extraInfo = nullptr) const override;
     virtual DeviceVector devices() const;
     void setDevices(const DeviceVector &devices) { mDevices = devices; }
     bool sharesHwModuleWith(const sp<SwAudioOutputDescriptor>& outputDesc);
     virtual DeviceVector supportedDevices() const;
-    virtual bool deviceSupportsEncodedFormats(audio_devices_t device);
+    virtual bool devicesSupportEncodedFormats(const DeviceTypeSet& deviceTypes);
+    virtual bool containsSingleDeviceSupportingEncodedFormats(
+            const sp<DeviceDescriptor>& device) const;
     virtual uint32_t latency();
     virtual bool isDuplicated() const { return (mOutput1 != NULL && mOutput2 != NULL); }
-    virtual bool isFixedVolume(audio_devices_t device);
+    virtual bool isFixedVolume(const DeviceTypeSet& deviceTypes);
     sp<SwAudioOutputDescriptor> subOutput1() { return mOutput1; }
     sp<SwAudioOutputDescriptor> subOutput2() { return mOutput2; }
     void setClientActive(const sp<TrackClientDescriptor>& client, bool active) override;
@@ -327,17 +358,33 @@ public:
             setClientActive(client, false);
         }
     }
-    virtual bool setVolume(float volume,
-                           audio_stream_type_t stream,
-                           audio_devices_t device,
+
+    /**
+     * @brief setSwMute for SwOutput routed on a device that supports Hw Gain, this function allows
+     * to mute the tracks associated to a given volume source only.
+     * As an output may host one or more source(s), and as AudioPolicyManager may dispatch or not
+     * the volume change request according to the priority of the volume source to control the
+     * unique hw gain controller, a separated API allows to force a mute/unmute of a volume source.
+     * @param muted true to mute, false otherwise
+     * @param vs volume source to be considered
+     * @param device scoped for the change
+     * @param delayMs potentially applyed to prevent cut sounds.
+     */
+    void setSwMute(bool muted, VolumeSource vs, const StreamTypeVector &streams,
+                   const DeviceTypeSet& device, uint32_t delayMs);
+
+    virtual bool setVolume(float volumeDb, bool muted,
+                           VolumeSource volumeSource, const StreamTypeVector &streams,
+                           const DeviceTypeSet& device,
                            uint32_t delayMs,
                            bool force);
 
     virtual void toAudioPortConfig(struct audio_port_config *dstConfig,
                            const struct audio_port_config *srcConfig = NULL) const;
-    virtual void toAudioPort(struct audio_port *port) const;
+    virtual void toAudioPort(struct audio_port_v7 *port) const;
 
-        status_t open(const audio_config_t *config,
+        status_t open(const audio_config_t *halConfig,
+                      const audio_config_base_t *mixerConfig,
                       const DeviceVector &devices,
                       audio_stream_type_t stream,
                       audio_output_flags_t flags,
@@ -373,6 +420,14 @@ public:
     bool supportsAllDevices(const DeviceVector &devices) const;
 
     /**
+     * @brief supportsDevicesForPlayback
+     * @param devices to be checked against
+     * @return true if the devices is a supported combo for playback
+     *         false otherwise
+     */
+    bool supportsDevicesForPlayback(const DeviceVector &devices) const;
+
+    /**
      * @brief filterSupportedDevices takes a vector of devices and filters them according to the
      * device supported by this output (the profile from which this output derives from)
      * @param devices reference device vector to be filtered
@@ -381,14 +436,20 @@ public:
      */
     DeviceVector filterSupportedDevices(const DeviceVector &devices) const;
 
+    uint32_t getRecommendedMuteDurationMs() const override;
+
+    void setTracksInvalidatedStatusByStrategy(product_strategy_t strategy);
+
     const sp<IOProfile> mProfile;          // I/O profile this output derives from
     audio_io_handle_t mIoHandle;           // output handle
     uint32_t mLatency;                  //
-    audio_output_flags_t mFlags;   //
+    using AudioOutputDescriptor::mFlags;
     sp<SwAudioOutputDescriptor> mOutput1;    // used by duplicated outputs: first output
     sp<SwAudioOutputDescriptor> mOutput2;    // used by duplicated outputs: second output
     uint32_t mDirectOpenCount; // number of clients using this output (direct outputs only)
     audio_session_t mDirectClientSession; // session id of the direct output client
+    bool mPendingReopenToQueryProfiles = false;
+    audio_channel_mask_t mMixerChannelMask = AUDIO_CHANNEL_NONE;
 };
 
 // Audio output driven by an input device directly.
@@ -399,17 +460,17 @@ public:
                             AudioPolicyClientInterface *clientInterface);
     virtual ~HwAudioOutputDescriptor() {}
 
-            void dump(String8 *dst) const override;
+    void dump(String8 *dst, int spaces, const char* extraInfo) const override;
 
-    virtual bool setVolume(float volume,
-                           audio_stream_type_t stream,
-                           audio_devices_t device,
+    virtual bool setVolume(float volumeDb, bool muted,
+                           VolumeSource volumeSource, const StreamTypeVector &streams,
+                           const DeviceTypeSet& deviceTypes,
                            uint32_t delayMs,
                            bool force);
 
     virtual void toAudioPortConfig(struct audio_port_config *dstConfig,
                            const struct audio_port_config *srcConfig = NULL) const;
-    virtual void toAudioPort(struct audio_port *port) const;
+    virtual void toAudioPort(struct audio_port_v7 *port) const;
 
     const sp<SourceClientDescriptor> mSource;
 
@@ -422,7 +483,7 @@ public:
     bool isActive(VolumeSource volumeSource, uint32_t inPastMs = 0) const;
 
     /**
-     * return whether any source contributing to VolumeSource is playing remotely, override 
+     * return whether any source contributing to VolumeSource is playing remotely, override
      * to change the definition of
      * local/remote playback, used for instance by notification manager to not make
      * media players lose audio focus when not playing locally
@@ -457,6 +518,14 @@ public:
                                       uint32_t inPastMs = 0, nsecs_t sysTime = 0) const;
 
     /**
+     * @brief isStrategyActive checks if the given strategy is active
+     * on the given output
+     * @param ps product strategy to be checked upon activity status
+     * @return true if an output following the strategy is active, false otherwise
+     */
+    bool isStrategyActive(product_strategy_t ps) const;
+
+    /**
      * @brief clearSessionRoutesForDevice: when a device is disconnected, and if this device has
      * been chosen as the preferred device by any client, the policy manager shall
      * prevent from using this device any more by clearing all the session routes involving this
@@ -476,11 +545,6 @@ public:
      */
     bool isA2dpOffloadedOnPrimary() const;
 
-    /**
-     * returns true if A2DP is supported (either via hardware offload or software encoding)
-     */
-    bool isA2dpSupported() const;
-
     sp<SwAudioOutputDescriptor> getOutputFromId(audio_port_handle_t id) const;
 
     sp<SwAudioOutputDescriptor> getPrimaryOutput() const;
@@ -488,8 +552,8 @@ public:
     /**
      * @brief isAnyOutputActive checks if any output is active (aka playing) except the one(s) that
      * hold the volume source to be ignored
-     * @param volumeSourceToIgnore source not considered in the activity detection
-     * @return true if any output is active for any source except the one to be ignored
+     * @param volumeSourceToIgnore source not to be considered in the activity detection
+     * @return true if any output is active for any volume source except the one to be ignored
      */
     bool isAnyOutputActive(VolumeSource volumeSourceToIgnore) const
     {
@@ -506,6 +570,11 @@ public:
 
     sp<SwAudioOutputDescriptor> getOutputForClient(audio_port_handle_t portId);
 
+    /**
+     * return whether any output is active and routed to any of the specified devices
+     */
+    bool isAnyDeviceTypeActive(const DeviceTypeSet& deviceTypes) const;
+
     void dump(String8 *dst) const;
 };
 
@@ -518,8 +587,8 @@ public:
     /**
      * @brief isAnyOutputActive checks if any output is active (aka playing) except the one(s) that
      * hold the volume source to be ignored
-     * @param volumeSourceToIgnore source not considered in the activity detection
-     * @return true if any output is active for any source except the one to be ignored
+     * @param volumeSourceToIgnore source not to be considered in the activity detection
+     * @return true if any output is active for any volume source except the one to be ignored
      */
     bool isAnyOutputActive(VolumeSource volumeSourceToIgnore) const
     {

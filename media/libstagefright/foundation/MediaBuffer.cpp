@@ -51,12 +51,12 @@ MediaBuffer::MediaBuffer(size_t size)
       mRangeLength(size),
       mOwnsData(true),
       mMetaData(new MetaDataBase) {
-#ifndef NO_IMEMORY
+#if !defined(NO_IMEMORY) && !defined(__ANDROID_APEX__)
     if (size < kSharedMemThreshold
             || std::atomic_load_explicit(&mUseSharedMemory, std::memory_order_seq_cst) == 0) {
 #endif
         mData = malloc(size);
-#ifndef NO_IMEMORY
+#if !defined(NO_IMEMORY) && !defined(__ANDROID_APEX__)
     } else {
         ALOGV("creating memoryDealer");
         size_t newSize = 0;
@@ -72,7 +72,7 @@ MediaBuffer::MediaBuffer(size_t size)
             }
         } else {
             getSharedControl()->clear();
-            mData = (uint8_t *)mMemory->pointer() + sizeof(SharedControl);
+            mData = (uint8_t *)mMemory->unsecurePointer() + sizeof(SharedControl);
             ALOGV("Allocated shared mem buffer of size %zu @ %p", size, mData);
         }
     }

@@ -73,6 +73,9 @@ enum {
     METADATA_KEY_COLOR_RANGE     = 37,
     METADATA_KEY_SAMPLERATE      = 38,
     METADATA_KEY_BITS_PER_SAMPLE = 39,
+    METADATA_KEY_VIDEO_CODEC_MIME_TYPE = 40,
+    METADATA_KEY_XMP_OFFSET      = 41,
+    METADATA_KEY_XMP_LENGTH      = 42,
 
     // Add more here...
 };
@@ -98,9 +101,8 @@ public:
             int colorFormat = HAL_PIXEL_FORMAT_RGB_565, bool metaOnly = false, bool thumbnail = false);
     sp<IMemory> getImageRectAtIndex(
             int index, int colorFormat, int left, int top, int right, int bottom);
-    status_t getFrameAtIndex(
-            std::vector<sp<IMemory> > *frames, int frameIndex, int numFrames = 1,
-            int colorFormat = HAL_PIXEL_FORMAT_RGB_565, bool metaOnly = false);
+    sp<IMemory>  getFrameAtIndex(
+            int index, int colorFormat = HAL_PIXEL_FORMAT_RGB_565, bool metaOnly = false);
     sp<IMemory> extractAlbumArt();
     const char* extractMetadata(int keyCode);
 

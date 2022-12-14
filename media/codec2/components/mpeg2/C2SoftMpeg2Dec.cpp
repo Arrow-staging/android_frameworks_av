@@ -29,7 +29,8 @@
 #include "impeg2d.h"
 
 namespace android {
-
+constexpr size_t kMinInputBufferSize = 2 * 1024 * 1024;
+constexpr size_t kMaxDimension = 1920;
 constexpr char COMPONENT_NAME[] = "c2.android.mpeg2.decoder";
 
 class C2SoftMpeg2Dec::IntfImpl : public SimpleInterface<void>::BaseParams {
@@ -47,6 +48,12 @@ public:
         noInputLatency();
         noTimeStretch();
 
+        // TODO: Proper support for reorder depth.
+        addParameter(
+                DefineParam(mActualOutputDelay, C2_PARAMKEY_OUTPUT_DELAY)
+                .withConstValue(new C2PortActualDelayTuning::output(3u))
+                .build());
+
         // TODO: output latency and reordering
 
         addParameter(
@@ -58,8 +65,8 @@ public:
                 DefineParam(mSize, C2_PARAMKEY_PICTURE_SIZE)
                 .withDefault(new C2StreamPictureSizeInfo::output(0u, 320, 240))
                 .withFields({
-                    C2F(mSize, width).inRange(16, 1920, 4),
-                    C2F(mSize, height).inRange(16, 1088, 4),
+                    C2F(mSize, width).inRange(16, kMaxDimension, 2),
+                    C2F(mSize, height).inRange(16, kMaxDimension, 2),
                 })
                 .withSetter(SizeSetter)
                 .build());
@@ -85,15 +92,15 @@ public:
                 DefineParam(mMaxSize, C2_PARAMKEY_MAX_PICTURE_SIZE)
                 .withDefault(new C2StreamMaxPictureSizeTuning::output(0u, 320, 240))
                 .withFields({
-                    C2F(mSize, width).inRange(2, 1920, 2),
-                    C2F(mSize, height).inRange(2, 1088, 2),
+                    C2F(mSize, width).inRange(2, kMaxDimension, 2),
+                    C2F(mSize, height).inRange(2, kMaxDimension, 2),
                 })
                 .withSetter(MaxPictureSizeSetter, mSize)
                 .build());
 
         addParameter(
                 DefineParam(mMaxInputSize, C2_PARAMKEY_INPUT_MAX_BUFFER_SIZE)
-                .withDefault(new C2StreamMaxBufferSizeInfo::input(0u, 320 * 240 * 3 / 2))
+                .withDefault(new C2StreamMaxBufferSizeInfo::input(0u, kMinInputBufferSize))
                 .withFields({
                     C2F(mMaxInputSize, value).any(),
                 })
@@ -198,8 +205,8 @@ public:
                                     const C2P<C2StreamPictureSizeInfo::output> &size) {
         (void)mayBlock;
         // TODO: get max width/height from the size's field helpers vs. hardcoding
-        me.set().width = c2_min(c2_max(me.v.width, size.v.width), 1920u);
-        me.set().height = c2_min(c2_max(me.v.height, size.v.height), 1088u);
+        me.set().width = c2_min(c2_max(me.v.width, size.v.width), kMaxDimension);
+        me.set().height = c2_min(c2_max(me.v.height, size.v.height), kMaxDimension);
         return C2R::Ok();
     }
 
@@ -207,7 +214,8 @@ public:
                                   const C2P<C2StreamMaxPictureSizeTuning::output> &maxSize) {
         (void)mayBlock;
         // assume compression ratio of 1
-        me.set().value = (((maxSize.v.width + 15) / 16) * ((maxSize.v.height + 15) / 16) * 384);
+        me.set().value = c2_max((((maxSize.v.width + 15) / 16)
+                * ((maxSize.v.height + 15) / 16) * 384), kMinInputBufferSize);
         return C2R::Ok();
     }
 
@@ -315,7 +323,8 @@ C2SoftMpeg2Dec::C2SoftMpeg2Dec(
         mOutBufferDrain(nullptr),
         mIvColorformat(IV_YUV_420P),
         mWidth(320),
-        mHeight(240) {
+        mHeight(240),
+        mOutIndex(0u) {
     // If input dump is enabled, then open create an empty file
     GENERATE_FILE_NAMES();
     CREATE_DUMP_FILE(mInFile);
@@ -563,7 +572,7 @@ status_t C2SoftMpeg2Dec::initDecoder() {
     if (OK != createDecoder()) return UNKNOWN_ERROR;
 
     mNumCores = MIN(getCpuCoreCount(), MAX_NUM_CORES);
-    mStride = ALIGN64(mWidth);
+    mStride = ALIGN128(mWidth);
     mSignalledError = false;
     resetPlugin();
     (void) setNumCores();
@@ -581,9 +590,19 @@ bool C2SoftMpeg2Dec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
                                    size_t inSize,
                                    uint32_t tsMarker) {
     uint32_t displayStride = mStride;
+    if (outBuffer) {
+        C2PlanarLayout layout;
+        layout = outBuffer->layout();
+        displayStride = layout.planes[C2PlanarLayout::PLANE_Y].rowInc;
+    }
     uint32_t displayHeight = mHeight;
     size_t lumaSize = displayStride * displayHeight;
     size_t chromaSize = lumaSize >> 2;
+
+    if (mStride != displayStride) {
+        mStride = displayStride;
+        if (OK != setParams(mStride)) return false;
+    }
 
     ps_decode_ip->u4_size = sizeof(ivd_video_decode_ip_t);
     ps_decode_ip->e_cmd = IVD_CMD_VIDEO_DECODE;
@@ -600,7 +619,7 @@ bool C2SoftMpeg2Dec::setDecodeArgs(ivd_video_decode_ip_t *ps_decode_ip,
     ps_decode_ip->s_out_buffer.u4_min_out_buf_size[1] = chromaSize;
     ps_decode_ip->s_out_buffer.u4_min_out_buf_size[2] = chromaSize;
     if (outBuffer) {
-        if (outBuffer->width() < displayStride || outBuffer->height() < displayHeight) {
+        if (outBuffer->height() < displayHeight) {
             ALOGE("Output buffer too small: provided (%dx%d) required (%ux%u)",
                   outBuffer->width(), outBuffer->height(), displayStride, displayHeight);
             return false;
@@ -712,8 +731,7 @@ status_t C2SoftMpeg2Dec::resetDecoder() {
 
 void C2SoftMpeg2Dec::resetPlugin() {
     mSignalledOutputEos = false;
-    gettimeofday(&mTimeStart, nullptr);
-    gettimeofday(&mTimeEnd, nullptr);
+    mTimeStart = mTimeEnd = systemTime();
 }
 
 status_t C2SoftMpeg2Dec::deleteDecoder() {
@@ -766,6 +784,33 @@ void C2SoftMpeg2Dec::finishWork(uint64_t index, const std::unique_ptr<C2Work> &w
         buffer->setInfo(mIntf->getColorAspects_l());
     }
 
+    class FillWork {
+       public:
+        FillWork(uint32_t flags, C2WorkOrdinalStruct ordinal,
+                 const std::shared_ptr<C2Buffer>& buffer)
+            : mFlags(flags), mOrdinal(ordinal), mBuffer(buffer) {}
+        ~FillWork() = default;
+
+        void operator()(const std::unique_ptr<C2Work>& work) {
+            work->worklets.front()->output.flags = (C2FrameData::flags_t)mFlags;
+            work->worklets.front()->output.buffers.clear();
+            work->worklets.front()->output.ordinal = mOrdinal;
+            work->workletsProcessed = 1u;
+            work->result = C2_OK;
+            if (mBuffer) {
+                work->worklets.front()->output.buffers.push_back(mBuffer);
+            }
+            ALOGV("timestamp = %lld, index = %lld, w/%s buffer",
+                  mOrdinal.timestamp.peekll(), mOrdinal.frameIndex.peekll(),
+                  mBuffer ? "" : "o");
+        }
+
+       private:
+        const uint32_t mFlags;
+        const C2WorkOrdinalStruct mOrdinal;
+        const std::shared_ptr<C2Buffer> mBuffer;
+    };
+
     auto fillWork = [buffer](const std::unique_ptr<C2Work> &work) {
         work->worklets.front()->output.flags = (C2FrameData::flags_t)0;
         work->worklets.front()->output.buffers.clear();
@@ -774,7 +819,20 @@ void C2SoftMpeg2Dec::finishWork(uint64_t index, const std::unique_ptr<C2Work> &w
         work->workletsProcessed = 1u;
     };
     if (work && c2_cntr64_t(index) == work->input.ordinal.frameIndex) {
-        fillWork(work);
+        bool eos = ((work->input.flags & C2FrameData::FLAG_END_OF_STREAM) != 0);
+        // TODO: Check if cloneAndSend can be avoided by tracking number of frames remaining
+        if (eos) {
+            if (buffer) {
+                mOutIndex = index;
+                C2WorkOrdinalStruct outOrdinal = work->input.ordinal;
+                cloneAndSend(
+                    mOutIndex, work,
+                    FillWork(C2FrameData::FLAG_INCOMPLETE, outOrdinal, buffer));
+                buffer.reset();
+            }
+        } else {
+            fillWork(work);
+        }
     } else {
         finish(index, fillWork);
     }
@@ -785,24 +843,21 @@ c2_status_t C2SoftMpeg2Dec::ensureDecoderState(const std::shared_ptr<C2BlockPool
         ALOGE("not supposed to be here, invalid decoder context");
         return C2_CORRUPTED;
     }
-    if (mStride != ALIGN64(mWidth)) {
-        mStride = ALIGN64(mWidth);
-        if (OK != setParams(mStride)) return C2_CORRUPTED;
-    }
     if (mOutBlock &&
-            (mOutBlock->width() != mStride || mOutBlock->height() != mHeight)) {
+            (mOutBlock->width() != ALIGN128(mWidth) || mOutBlock->height() != mHeight)) {
         mOutBlock.reset();
     }
     if (!mOutBlock) {
         uint32_t format = HAL_PIXEL_FORMAT_YV12;
         C2MemoryUsage usage = { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE };
-        c2_status_t err = pool->fetchGraphicBlock(mStride, mHeight, format, usage, &mOutBlock);
+        c2_status_t err =
+            pool->fetchGraphicBlock(ALIGN128(mWidth), mHeight, format, usage, &mOutBlock);
         if (err != C2_OK) {
             ALOGE("fetchGraphicBlock for Output failed with status %d", err);
             return err;
         }
         ALOGV("provided (%dx%d) required (%dx%d)",
-              mOutBlock->width(), mOutBlock->height(), mStride, mHeight);
+              mOutBlock->width(), mOutBlock->height(), ALIGN128(mWidth), mHeight);
     }
 
     return C2_OK;
@@ -873,14 +928,12 @@ void C2SoftMpeg2Dec::process(
         }
         // If input dump is enabled, then write to file
         DUMP_TO_FILE(mInFile, s_decode_ip.pv_stream_buffer, s_decode_ip.u4_num_Bytes);
-        WORD32 delay;
-        GETTIME(&mTimeStart, nullptr);
-        TIME_DIFF(mTimeEnd, mTimeStart, delay);
+        nsecs_t delay = mTimeStart - mTimeEnd;
         (void) ivdec_api_function(mDecHandle, &s_decode_ip, &s_decode_op);
-        WORD32 decodeTime;
-        GETTIME(&mTimeEnd, nullptr);
-        TIME_DIFF(mTimeStart, mTimeEnd, decodeTime);
-        ALOGV("decodeTime=%6d delay=%6d numBytes=%6d ", decodeTime, delay,
+
+        mTimeEnd = systemTime();
+        nsecs_t decodeTime = mTimeEnd - mTimeStart;
+        ALOGV("decodeTime=%" PRId64 " delay=%" PRId64 " numBytes=%6d ", decodeTime, delay,
               s_decode_op.u4_num_bytes_consumed);
         if (IMPEG2D_UNSUPPORTED_DIMENSIONS == s_decode_op.u4_error_code) {
             ALOGV("unsupported resolution : %dx%d", s_decode_op.u4_pic_wd, s_decode_op.u4_pic_ht);
@@ -1058,11 +1111,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftMpeg2DecFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

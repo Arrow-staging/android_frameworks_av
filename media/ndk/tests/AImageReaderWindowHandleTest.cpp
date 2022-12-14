@@ -20,12 +20,15 @@
 #include <mediautils/AImageReaderUtils.h>
 #include <gui/IGraphicBufferProducer.h>
 #include <gui/bufferqueue/1.0/H2BGraphicBufferProducer.h>
+#include <NdkImagePriv.h>
 #include <NdkImageReaderPriv.h>
 #include <vndk/hardware_buffer.h>
 #include <memory>
 
 namespace android {
 
+using HGraphicBufferProducer = hardware::graphics::bufferqueue::V1_0::
+        IGraphicBufferProducer;
 using hardware::graphics::bufferqueue::V1_0::utils::H2BGraphicBufferProducer;
 using aimg::AImageReader_getHGBPFromHandle;
 
@@ -181,5 +184,26 @@ TEST_F(AImageReaderWindowHandleTest, CreateWindowNativeHandle) {
                            [this]{ return this->imageAvailable_;});
     EXPECT_TRUE(imageAvailable_) <<  "Timed out waiting for image data to be handled!\n";
 }
+
+class AImageReaderPrivateFormatTest : public ::testing::Test {
+  public:
+    void SetUp() override {
+        auto status = AImageReader_new(kImageWidth, kImageHeight, AIMAGE_FORMAT_RAW_DEPTH,
+                                       kMaxImages, &imgReader);
+        EXPECT_TRUE(status == AMEDIA_OK);
+    }
+
+    void TearDown() override {
+        if (imgReader) {
+            AImageReader_delete(imgReader);
+        }
+    }
+    AImageReader *imgReader = nullptr;
+};
+
+TEST_F(AImageReaderPrivateFormatTest, CreateTest) {
+    EXPECT_TRUE(imgReader != nullptr);
+}
+
 
 }  // namespace android

@@ -21,13 +21,12 @@
 #include <binder/IPCThreadState.h>
 #include <binder/ProcessState.h>
 #include <binder/IServiceManager.h>
+#include <hidl/HidlTransportSupport.h>
 #include <utils/Log.h>
 #include "RegisterExtensions.h"
 
-// from LOCAL_C_INCLUDES
-#include "IcuUtils.h"
-#include "MediaPlayerService.h"
-#include "ResourceManagerService.h"
+#include <MediaPlayerService.h>
+#include <ResourceManagerService.h>
 
 using namespace android;
 
@@ -38,10 +37,11 @@ int main(int argc __unused, char **argv __unused)
     sp<ProcessState> proc(ProcessState::self());
     sp<IServiceManager> sm(defaultServiceManager());
     ALOGI("ServiceManager: %p", sm.get());
-    InitializeIcuOrDie();
     MediaPlayerService::instantiate();
     ResourceManagerService::instantiate();
     registerExtensions();
+    ::android::hardware::configureRpcThreadpool(16, false);
     ProcessState::self()->startThreadPool();
     IPCThreadState::self()->joinThreadPool();
+    ::android::hardware::joinRpcThreadpool();
 }

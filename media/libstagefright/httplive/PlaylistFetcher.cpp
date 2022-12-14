@@ -24,21 +24,22 @@
 #include "HTTPDownloader.h"
 #include "LiveSession.h"
 #include "M3UParser.h"
-#include "include/ID3.h"
-#include "mpeg2ts/AnotherPacketSource.h"
-#include "mpeg2ts/HlsSampleDecryptor.h"
+#include <ID3.h>
+#include <mpeg2ts/AnotherPacketSource.h>
+#include <mpeg2ts/HlsSampleDecryptor.h>
 
+#include <datasource/DataURISource.h>
 #include <media/stagefright/foundation/ABitReader.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/ByteUtils.h>
 #include <media/stagefright/foundation/MediaKeys.h>
 #include <media/stagefright/foundation/avc_utils.h>
-#include <media/stagefright/DataURISource.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/MetaDataUtils.h>
 #include <media/stagefright/Utils.h>
+#include <media/stagefright/FoundationUtils.h>
 
 #include <ctype.h>
 #include <inttypes.h>
@@ -160,6 +161,7 @@ PlaylistFetcher::PlaylistFetcher(
       mPlaylistTimeUs(-1LL),
       mSeqNumber(-1),
       mNumRetries(0),
+      mNumRetriesForMonitorQueue(0),
       mStartup(true),
       mIDRFound(false),
       mSeekMode(LiveSession::kSeekModeExactPosition),
@@ -343,6 +345,7 @@ status_t PlaylistFetcher::decryptBuffer(
         ALOGE("Missing key uri");
         return ERROR_MALFORMED;
     }
+    keyURI = mPlaylist->getFullCipherUri(keyURI);
 
     ssize_t index = mAESKeyForURI.indexOfKey(keyURI);
 
@@ -849,7 +852,17 @@ void PlaylistFetcher::onMonitorQueue() {
     // in the middle of an unfinished download, delay
     // playlist refresh as it'll change seq numbers
     if (!mDownloadState->hasSavedState()) {
-        refreshPlaylist();
+        status_t err = refreshPlaylist();
+        if (err != OK) {
+            if (mNumRetriesForMonitorQueue < kMaxNumRetries) {
+                ++mNumRetriesForMonitorQueue;
+            } else {
+                notifyError(err);
+            }
+            return;
+        } else {
+            mNumRetriesForMonitorQueue = 0;
+        }
     }
 
     int64_t targetDurationUs = kMinBufferedDurationUs;
@@ -2125,7 +2138,10 @@ status_t PlaylistFetcher::extractAndQueueAccessUnits(
     size_t offset = 0;
     while (offset < buffer->size()) {
         const uint8_t *adtsHeader = buffer->data() + offset;
-        CHECK_LT(offset + 5, buffer->size());
+        if (buffer->size() <= offset+5) {
+            ALOGV("buffer does not contain a complete header");
+            return ERROR_MALFORMED;
+        }
         // non-const pointer for decryption if needed
         uint8_t *adtsFrame = buffer->data() + offset;
 
@@ -2146,7 +2162,9 @@ status_t PlaylistFetcher::extractAndQueueAccessUnits(
             return ERROR_MALFORMED;
         }
 
-        CHECK_LE(offset + aac_frame_length, buffer->size());
+        if (aac_frame_length > buffer->size() - offset) {
+            return ERROR_MALFORMED;
+        }
 
         int64_t unitTimeUs = timeUs + numSamples * 1000000LL / sampleRate;
         offset += aac_frame_length;

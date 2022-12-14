@@ -14,6 +14,10 @@
  * limitations under the License.
  */
 
+#ifdef __LP64__
+#define OMX_ANDROID_COMPILE_AS_32BIT_ON_64BIT_PLATFORMS
+#endif
+
 //#define LOG_NDEBUG 0
 #define LOG_TAG "TWGraphicBufferSource"
 
@@ -21,6 +25,7 @@
 #include <media/stagefright/omx/1.0/WOmxNode.h>
 #include <media/stagefright/omx/1.0/Conversion.h>
 #include <media/stagefright/omx/OMXUtils.h>
+#include <media/stagefright/omx/OmxGraphicBufferSource.h>
 #include <android/hardware/media/omx/1.0/IOmxBufferSource.h>
 #include <android/hardware/media/omx/1.0/IOmxNode.h>
 #include <media/openmax/OMX_Component.h>
@@ -62,7 +67,7 @@ struct TWGraphicBufferSource::TWOmxNodeWrapper : public IOmxNodeWrapper {
             int32_t dataSpace, int32_t aspects, int32_t pixelFormat) override {
         Message tMsg;
         tMsg.type = Message::Type::EVENT;
-        tMsg.fence = native_handle_create(0, 0);
+        tMsg.fence.setTo(native_handle_create(0, 0), /* shouldOwn = */ true);
         tMsg.data.eventData.event = uint32_t(OMX_EventDataSpaceChanged);
         tMsg.data.eventData.data1 = dataSpace;
         tMsg.data.eventData.data2 = aspects;

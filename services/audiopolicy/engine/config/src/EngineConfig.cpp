@@ -18,10 +18,10 @@
 //#define LOG_NDEBUG 0
 
 #include "EngineConfig.h"
-#include <policy.h>
 #include <cutils/properties.h>
 #include <media/TypeConverter.h>
 #include <media/convert.h>
+#include <system/audio_config.h>
 #include <utils/Log.h>
 #include <libxml/parser.h>
 #include <libxml/xinclude.h>
@@ -32,8 +32,8 @@
 #include <istream>
 
 #include <cstdint>
+#include <stdarg.h>
 #include <string>
-
 
 namespace android {
 
@@ -80,6 +80,7 @@ struct ValueTraits : public BaseSerializerTraits<ValuePair, ValuePairs> {
     struct Attributes {
         static constexpr const char *literal = "literal";
         static constexpr const char *numerical = "numerical";
+        static constexpr const char *androidType = "android_type";
     };
 
     static android::status_t deserialize(_xmlDoc *doc, const _xmlNode *root,
@@ -139,11 +140,24 @@ struct VolumeGroupTraits : public BaseSerializerTraits<VolumeGroup, VolumeGroups
                                          Collection &collection);
 };
 
-using xmlCharUnique = std::unique_ptr<xmlChar, decltype(xmlFree)>;
+template <class T>
+constexpr void (*xmlDeleter)(T* t);
+template <>
+constexpr auto xmlDeleter<xmlDoc> = xmlFreeDoc;
+template <>
+constexpr auto xmlDeleter<xmlChar> = [](xmlChar *s) { xmlFree(s); };
+
+/** @return a unique_ptr with the correct deleter for the libxml2 object. */
+template <class T>
+constexpr auto make_xmlUnique(T *t) {
+    // Wrap deleter in lambda to enable empty base optimization
+    auto deleter = [](T *t) { xmlDeleter<T>(t); };
+    return std::unique_ptr<T, decltype(deleter)>{t, deleter};
+}
 
 std::string getXmlAttribute(const xmlNode *cur, const char *attribute)
 {
-    xmlCharUnique charPtr(xmlGetProp(cur, reinterpret_cast<const xmlChar *>(attribute)), xmlFree);
+    auto charPtr = make_xmlUnique(xmlGetProp(cur, reinterpret_cast<const xmlChar *>(attribute)));
     if (charPtr == NULL) {
         return "";
     }
@@ -228,7 +242,8 @@ static status_t parseAttributes(const _xmlNode *cur, audio_attributes_t &attribu
             std::string flags = getXmlAttribute(cur, "value");
 
             ALOGV("%s flags %s",  __FUNCTION__, flags.c_str());
-            attributes.flags = AudioFlagConverter::maskFromString(flags, " ");
+            attributes.flags = static_cast<audio_flags_mask_t>(
+                    AudioFlagConverter::maskFromString(flags, " "));
         }
         if (!xmlStrcmp(cur->name, (const xmlChar *)("Bundle"))) {
             std::string bundleKey = getXmlAttribute(cur, "key");
@@ -335,7 +350,16 @@ status_t ValueTraits::deserialize(_xmlDoc */*doc*/, const _xmlNode *child, Colle
         ALOGE("%s: No attribute %s found", __FUNCTION__, Attributes::literal);
         return BAD_VALUE;
     }
-    uint32_t numerical = 0;
+    uint32_t androidType = 0;
+    std::string androidTypeliteral = getXmlAttribute(child, Attributes::androidType);
+    if (!androidTypeliteral.empty()) {
+        ALOGV("%s: androidType %s", __FUNCTION__, androidTypeliteral.c_str());
+        if (!convertTo(androidTypeliteral, androidType)) {
+            ALOGE("%s: : Invalid typeset value(%s)", __FUNCTION__, androidTypeliteral.c_str());
+            return BAD_VALUE;
+        }
+    }
+    uint64_t numerical = 0;
     std::string numericalTag = getXmlAttribute(child, Attributes::numerical);
     if (numericalTag.empty()) {
         ALOGE("%s: No attribute %s found", __FUNCTION__, Attributes::literal);
@@ -345,7 +369,7 @@ status_t ValueTraits::deserialize(_xmlDoc */*doc*/, const _xmlNode *child, Colle
         ALOGE("%s: : Invalid value(%s)", __FUNCTION__, numericalTag.c_str());
         return BAD_VALUE;
     }
-    values.push_back({numerical, literal});
+    values.push_back({numerical,  androidType, literal});
     return NO_ERROR;
 }
 
@@ -440,7 +464,7 @@ status_t VolumeTraits::deserialize(_xmlDoc *doc, const _xmlNode *root, Collectio
     for (const xmlNode *child = referenceName.empty() ?
          root->xmlChildrenNode : ref->xmlChildrenNode; child != NULL; child = child->next) {
         if (!xmlStrcmp(child->name, (const xmlChar *)volumePointTag)) {
-            xmlCharUnique pointXml(xmlNodeListGetString(doc, child->xmlChildrenNode, 1), xmlFree);
+            auto pointXml = make_xmlUnique(xmlNodeListGetString(doc, child->xmlChildrenNode, 1));
             if (pointXml == NULL) {
                 return BAD_VALUE;
             }
@@ -470,14 +494,14 @@ status_t VolumeGroupTraits::deserialize(_xmlDoc *doc, const _xmlNode *root, Coll
 
     for (const xmlNode *child = root->xmlChildrenNode; child != NULL; child = child->next) {
         if (not xmlStrcmp(child->name, (const xmlChar *)Attributes::name)) {
-            xmlCharUnique nameXml(xmlNodeListGetString(doc, child->xmlChildrenNode, 1), xmlFree);
+            auto nameXml = make_xmlUnique(xmlNodeListGetString(doc, child->xmlChildrenNode, 1));
             if (nameXml == nullptr) {
                 return BAD_VALUE;
             }
             name = reinterpret_cast<const char*>(nameXml.get());
         }
         if (not xmlStrcmp(child->name, (const xmlChar *)Attributes::indexMin)) {
-            xmlCharUnique indexMinXml(xmlNodeListGetString(doc, child->xmlChildrenNode, 1), xmlFree);
+            auto indexMinXml = make_xmlUnique(xmlNodeListGetString(doc, child->xmlChildrenNode, 1));
             if (indexMinXml == nullptr) {
                 return BAD_VALUE;
             }
@@ -487,7 +511,7 @@ status_t VolumeGroupTraits::deserialize(_xmlDoc *doc, const _xmlNode *root, Coll
             }
         }
         if (not xmlStrcmp(child->name, (const xmlChar *)Attributes::indexMax)) {
-            xmlCharUnique indexMaxXml(xmlNodeListGetString(doc, child->xmlChildrenNode, 1), xmlFree);
+            auto indexMaxXml = make_xmlUnique(xmlNodeListGetString(doc, child->xmlChildrenNode, 1));
             if (indexMaxXml == nullptr) {
                 return BAD_VALUE;
             }
@@ -547,7 +571,7 @@ status_t deserializeLegacyVolume(_xmlDoc *doc, const _xmlNode *cur,
     for (const xmlNode *child = referenceName.empty() ?
          cur->xmlChildrenNode : ref->xmlChildrenNode; child != NULL; child = child->next) {
         if (!xmlStrcmp(child->name, (const xmlChar *)VolumeTraits::volumePointTag)) {
-            xmlCharUnique pointXml(xmlNodeListGetString(doc, child->xmlChildrenNode, 1), xmlFree);
+            auto pointXml = make_xmlUnique(xmlNodeListGetString(doc, child->xmlChildrenNode, 1));
             if (pointXml == NULL) {
                 return BAD_VALUE;
             }
@@ -588,6 +612,7 @@ static status_t deserializeLegacyVolumeCollection(_xmlDoc *doc, const _xmlNode *
             }
         }
     }
+    VolumeGroups tempVolumeGroups = volumeGroups;
     for (const auto &volumeMapIter : legacyVolumeMap) {
         // In order to let AudioService setting the min and max (compatibility), set Min and Max
         // to -1 except for private streams
@@ -598,25 +623,61 @@ static status_t deserializeLegacyVolumeCollection(_xmlDoc *doc, const _xmlNode *
         }
         int indexMin = streamType >= AUDIO_STREAM_PUBLIC_CNT ? 0 : -1;
         int indexMax = streamType >= AUDIO_STREAM_PUBLIC_CNT ? 100 : -1;
-        volumeGroups.push_back({ volumeMapIter.first, indexMin, indexMax, volumeMapIter.second });
+        tempVolumeGroups.push_back(
+                { volumeMapIter.first, indexMin, indexMax, volumeMapIter.second });
     }
+    std::swap(tempVolumeGroups, volumeGroups);
     return NO_ERROR;
 }
 
+namespace {
+
+class XmlErrorHandler {
+public:
+    XmlErrorHandler() {
+        xmlSetGenericErrorFunc(this, &xmlErrorHandler);
+    }
+    XmlErrorHandler(const XmlErrorHandler&) = delete;
+    XmlErrorHandler(XmlErrorHandler&&) = delete;
+    XmlErrorHandler& operator=(const XmlErrorHandler&) = delete;
+    XmlErrorHandler& operator=(XmlErrorHandler&&) = delete;
+    ~XmlErrorHandler() {
+        xmlSetGenericErrorFunc(NULL, NULL);
+        if (!mErrorMessage.empty()) {
+            ALOG(LOG_ERROR, "libxml2", "%s", mErrorMessage.c_str());
+        }
+    }
+    static void xmlErrorHandler(void* ctx, const char* msg, ...) {
+        char buffer[256];
+        va_list args;
+        va_start(args, msg);
+        vsnprintf(buffer, sizeof(buffer), msg, args);
+        va_end(args);
+        static_cast<XmlErrorHandler*>(ctx)->mErrorMessage += buffer;
+    }
+private:
+    std::string mErrorMessage;
+};
+
+}  // namespace
+
 ParsingResult parse(const char* path) {
-    xmlDocPtr doc;
-    doc = xmlParseFile(path);
+    XmlErrorHandler errorHandler;
+    auto doc = make_xmlUnique(xmlParseFile(path));
     if (doc == NULL) {
-        ALOGE("%s: Could not parse document %s", __FUNCTION__, path);
+        // It is OK not to find an engine config file at the default location
+        // as the caller will default to hardcoded default config
+        if (strncmp(path, DEFAULT_PATH, strlen(DEFAULT_PATH))) {
+            ALOGW("%s: Could not parse document %s", __FUNCTION__, path);
+        }
         return {nullptr, 0};
     }
-    xmlNodePtr cur = xmlDocGetRootElement(doc);
+    xmlNodePtr cur = xmlDocGetRootElement(doc.get());
     if (cur == NULL) {
         ALOGE("%s: Could not parse: empty document %s", __FUNCTION__, path);
-        xmlFreeDoc(doc);
         return {nullptr, 0};
     }
-    if (xmlXIncludeProcess(doc) < 0) {
+    if (xmlXIncludeProcess(doc.get()) < 0) {
         ALOGE("%s: libxml failed to resolve XIncludes on document %s", __FUNCTION__, path);
         return {nullptr, 0};
     }
@@ -629,70 +690,45 @@ ParsingResult parse(const char* path) {
     auto config = std::make_unique<Config>();
     config->version = std::stof(version);
     deserializeCollection<ProductStrategyTraits>(
-                doc, cur, config->productStrategies, nbSkippedElements);
+                doc.get(), cur, config->productStrategies, nbSkippedElements);
     deserializeCollection<CriterionTraits>(
-                doc, cur, config->criteria, nbSkippedElements);
+                doc.get(), cur, config->criteria, nbSkippedElements);
     deserializeCollection<CriterionTypeTraits>(
-                doc, cur, config->criterionTypes, nbSkippedElements);
+                doc.get(), cur, config->criterionTypes, nbSkippedElements);
     deserializeCollection<VolumeGroupTraits>(
-                doc, cur, config->volumeGroups, nbSkippedElements);
+                doc.get(), cur, config->volumeGroups, nbSkippedElements);
 
     return {std::move(config), nbSkippedElements};
 }
 
 android::status_t parseLegacyVolumeFile(const char* path, VolumeGroups &volumeGroups) {
-    xmlDocPtr doc;
-    doc = xmlParseFile(path);
+    XmlErrorHandler errorHandler;
+    auto doc = make_xmlUnique(xmlParseFile(path));
     if (doc == NULL) {
         ALOGE("%s: Could not parse document %s", __FUNCTION__, path);
         return BAD_VALUE;
     }
-    xmlNodePtr cur = xmlDocGetRootElement(doc);
+    xmlNodePtr cur = xmlDocGetRootElement(doc.get());
     if (cur == NULL) {
         ALOGE("%s: Could not parse: empty document %s", __FUNCTION__, path);
-        xmlFreeDoc(doc);
         return BAD_VALUE;
     }
-    if (xmlXIncludeProcess(doc) < 0) {
+    if (xmlXIncludeProcess(doc.get()) < 0) {
         ALOGE("%s: libxml failed to resolve XIncludes on document %s", __FUNCTION__, path);
         return BAD_VALUE;
     }
     size_t nbSkippedElements = 0;
-    return deserializeLegacyVolumeCollection(doc, cur, volumeGroups, nbSkippedElements);
+    return deserializeLegacyVolumeCollection(doc.get(), cur, volumeGroups, nbSkippedElements);
 }
 
-static const char *kConfigLocationList[] = {"/odm/etc", "/vendor/etc", "/system/etc"};
-static const int kConfigLocationListSize =
-        (sizeof(kConfigLocationList) / sizeof(kConfigLocationList[0]));
-static const int gApmXmlConfigFilePathMaxLength = 128;
-
-static constexpr const char *apmXmlConfigFileName = "audio_policy_configuration.xml";
-static constexpr const char *apmA2dpOffloadDisabledXmlConfigFileName =
-        "audio_policy_configuration_a2dp_offload_disabled.xml";
-
 android::status_t parseLegacyVolumes(VolumeGroups &volumeGroups) {
-    char audioPolicyXmlConfigFile[gApmXmlConfigFilePathMaxLength];
-    std::vector<const char *> fileNames;
-    status_t ret;
-
-    if (property_get_bool("ro.bluetooth.a2dp_offload.supported", false) &&
-            property_get_bool("persist.bluetooth.a2dp_offload.disabled", false)) {
-        // A2DP offload supported but disabled: try to use special XML file
-        fileNames.push_back(apmA2dpOffloadDisabledXmlConfigFileName);
+    if (std::string audioPolicyXmlConfigFile = audio_get_audio_policy_config_file();
+            !audioPolicyXmlConfigFile.empty()) {
+        return parseLegacyVolumeFile(audioPolicyXmlConfigFile.c_str(), volumeGroups);
+    } else {
+        ALOGE("No readable audio policy config file found");
+        return BAD_VALUE;
     }
-    fileNames.push_back(apmXmlConfigFileName);
-
-    for (const char* fileName : fileNames) {
-        for (int i = 0; i < kConfigLocationListSize; i++) {
-            snprintf(audioPolicyXmlConfigFile, sizeof(audioPolicyXmlConfigFile),
-                     "%s/%s", kConfigLocationList[i], fileName);
-            ret = parseLegacyVolumeFile(audioPolicyXmlConfigFile, volumeGroups);
-            if (ret == NO_ERROR) {
-                return ret;
-            }
-        }
-    }
-    return BAD_VALUE;
 }
 
 } // namespace engineConfig

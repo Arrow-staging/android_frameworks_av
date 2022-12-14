@@ -17,7 +17,7 @@
 #ifndef MEDIA_ADAPTER_H
 #define MEDIA_ADAPTER_H
 
-#include <media/MediaSource.h>
+#include <media/stagefright/MediaSource.h>
 #include <media/stagefright/foundation/ABase.h>
 #include <media/stagefright/MediaBuffer.h>
 #include <media/stagefright/MetaData.h>
@@ -58,6 +58,7 @@ public:
 
 private:
     Mutex mAdapterLock;
+    std::mutex mBufferGatingMutex;
     // Make sure the read() wait for the incoming buffer.
     Condition mBufferReadCond;
     // Make sure the pushBuffer() wait for the current buffer consumed.

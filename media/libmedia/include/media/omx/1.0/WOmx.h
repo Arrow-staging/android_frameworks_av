@@ -47,7 +47,6 @@ using ::android::sp;
 
 using ::android::List;
 using ::android::IOMX;
-using ::android::BnOMX;
 
 /**
  * Wrapper classes for conversion
@@ -58,7 +57,7 @@ using ::android::BnOMX;
  * - TW = Treble Wrapper --- It wraps a legacy object inside a Treble object.
  */
 
-struct LWOmx : public BnOMX {
+struct LWOmx : public IOMX {
     sp<IOmx> mBase;
     LWOmx(sp<IOmx> const& base);
     status_t listNodes(List<IOMX::ComponentInfo>* list) override;
@@ -68,7 +67,7 @@ struct LWOmx : public BnOMX {
             sp<IOMXNode>* omxNode) override;
     status_t createInputSurface(
             sp<::android::IGraphicBufferProducer>* bufferProducer,
-            sp<::android::IGraphicBufferSource>* bufferSource) override;
+            sp<::android::hardware::media::omx::V1_0::IGraphicBufferSource>* bufferSource) override;
 };
 
 }  // namespace utils

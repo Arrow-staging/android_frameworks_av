@@ -1,3 +1,22 @@
+package {
+    default_applicable_licenses: [
+        "frameworks_av_media_libmediaplayerservice_nuplayer_license",
+    ],
+}
+
+// Added automatically by a large-scale-change
+// See: http://go/android-license-faq
+license {
+    name: "frameworks_av_media_libmediaplayerservice_nuplayer_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+    ],
+    license_text: [
+        "NOTICE",
+    ],
+}
+
 cc_library_static {
 
     srcs: [
@@ -14,20 +33,26 @@ cc_library_static {
         "NuPlayerRenderer.cpp",
         "NuPlayerStreamListener.cpp",
         "RTSPSource.cpp",
+        "RTPSource.cpp",
         "StreamingSource.cpp",
     ],
 
-    header_libs: [
-        "media_plugin_headers",
+    local_include_dirs: [
+        "include/nuplayer",
     ],
 
-    include_dirs: [
-        "frameworks/av/media/libstagefright",
-        "frameworks/av/media/libstagefright/httplive",
-        "frameworks/av/media/libstagefright/include",
-        "frameworks/av/media/libstagefright/mpeg2ts",
-        "frameworks/av/media/libstagefright/rtsp",
-        "frameworks/av/media/libstagefright/timedtext",
+    export_include_dirs: [
+        "include",
+    ],
+
+    header_libs: [
+        "libmediadrm_headers",
+        "libmediametrics_headers",
+        "media_plugin_headers",
+        "libstagefright_headers",
+        "libstagefright_httplive_headers",
+        "libstagefright_mpeg2support_headers",
+        "libstagefright_rtsp_headers",
     ],
 
     cflags: [
@@ -45,11 +70,18 @@ cc_library_static {
 
     shared_libs: [
         "libbinder",
+        "libdatasource",
         "libui",
         "libgui",
         "libmedia",
         "libmediadrm",
         "libpowermanager",
+        "android.hardware.drm-V1-ndk",
+    ],
+
+    static_libs: [
+        "libplayerservice_datasource",
+        "libstagefright_timedtext",
     ],
 
     name: "libstagefright_nuplayer",

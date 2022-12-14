@@ -42,7 +42,7 @@ using OutputConfiguration = frameworks::cameraservice::device::V2_0::OutputConfi
 // Utility class so that CaptureRequest can be stored by sp<>
 struct CaptureRequest : public RefBase {
   frameworks::cameraservice::device::V2_0::CaptureRequest mCaptureRequest;
-  std::vector<native_handle_t *> mSurfaceList;
+  std::vector<const native_handle_t *> mSurfaceList;
   //Physical camera settings metadata is stored here, since the capture request
   //might not contain it. That's since, fmq might have consumed it.
   hidl_vec<PhysicalCameraSettings> mPhysicalCameraSettings;
@@ -62,13 +62,13 @@ bool isWindowNativeHandleGreaterThan(const native_handle_t *nh1, const native_ha
 // Utility class so the native_handle_t can be compared with  its contents instead
 // of just raw pointer comparisons.
 struct native_handle_ptr_wrapper {
-    native_handle_t *mWindow = nullptr;
+    const native_handle_t *mWindow = nullptr;
 
-    native_handle_ptr_wrapper(native_handle_t *nh) : mWindow(nh) { }
+    native_handle_ptr_wrapper(const native_handle_t *nh) : mWindow(nh) { }
 
     native_handle_ptr_wrapper() = default;
 
-    operator native_handle_t *() const { return mWindow; }
+    operator const native_handle_t *() const { return mWindow; }
 
     bool operator ==(const native_handle_ptr_wrapper other) const {
         return isWindowNativeHandleEqual(mWindow, other.mWindow);
@@ -99,10 +99,40 @@ struct OutputConfigurationWrapper {
         return mOutputConfiguration;
     }
 
-    OutputConfigurationWrapper() = default;
+    OutputConfigurationWrapper() {
+        mOutputConfiguration.rotation = OutputConfiguration::Rotation::R0;
+        // The ndk currently doesn't support deferred surfaces
+        mOutputConfiguration.isDeferred = false;
+        mOutputConfiguration.width = 0;
+        mOutputConfiguration.height = 0;
+        // ndk doesn't support inter OutputConfiguration buffer sharing.
+        mOutputConfiguration.windowGroupId = -1;
+    };
 
-    OutputConfigurationWrapper(OutputConfiguration &outputConfiguration)
-            : mOutputConfiguration((outputConfiguration)) { }
+    OutputConfigurationWrapper(const OutputConfigurationWrapper &other) {
+        *this = other;
+    }
+
+    // Needed to make sure that OutputConfiguration in
+    // OutputConfigurationWrapper, when copied doesn't call hidl_handle's
+    // assignment operator / copy constructor, which will lead to native handle
+    // cloning, which is not what we want for app callbacks which have the native
+    // handle as parameter.
+    OutputConfigurationWrapper &operator=(const OutputConfigurationWrapper &other) {
+        const OutputConfiguration &outputConfiguration = other.mOutputConfiguration;
+        mOutputConfiguration.rotation = outputConfiguration.rotation;
+        mOutputConfiguration.isDeferred = outputConfiguration.isDeferred;
+        mOutputConfiguration.width = outputConfiguration.width;
+        mOutputConfiguration.height = outputConfiguration.height;
+        mOutputConfiguration.windowGroupId = outputConfiguration.windowGroupId;
+        mOutputConfiguration.windowHandles.resize(outputConfiguration.windowHandles.size());
+        mOutputConfiguration.physicalCameraId = outputConfiguration.physicalCameraId;
+        size_t i = 0;
+        for (const auto &handle : outputConfiguration.windowHandles) {
+            mOutputConfiguration.windowHandles[i++] = handle.getNativeHandle();
+        }
+        return *this;
+    }
 
     bool operator ==(const OutputConfiguration &other) const {
         const OutputConfiguration &self = mOutputConfiguration;
@@ -160,8 +190,8 @@ HRotation convertToHidl(int rotation);
 
 bool convertFromHidlCloned(const HCameraMetadata &metadata, CameraMetadata *rawMetadata);
 
-// Note: existing data in dst will be gone. Caller still owns the memory of src
-void convertToHidl(const camera_metadata_t *src, HCameraMetadata* dst);
+// Note: existing data in dst will be gone.
+void convertToHidl(const camera_metadata_t *src, HCameraMetadata* dst, bool shouldOwn = false);
 
 TemplateId convertToHidl(ACameraDevice_request_template templateId);
 

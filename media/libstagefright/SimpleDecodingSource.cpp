@@ -20,7 +20,7 @@
 
 #include <gui/Surface.h>
 
-#include <media/ICrypto.h>
+#include <mediadrm/ICrypto.h>
 #include <media/MediaCodecBuffer.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/foundation/ALooper.h>
@@ -36,7 +36,7 @@
 using namespace android;
 
 const int64_t kTimeoutWaitForOutputUs = 500000; // 0.5 seconds
-const int64_t kTimeoutWaitForInputUs = 5000; // 5 milliseconds
+const int64_t kTimeoutWaitForInputUs = 0; // don't wait
 const int kTimeoutMaxRetries = 20;
 
 //static
@@ -318,18 +318,23 @@ status_t SimpleDecodingSource::doRead(
                 }
                 size_t cpLen = min(in_buf->range_length(), in_buffer->capacity());
                 memcpy(in_buffer->base(), (uint8_t *)in_buf->data() + in_buf->range_offset(),
-                        cpLen );
+                        cpLen);
 
                 if (mIsVorbis) {
                     int32_t numPageSamples;
                     if (!in_buf->meta_data().findInt32(kKeyValidSamples, &numPageSamples)) {
                         numPageSamples = -1;
                     }
-                    memcpy(in_buffer->base() + cpLen, &numPageSamples, sizeof(numPageSamples));
+                    if (cpLen + sizeof(numPageSamples) <= in_buffer->capacity()) {
+                        memcpy(in_buffer->base() + cpLen, &numPageSamples, sizeof(numPageSamples));
+                        cpLen += sizeof(numPageSamples);
+                    } else {
+                        ALOGW("Didn't have enough space to copy kKeyValidSamples");
+                    }
                 }
 
                 res = mCodec->queueInputBuffer(
-                        in_ix, 0 /* offset */, in_buf->range_length() + (mIsVorbis ? 4 : 0),
+                        in_ix, 0 /* offset */, cpLen,
                         timestampUs, 0 /* flags */);
                 if (res != OK) {
                     ALOGI("[%s] failed to queue input buffer #%zu", mComponentName.c_str(), in_ix);

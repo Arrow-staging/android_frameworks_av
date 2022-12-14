@@ -44,13 +44,13 @@ class AAudioServiceEndpointMMAP
 public:
     explicit AAudioServiceEndpointMMAP(android::AAudioService &audioService);
 
-    virtual ~AAudioServiceEndpointMMAP();
+    virtual ~AAudioServiceEndpointMMAP() = default;
 
     std::string dump() const override;
 
     aaudio_result_t open(const aaudio::AAudioStreamRequest &request) override;
 
-    aaudio_result_t close() override;
+    void close() override;
 
     aaudio_result_t startStream(android::sp<AAudioServiceStreamBase> stream,
                                 audio_port_handle_t *clientHandle) override;
@@ -59,30 +59,44 @@ public:
                                audio_port_handle_t clientHandle) override;
 
     aaudio_result_t startClient(const android::AudioClient& client,
-                                        audio_port_handle_t *clientHandle)  override;
+                                const audio_attributes_t *attr,
+                                audio_port_handle_t *clientHandle)  override;
 
     aaudio_result_t stopClient(audio_port_handle_t clientHandle)  override;
+
+    aaudio_result_t standby() override;
+
+    aaudio_result_t exitStandby(AudioEndpointParcelable* parcelable) override;
 
     aaudio_result_t getFreeRunningPosition(int64_t *positionFrames, int64_t *timeNanos) override;
 
     aaudio_result_t getTimestamp(int64_t *positionFrames, int64_t *timeNanos) override;
 
+    void handleTearDownAsync(audio_port_handle_t portHandle);
+
     // -------------- Callback functions for MmapStreamCallback ---------------------
-    void onTearDown(audio_port_handle_t handle) override;
+    void onTearDown(audio_port_handle_t portHandle) override;
 
     void onVolumeChanged(audio_channel_mask_t channels,
                          android::Vector<float> values) override;
 
-    void onRoutingChanged(audio_port_handle_t deviceId) override;
+    void onRoutingChanged(audio_port_handle_t portHandle) override;
     // ------------------------------------------------------------------------------
 
-    aaudio_result_t getDownDataDescription(AudioEndpointParcelable &parcelable);
+    aaudio_result_t getDownDataDescription(AudioEndpointParcelable* parcelable);
 
     int64_t getHardwareTimeOffsetNanos() const {
         return mHardwareTimeOffsetNanos;
     }
 
+    aaudio_result_t getExternalPosition(uint64_t *positionFrames, int64_t *timeNanos);
+
 private:
+
+    aaudio_result_t openWithFormat(audio_format_t audioFormat);
+
+    aaudio_result_t createMmapBuffer(android::base::unique_fd* fileDescriptor);
+
     MonotonicCounter                          mFramesTransferred;
 
     // Interface to the AudioFlinger MMAP support.
@@ -97,6 +111,13 @@ private:
     android::base::unique_fd                  mAudioDataFileDescriptor;
 
     int64_t                                   mHardwareTimeOffsetNanos = 0; // TODO get from HAL
+
+    aaudio_result_t                           mHalExternalPositionStatus = AAUDIO_OK;
+    uint64_t                                  mLastPositionFrames = 0;
+    int64_t                                   mTimestampNanosForLastPosition = 0;
+    int32_t                                   mTimestampGracePeriodMs;
+    int32_t                                   mFrozenPositionCount = 0;
+    int32_t                                   mFrozenTimestampCount = 0;
 
 };
 

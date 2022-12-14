@@ -20,11 +20,11 @@
 #include <utils/StrongPointer.h>
 #include <media/AudioClient.h>
 
+#include "aaudio/IAAudioClient.h"
 #include "binding/AAudioServiceDefinitions.h"
 #include "binding/AAudioStreamRequest.h"
 #include "binding/AAudioStreamConfiguration.h"
 #include "binding/AudioEndpointParcelable.h"
-#include "binding/IAAudioClient.h"
 
 /**
  * This has the same methods as IAAudioService but without the Binder features.
@@ -37,10 +37,10 @@ namespace aaudio {
 class AAudioServiceInterface {
 public:
 
-    AAudioServiceInterface() {};
+    AAudioServiceInterface() = default;
     virtual ~AAudioServiceInterface() = default;
 
-    virtual void registerClient(const android::sp<android::IAAudioClient>& client) = 0;
+    virtual void registerClient(const android::sp<IAAudioClient>& client) = 0;
 
     /**
      * @param request info needed to create the stream
@@ -89,11 +89,22 @@ public:
                                                   pid_t clientThreadId) = 0;
 
     virtual aaudio_result_t startClient(aaudio_handle_t streamHandle,
-                                      const android::AudioClient& client,
-                                      audio_port_handle_t *clientHandle) = 0;
+                                        const android::AudioClient& client,
+                                        const audio_attributes_t *attr,
+                                        audio_port_handle_t *clientHandle) = 0;
 
     virtual aaudio_result_t stopClient(aaudio_handle_t streamHandle,
                                        audio_port_handle_t clientHandle) = 0;
+
+    /**
+     * Exit the standby mode.
+     *
+     * @param streamHandle the stream handle
+     * @param parcelable contains new data queue information
+     * @return the result of the execution
+     */
+    virtual aaudio_result_t exitStandby(aaudio_handle_t streamHandle,
+                                        AudioEndpointParcelable &parcelable) = 0;
 };
 
 } /* namespace aaudio */

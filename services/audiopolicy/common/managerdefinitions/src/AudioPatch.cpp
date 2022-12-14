@@ -18,19 +18,19 @@
 //#define LOG_NDEBUG 0
 
 #include "AudioPatch.h"
-#include "AudioGain.h"
 #include "TypeConverter.h"
 
+#include <android-base/stringprintf.h>
 #include <log/log.h>
+#include <media/AudioDeviceTypeAddr.h>
 #include <utils/String8.h>
 
 namespace android {
 
 AudioPatch::AudioPatch(const struct audio_patch *patch, uid_t uid) :
-    mHandle(HandleGenerator<audio_patch_handle_t>::getNextHandle()),
     mPatch(*patch),
-    mUid(uid),
-    mAfPatchHandle(AUDIO_PATCH_HANDLE_NONE)
+    mHandle(HandleGenerator<audio_patch_handle_t>::getNextHandle()),
+    mUid(uid)
 {
 }
 
@@ -39,20 +39,21 @@ static void dumpPatchEndpoints(
 {
     for (int i = 0; i < count; ++i) {
         const audio_port_config &cfg = cfgs[i];
-        dst->appendFormat("%*s  [%s %d] ", spaces, "", prefix, i + 1);
+        dst->appendFormat("%*s[%s %d] ", spaces, "", prefix, i + 1);
         if (cfg.type == AUDIO_PORT_TYPE_DEVICE) {
-            dst->appendFormat("Device ID %d %s", cfg.id, toString(cfg.ext.device.type).c_str());
+            AudioDeviceTypeAddr device(cfg.ext.device.type, cfg.ext.device.address);
+            dst->appendFormat("Device Port ID: %d; {%s}",
+                    cfg.id, device.toString(true /*includeSensitiveInfo*/).c_str());
         } else {
-            dst->appendFormat("Mix ID %d I/O handle %d", cfg.id, cfg.ext.mix.handle);
+            dst->appendFormat("Mix Port ID: %d; I/O handle: %d;", cfg.id, cfg.ext.mix.handle);
         }
         dst->append("\n");
     }
 }
 
-void AudioPatch::dump(String8 *dst, int spaces, int index) const
+void AudioPatch::dump(String8 *dst, int spaces) const
 {
-    dst->appendFormat("%*sPatch %d: owner uid %4d, handle %2d, af handle %2d\n",
-            spaces, "", index + 1, mUid, mHandle, mAfPatchHandle);
+    dst->appendFormat("owner uid %4d; handle %2d; af handle %2d\n", mUid, mHandle, mAfPatchHandle);
     dumpPatchEndpoints(dst, spaces, "src ", mPatch.num_sources, mPatch.sources);
     dumpPatchEndpoints(dst, spaces, "sink", mPatch.num_sinks, mPatch.sinks);
 }
@@ -69,7 +70,7 @@ status_t AudioPatchCollection::addAudioPatch(audio_patch_handle_t handle,
     add(handle, patch);
     ALOGV("addAudioPatch() handle %d af handle %d num_sources %d num_sinks %d source handle %d"
             "sink handle %d",
-          handle, patch->mAfPatchHandle, patch->mPatch.num_sources, patch->mPatch.num_sinks,
+          handle, patch->getAfHandle(), patch->mPatch.num_sources, patch->mPatch.num_sinks,
           patch->mPatch.sources[0].id, patch->mPatch.sinks[0].id);
     return NO_ERROR;
 }
@@ -82,7 +83,7 @@ status_t AudioPatchCollection::removeAudioPatch(audio_patch_handle_t handle)
         ALOGW("removeAudioPatch() patch %d not in", handle);
         return ALREADY_EXISTS;
     }
-    ALOGV("removeAudioPatch() handle %d af handle %d", handle, valueAt(index)->mAfPatchHandle);
+    ALOGV("removeAudioPatch() handle %d af handle %d", handle, valueAt(index)->getAfHandle());
     removeItemsAt(index);
     return NO_ERROR;
 }
@@ -124,7 +125,7 @@ status_t AudioPatchCollection::listAudioPatches(unsigned int *num_patches,
         }
         if (patchesWritten < patchesMax) {
             patches[patchesWritten] = patch->mPatch;
-            patches[patchesWritten++].id = patch->mHandle;
+            patches[patchesWritten++].id = patch->getHandle();
         }
         (*num_patches)++;
         ALOGV("listAudioPatches() patch %zu num_sources %d num_sinks %d",
@@ -137,9 +138,11 @@ status_t AudioPatchCollection::listAudioPatches(unsigned int *num_patches,
 
 void AudioPatchCollection::dump(String8 *dst) const
 {
-    dst->append("\nAudio Patches:\n");
+    dst->appendFormat("\n Audio Patches (%zu):\n", size());
     for (size_t i = 0; i < size(); i++) {
-        valueAt(i)->dump(dst, 2, i);
+        const std::string prefix = base::StringPrintf("  %zu. ", i + 1);
+        dst->appendFormat("%s", prefix.c_str());
+        valueAt(i)->dump(dst, prefix.size());
     }
 }
 

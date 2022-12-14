@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014 The Android Open Source Project
+ * Copyright (C) 2021 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -13,16 +13,16 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+#pragma once
 
-#ifndef CLEARKEY_UUID_H_
-#define CLEARKEY_UUID_H_
-
-#include <stdint.h>
+#include <array>
+#include <cstdint>
+#include <vector>
 
 namespace clearkeydrm {
 
 bool isClearKeyUUID(const uint8_t uuid[16]);
 
-} // namespace clearkeydrm
+std::vector<std::array<uint8_t, 16>> getSupportedCryptoSchemes();
 
-#endif // CLEARKEY_UUID_H_
+}  // namespace clearkeydrm

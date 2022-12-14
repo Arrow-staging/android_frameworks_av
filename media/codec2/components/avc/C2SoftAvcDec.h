@@ -18,14 +18,15 @@
 #define ANDROID_C2_SOFT_AVC_DEC_H_
 
 #include <sys/time.h>
+#include <inttypes.h>
 
 #include <media/stagefright/foundation/ColorUtils.h>
 
+#include <atomic>
 #include <SimpleC2Component.h>
 
 #include "ih264_typedefs.h"
-#include "iv.h"
-#include "ivd.h"
+#include "ih264d.h"
 
 namespace android {
 
@@ -38,24 +39,20 @@ namespace android {
 #define ivdext_ctl_set_num_cores_op_t   ih264d_ctl_set_num_cores_op_t
 #define ivdext_ctl_get_vui_params_ip_t  ih264d_ctl_get_vui_params_ip_t
 #define ivdext_ctl_get_vui_params_op_t  ih264d_ctl_get_vui_params_op_t
-#define ALIGN64(x)                      ((((x) + 63) >> 6) << 6)
+#define ALIGN128(x)                     ((((x) + 127) >> 7) << 7)
 #define MAX_NUM_CORES                   4
 #define IVDEXT_CMD_CTL_SET_NUM_CORES    \
         (IVD_CONTROL_API_COMMAND_TYPE_T)IH264D_CMD_CTL_SET_NUM_CORES
 #define MIN(a, b)                       (((a) < (b)) ? (a) : (b))
-#define GETTIME(a, b)                   gettimeofday(a, b);
-#define TIME_DIFF(start, end, diff)     \
-    diff = (((end).tv_sec - (start).tv_sec) * 1000000) + \
-            ((end).tv_usec - (start).tv_usec);
 
 #ifdef FILE_DUMP_ENABLE
     #define INPUT_DUMP_PATH     "/sdcard/clips/avcd_input"
     #define INPUT_DUMP_EXT      "h264"
     #define GENERATE_FILE_NAMES() {                         \
-        GETTIME(&mTimeStart, NULL);                         \
+        nsecs_t now = systemTime();                         \
         strcpy(mInFile, "");                                \
-        sprintf(mInFile, "%s_%ld.%ld.%s", INPUT_DUMP_PATH,  \
-                mTimeStart.tv_sec, mTimeStart.tv_usec,      \
+        sprintf(mInFile, "%s_%" PRId64 "d.%s",              \
+                INPUT_DUMP_PATH, now,                       \
                 INPUT_DUMP_EXT);                            \
     }
     #define CREATE_DUMP_FILE(m_filename) {                  \
@@ -156,13 +153,14 @@ private:
 
     size_t mNumCores;
     IV_COLOR_FORMAT_T mIvColorFormat;
-
+    uint32_t mOutputDelay;
     uint32_t mWidth;
     uint32_t mHeight;
     uint32_t mStride;
     bool mSignalledOutputEos;
     bool mSignalledError;
     bool mHeaderDecoded;
+    std::atomic_uint64_t mOutIndex;
     // Color aspects. These are ISO values and are meant to detect changes in aspects to avoid
     // converting them to C2 values for each frame
     struct VuiColorAspects {
@@ -182,8 +180,8 @@ private:
     } mBitstreamColorAspects;
 
     // profile
-    struct timeval mTimeStart;
-    struct timeval mTimeEnd;
+    nsecs_t mTimeStart = 0;
+    nsecs_t mTimeEnd = 0;
 #ifdef FILE_DUMP_ENABLE
     char mInFile[200];
 #endif /* FILE_DUMP_ENABLE */

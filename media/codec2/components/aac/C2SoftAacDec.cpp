@@ -40,6 +40,8 @@
 #define DRC_DEFAULT_MOBILE_DRC_BOOST 1.0 /* maximum compression of dynamic range for mobile conf */
 #define DRC_DEFAULT_MOBILE_DRC_HEAVY C2Config::DRC_COMPRESSION_HEAVY   /* switch for heavy compression for mobile conf */
 #define DRC_DEFAULT_MOBILE_DRC_EFFECT 3  /* MPEG-D DRC effect type; 3 => Limited playback range */
+#define DRC_DEFAULT_MOBILE_DRC_ALBUM  0  /* MPEG-D DRC album mode; 0 => album mode is disabled, 1 => album mode is enabled */
+#define DRC_DEFAULT_MOBILE_OUTPUT_LOUDNESS (0.25) /* decoder output loudness; -1 => the value is unknown, otherwise dB step value (e.g. 64 for -16 dB) */
 #define DRC_DEFAULT_MOBILE_ENC_LEVEL (0.25) /* encoder target level; -1 => the value is unknown, otherwise dB step value (e.g. 64 for -16 dB) */
 #define MAX_CHANNEL_COUNT            8  /* maximum number of audio channels that can be decoded */
 // names of properties that can be used to override the default DRC settings
@@ -53,6 +55,8 @@
 namespace android {
 
 constexpr char COMPONENT_NAME[] = "c2.android.aac.decoder";
+constexpr size_t kDefaultOutputPortDelay = 2;
+constexpr size_t kMaxOutputPortDelay = 16;
 
 class C2SoftAacDec::IntfImpl : public SimpleInterface<void>::BaseParams {
 public:
@@ -71,14 +75,17 @@ public:
 
         addParameter(
                 DefineParam(mActualOutputDelay, C2_PARAMKEY_OUTPUT_DELAY)
-                .withConstValue(new C2PortActualDelayTuning::output(2u))
+                .withDefault(new C2PortActualDelayTuning::output(kDefaultOutputPortDelay))
+                .withFields({C2F(mActualOutputDelay, value).inRange(0, kMaxOutputPortDelay)})
+                .withSetter(Setter<decltype(*mActualOutputDelay)>::StrictValueWithNoDeps)
                 .build());
 
         addParameter(
                 DefineParam(mSampleRate, C2_PARAMKEY_SAMPLE_RATE)
                 .withDefault(new C2StreamSampleRateInfo::output(0u, 44100))
                 .withFields({C2F(mSampleRate, value).oneOf({
-                    7350, 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000
+                    7350, 8000, 11025, 12000, 16000, 22050, 24000, 32000,
+                    44100, 48000, 64000, 88200, 96000
                 })})
                 .withSetter(Setter<decltype(*mSampleRate)>::NonStrictValueWithNoDeps)
                 .build());
@@ -86,8 +93,15 @@ public:
         addParameter(
                 DefineParam(mChannelCount, C2_PARAMKEY_CHANNEL_COUNT)
                 .withDefault(new C2StreamChannelCountInfo::output(0u, 1))
-                .withFields({C2F(mChannelCount, value).inRange(1, 8)})
+                .withFields({C2F(mChannelCount, value).inRange(1, MAX_CHANNEL_COUNT)})
                 .withSetter(Setter<decltype(*mChannelCount)>::StrictValueWithNoDeps)
+                .build());
+
+        addParameter(
+                DefineParam(mMaxChannelCount, C2_PARAMKEY_MAX_CHANNEL_COUNT)
+                .withDefault(new C2StreamMaxChannelCountInfo::input(0u, MAX_CHANNEL_COUNT))
+                .withFields({C2F(mMaxChannelCount, value).inRange(1, MAX_CHANNEL_COUNT)})
+                .withSetter(Setter<decltype(*mMaxChannelCount)>::StrictValueWithNoDeps)
                 .build());
 
         addParameter(
@@ -189,6 +203,30 @@ public:
                 })
                 .withSetter(Setter<decltype(*mDrcEffectType)>::StrictValueWithNoDeps)
                 .build());
+
+        addParameter(
+                DefineParam(mDrcAlbumMode, C2_PARAMKEY_DRC_ALBUM_MODE)
+                .withDefault(new C2StreamDrcAlbumModeTuning::input(0u, C2Config::DRC_ALBUM_MODE_OFF))
+                .withFields({
+                    C2F(mDrcAlbumMode, value).oneOf({
+                            C2Config::DRC_ALBUM_MODE_OFF,
+                            C2Config::DRC_ALBUM_MODE_ON})
+                })
+                .withSetter(Setter<decltype(*mDrcAlbumMode)>::StrictValueWithNoDeps)
+                .build());
+
+        addParameter(
+                DefineParam(mDrcOutputLoudness, C2_PARAMKEY_DRC_OUTPUT_LOUDNESS)
+                .withDefault(new C2StreamDrcOutputLoudnessTuning::output(0u, DRC_DEFAULT_MOBILE_OUTPUT_LOUDNESS))
+                .withFields({C2F(mDrcOutputLoudness, value).inRange(-57.75, 0.25)})
+                .withSetter(Setter<decltype(*mDrcOutputLoudness)>::StrictValueWithNoDeps)
+                .build());
+
+        addParameter(DefineParam(mChannelMask, C2_PARAMKEY_CHANNEL_MASK)
+                .withDefault(new C2StreamChannelMaskInfo::output(0u, 0))
+                .withFields({C2F(mChannelMask, value).inRange(0, 4294967292)})
+                .withSetter(Setter<decltype(*mChannelMask)>::StrictValueWithNoDeps)
+                .build());
     }
 
     bool isAdts() const { return mAacFormat->value == C2Config::AAC_PACKAGING_ADTS; }
@@ -203,12 +241,11 @@ public:
     int32_t getDrcBoostFactor() const { return mDrcBoostFactor->value * 127. + 0.5; }
     int32_t getDrcAttenuationFactor() const { return mDrcAttenuationFactor->value * 127. + 0.5; }
     int32_t getDrcEffectType() const { return mDrcEffectType->value; }
+    int32_t getDrcAlbumMode() const { return mDrcAlbumMode->value; }
+    u_int32_t getMaxChannelCount() const { return mMaxChannelCount->value; }
+    int32_t getDrcOutputLoudness() const { return (mDrcOutputLoudness->value <= 0 ? -mDrcOutputLoudness->value * 4. + 0.5 : -1); }
 
 private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
     std::shared_ptr<C2StreamSampleRateInfo::output> mSampleRate;
     std::shared_ptr<C2StreamChannelCountInfo::output> mChannelCount;
     std::shared_ptr<C2StreamBitrateInfo::input> mBitrate;
@@ -221,6 +258,10 @@ private:
     std::shared_ptr<C2StreamDrcBoostFactorTuning::input> mDrcBoostFactor;
     std::shared_ptr<C2StreamDrcAttenuationFactorTuning::input> mDrcAttenuationFactor;
     std::shared_ptr<C2StreamDrcEffectTypeTuning::input> mDrcEffectType;
+    std::shared_ptr<C2StreamDrcAlbumModeTuning::input> mDrcAlbumMode;
+    std::shared_ptr<C2StreamMaxChannelCountInfo::input> mMaxChannelCount;
+    std::shared_ptr<C2StreamDrcOutputLoudnessTuning::output> mDrcOutputLoudness;
+    std::shared_ptr<C2StreamChannelMaskInfo::output> mChannelMask;
     // TODO Add : C2StreamAacSbrModeTuning
 };
 
@@ -233,6 +274,7 @@ C2SoftAacDec::C2SoftAacDec(
       mAACDecoder(nullptr),
       mStreamInfo(nullptr),
       mSignalledError(false),
+      mOutputPortDelay(kDefaultOutputPortDelay),
       mOutputDelayRingBuffer(nullptr) {
 }
 
@@ -252,15 +294,17 @@ c2_status_t C2SoftAacDec::onStop() {
     mOutputDelayRingBufferWritePos = 0;
     mOutputDelayRingBufferReadPos = 0;
     mOutputDelayRingBufferFilled = 0;
+    mOutputDelayRingBuffer.reset();
     mBuffersInfo.clear();
 
-    // To make the codec behave the same before and after a reset, we need to invalidate the
-    // streaminfo struct. This does that:
-    mStreamInfo->sampleRate = 0; // TODO: mStreamInfo is read only
-
+    status_t status = UNKNOWN_ERROR;
+    if (mAACDecoder) {
+        aacDecoder_Close(mAACDecoder);
+        status = initDecoder();
+    }
     mSignalledError = false;
 
-    return C2_OK;
+    return status == OK ? C2_OK : C2_CORRUPTED;
 }
 
 void C2SoftAacDec::onReset() {
@@ -272,10 +316,7 @@ void C2SoftAacDec::onRelease() {
         aacDecoder_Close(mAACDecoder);
         mAACDecoder = nullptr;
     }
-    if (mOutputDelayRingBuffer) {
-        delete[] mOutputDelayRingBuffer;
-        mOutputDelayRingBuffer = nullptr;
-    }
+    mOutputDelayRingBuffer.reset();
 }
 
 status_t C2SoftAacDec::initDecoder() {
@@ -291,7 +332,7 @@ status_t C2SoftAacDec::initDecoder() {
 
     mOutputDelayCompensated = 0;
     mOutputDelayRingBufferSize = 2048 * MAX_CHANNEL_COUNT * kNumDelayBlocksMax;
-    mOutputDelayRingBuffer = new short[mOutputDelayRingBufferSize];
+    mOutputDelayRingBuffer.reset(new short[mOutputDelayRingBufferSize]);
     mOutputDelayRingBufferWritePos = 0;
     mOutputDelayRingBufferReadPos = 0;
     mOutputDelayRingBufferFilled = 0;
@@ -327,7 +368,7 @@ status_t C2SoftAacDec::initDecoder() {
 
     //  DRC_PRES_MODE_WRAP_DESIRED_HEAVY
     int32_t compressMode = mIntf->getDrcCompressMode();
-    ALOGV("AAC decoder using desried DRC heavy compression switch of %d", compressMode);
+    ALOGV("AAC decoder using desired DRC heavy compression switch of %d", compressMode);
     mDrcWrap.setParam(DRC_PRES_MODE_WRAP_DESIRED_HEAVY, (unsigned)compressMode);
 
     // DRC_PRES_MODE_WRAP_ENCODER_TARGET
@@ -340,9 +381,15 @@ status_t C2SoftAacDec::initDecoder() {
     ALOGV("AAC decoder using MPEG-D DRC effect type %d", effectType);
     aacDecoder_SetParam(mAACDecoder, AAC_UNIDRC_SET_EFFECT, effectType);
 
-    // By default, the decoder creates a 5.1 channel downmix signal.
-    // For seven and eight channel input streams, enable 6.1 and 7.1 channel output
-    aacDecoder_SetParam(mAACDecoder, AAC_PCM_MAX_OUTPUT_CHANNELS, -1);
+    // AAC_UNIDRC_ALBUM_MODE
+    int32_t albumMode = mIntf->getDrcAlbumMode();
+    ALOGV("AAC decoder using MPEG-D DRC album mode %d", albumMode);
+    aacDecoder_SetParam(mAACDecoder, AAC_UNIDRC_ALBUM_MODE, albumMode);
+
+    // AAC_PCM_MAX_OUTPUT_CHANNELS
+    u_int32_t maxChannelCount = mIntf->getMaxChannelCount();
+    ALOGV("AAC decoder using maximum output channel count %d", maxChannelCount);
+    aacDecoder_SetParam(mAACDecoder, AAC_PCM_MAX_OUTPUT_CHANNELS, maxChannelCount);
 
     return status;
 }
@@ -473,8 +520,8 @@ void C2SoftAacDec::drainRingBuffer(
 
                 // TODO: error handling, proper usage, etc.
                 C2MemoryUsage usage = { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE };
-                c2_status_t err = pool->fetchLinearBlock(
-                        numSamples * sizeof(int16_t), usage, &block);
+                size_t bufferSize = numSamples * sizeof(int16_t);
+                c2_status_t err = pool->fetchLinearBlock(bufferSize, usage, &block);
                 if (err != C2_OK) {
                     ALOGD("failed to fetch a linear block (%d)", err);
                     return std::bind(fillEmptyWork, _1, C2_NO_MEMORY);
@@ -488,7 +535,7 @@ void C2SoftAacDec::drainRingBuffer(
                     mSignalledError = true;
                     return std::bind(fillEmptyWork, _1, C2_CORRUPTED);
                 }
-                return [buffer = createLinearBuffer(block)](
+                return [buffer = createLinearBuffer(block, 0, bufferSize)](
                         const std::unique_ptr<C2Work> &work) {
                     work->result = C2_OK;
                     C2FrameData &output = work->worklets.front()->output;
@@ -635,6 +682,7 @@ void C2SoftAacDec::process(
 
         INT prevSampleRate = mStreamInfo->sampleRate;
         INT prevNumChannels = mStreamInfo->numChannels;
+        INT prevOutLoudness = mStreamInfo->outputLoudness;
 
         aacDecoder_Fill(mAACDecoder,
                         inBuffer,
@@ -643,6 +691,48 @@ void C2SoftAacDec::process(
 
         // run DRC check
         mDrcWrap.submitStreamData(mStreamInfo);
+
+        // apply runtime updates
+        //  DRC_PRES_MODE_WRAP_DESIRED_TARGET
+        int32_t targetRefLevel = mIntf->getDrcTargetRefLevel();
+        ALOGV("AAC decoder using desired DRC target reference level of %d", targetRefLevel);
+        mDrcWrap.setParam(DRC_PRES_MODE_WRAP_DESIRED_TARGET, (unsigned)targetRefLevel);
+
+        //  DRC_PRES_MODE_WRAP_DESIRED_ATT_FACTOR
+        int32_t attenuationFactor = mIntf->getDrcAttenuationFactor();
+        ALOGV("AAC decoder using desired DRC attenuation factor of %d", attenuationFactor);
+        mDrcWrap.setParam(DRC_PRES_MODE_WRAP_DESIRED_ATT_FACTOR, (unsigned)attenuationFactor);
+
+        //  DRC_PRES_MODE_WRAP_DESIRED_BOOST_FACTOR
+        int32_t boostFactor = mIntf->getDrcBoostFactor();
+        ALOGV("AAC decoder using desired DRC boost factor of %d", boostFactor);
+        mDrcWrap.setParam(DRC_PRES_MODE_WRAP_DESIRED_BOOST_FACTOR, (unsigned)boostFactor);
+
+        //  DRC_PRES_MODE_WRAP_DESIRED_HEAVY
+        int32_t compressMode = mIntf->getDrcCompressMode();
+        ALOGV("AAC decoder using desried DRC heavy compression switch of %d", compressMode);
+        mDrcWrap.setParam(DRC_PRES_MODE_WRAP_DESIRED_HEAVY, (unsigned)compressMode);
+
+        // DRC_PRES_MODE_WRAP_ENCODER_TARGET
+        int32_t encTargetLevel = mIntf->getDrcEncTargetLevel();
+        ALOGV("AAC decoder using encoder-side DRC reference level of %d", encTargetLevel);
+        mDrcWrap.setParam(DRC_PRES_MODE_WRAP_ENCODER_TARGET, (unsigned)encTargetLevel);
+
+        // AAC_UNIDRC_SET_EFFECT
+        int32_t effectType = mIntf->getDrcEffectType();
+        ALOGV("AAC decoder using MPEG-D DRC effect type %d", effectType);
+        aacDecoder_SetParam(mAACDecoder, AAC_UNIDRC_SET_EFFECT, effectType);
+
+        // AAC_UNIDRC_ALBUM_MODE
+        int32_t albumMode = mIntf->getDrcAlbumMode();
+        ALOGV("AAC decoder using MPEG-D DRC album mode %d", albumMode);
+        aacDecoder_SetParam(mAACDecoder, AAC_UNIDRC_ALBUM_MODE, albumMode);
+
+        // AAC_PCM_MAX_OUTPUT_CHANNELS
+        int32_t maxChannelCount = mIntf->getMaxChannelCount();
+        ALOGV("AAC decoder using maximum output channel count %d", maxChannelCount);
+        aacDecoder_SetParam(mAACDecoder, AAC_PCM_MAX_OUTPUT_CHANNELS, maxChannelCount);
+
         mDrcWrap.update();
 
         UINT inBufferUsedLength = inBufferLength[0] - bytesValid[0];
@@ -712,7 +802,6 @@ void C2SoftAacDec::process(
 
                 // After an error, replace bufferSize with the sum of the
                 // decodedSizes to resynchronize the in/out lists.
-                inInfo.decodedSizes.pop_back();
                 inInfo.bufferSize = std::accumulate(
                         inInfo.decodedSizes.begin(), inInfo.decodedSizes.end(), 0);
 
@@ -747,9 +836,11 @@ void C2SoftAacDec::process(
 
                 C2StreamSampleRateInfo::output sampleRateInfo(0u, mStreamInfo->sampleRate);
                 C2StreamChannelCountInfo::output channelCountInfo(0u, mStreamInfo->numChannels);
+                C2StreamChannelMaskInfo::output channelMaskInfo(0u,
+                        maskFromCount(mStreamInfo->numChannels));
                 std::vector<std::unique_ptr<C2SettingResult>> failures;
                 c2_status_t err = mIntf->config(
-                        { &sampleRateInfo, &channelCountInfo },
+                        { &sampleRateInfo, &channelCountInfo, &channelMaskInfo },
                         C2_MAY_BLOCK,
                         &failures);
                 if (err == OK) {
@@ -758,6 +849,7 @@ void C2SoftAacDec::process(
                     C2FrameData &output = work->worklets.front()->output;
                     output.configUpdate.push_back(C2Param::Copy(sampleRateInfo));
                     output.configUpdate.push_back(C2Param::Copy(channelCountInfo));
+                    output.configUpdate.push_back(C2Param::Copy(channelMaskInfo));
                 } else {
                     ALOGE("Config Update failed");
                     mSignalledError = true;
@@ -766,11 +858,100 @@ void C2SoftAacDec::process(
                 }
             }
             ALOGV("size = %zu", size);
+
+            if (mStreamInfo->outputLoudness != prevOutLoudness) {
+                C2StreamDrcOutputLoudnessTuning::output
+                        drcOutLoudness(0u, (float) (mStreamInfo->outputLoudness*-0.25));
+
+                std::vector<std::unique_ptr<C2SettingResult>> failures;
+                c2_status_t err = mIntf->config(
+                                    { &drcOutLoudness },
+                                    C2_MAY_BLOCK,
+                                    &failures);
+                if (err == OK) {
+                    work->worklets.front()->output.configUpdate.push_back(
+                        C2Param::Copy(drcOutLoudness));
+                } else {
+                    ALOGE("Getting output loudness failed");
+                }
+            }
+
+            // update config with values used for decoding:
+            //    Album mode, target reference level, DRC effect type, DRC attenuation and boost
+            //    factor, DRC compression mode, encoder target level and max channel count
+            // with input values as they were not modified by decoder
+
+            C2StreamDrcAttenuationFactorTuning::input currentAttenuationFactor(0u,
+                    (C2FloatValue) (attenuationFactor/127.));
+            work->worklets.front()->output.configUpdate.push_back(
+                    C2Param::Copy(currentAttenuationFactor));
+
+            C2StreamDrcBoostFactorTuning::input currentBoostFactor(0u,
+                    (C2FloatValue) (boostFactor/127.));
+            work->worklets.front()->output.configUpdate.push_back(
+                    C2Param::Copy(currentBoostFactor));
+
+            if (android_get_device_api_level() < __ANDROID_API_S__) {
+                // We used to report DRC compression mode in the output format
+                // in Q and R, but stopped doing that in S
+                C2StreamDrcCompressionModeTuning::input currentCompressMode(0u,
+                        (C2Config::drc_compression_mode_t) compressMode);
+                work->worklets.front()->output.configUpdate.push_back(
+                        C2Param::Copy(currentCompressMode));
+            }
+
+            C2StreamDrcEncodedTargetLevelTuning::input currentEncodedTargetLevel(0u,
+                    (C2FloatValue) (encTargetLevel*-0.25));
+            work->worklets.front()->output.configUpdate.push_back(
+                    C2Param::Copy(currentEncodedTargetLevel));
+
+            C2StreamDrcAlbumModeTuning::input currentAlbumMode(0u,
+                    (C2Config::drc_album_mode_t) albumMode);
+            work->worklets.front()->output.configUpdate.push_back(
+                    C2Param::Copy(currentAlbumMode));
+
+            C2StreamDrcTargetReferenceLevelTuning::input currentTargetRefLevel(0u,
+                    (float) (targetRefLevel*-0.25));
+            work->worklets.front()->output.configUpdate.push_back(
+                    C2Param::Copy(currentTargetRefLevel));
+
+            C2StreamDrcEffectTypeTuning::input currentEffectype(0u,
+                    (C2Config::drc_effect_type_t) effectType);
+            work->worklets.front()->output.configUpdate.push_back(
+                    C2Param::Copy(currentEffectype));
+
+            C2StreamMaxChannelCountInfo::input currentMaxChannelCnt(0u, maxChannelCount);
+            work->worklets.front()->output.configUpdate.push_back(
+                    C2Param::Copy(currentMaxChannelCnt));
+
         } while (decoderErr == AAC_DEC_OK);
     }
 
     int32_t outputDelay = mStreamInfo->outputDelay * mStreamInfo->numChannels;
 
+    size_t numSamplesInOutput = mStreamInfo->frameSize * mStreamInfo->numChannels;
+    if (numSamplesInOutput > 0) {
+        size_t actualOutputPortDelay = (outputDelay + numSamplesInOutput - 1) / numSamplesInOutput;
+        if (actualOutputPortDelay > mOutputPortDelay) {
+            mOutputPortDelay = actualOutputPortDelay;
+            ALOGV("New Output port delay %zu ", mOutputPortDelay);
+
+            C2PortActualDelayTuning::output outputPortDelay(mOutputPortDelay);
+            std::vector<std::unique_ptr<C2SettingResult>> failures;
+            c2_status_t err =
+                mIntf->config({&outputPortDelay}, C2_MAY_BLOCK, &failures);
+            if (err == OK) {
+                work->worklets.front()->output.configUpdate.push_back(
+                    C2Param::Copy(outputPortDelay));
+            } else {
+                ALOGE("Cannot set output delay");
+                mSignalledError = true;
+                work->workletsProcessed = 1u;
+                work->result = C2_CORRUPTED;
+                return;
+            }
+        }
+    }
     mBuffersInfo.push_back(std::move(inInfo));
     work->workletsProcessed = 0u;
     if (!eos && mOutputDelayCompensated < outputDelay) {
@@ -885,6 +1066,47 @@ void C2SoftAacDec::drainDecoder() {
     }
 }
 
+// definitions based on android.media.AudioFormat.CHANNEL_OUT_*
+#define CHANNEL_OUT_FL  0x4
+#define CHANNEL_OUT_FR  0x8
+#define CHANNEL_OUT_FC  0x10
+#define CHANNEL_OUT_LFE 0x20
+#define CHANNEL_OUT_BL  0x40
+#define CHANNEL_OUT_BR  0x80
+#define CHANNEL_OUT_SL  0x800
+#define CHANNEL_OUT_SR  0x1000
+
+uint32_t C2SoftAacDec::maskFromCount(uint32_t channelCount) {
+    // KEY_CHANNEL_MASK expects masks formatted according to Java android.media.AudioFormat
+    // where the two left-most bits are 0 for output channel mask
+    switch (channelCount) {
+        case 1: // mono is front left
+            return (CHANNEL_OUT_FL);
+        case 2: // stereo
+            return (CHANNEL_OUT_FL | CHANNEL_OUT_FR);
+        case 4: // 4.0 = stereo with backs
+            return (CHANNEL_OUT_FL | CHANNEL_OUT_FC
+                    | CHANNEL_OUT_BL | CHANNEL_OUT_BR);
+        case 5: // 5.0
+            return (CHANNEL_OUT_FL | CHANNEL_OUT_FC | CHANNEL_OUT_FR
+                    | CHANNEL_OUT_BL | CHANNEL_OUT_BR);
+        case 6: // 5.1 = 5.0 + LFE
+            return (CHANNEL_OUT_FL | CHANNEL_OUT_FC | CHANNEL_OUT_FR
+                    | CHANNEL_OUT_BL | CHANNEL_OUT_BR
+                    | CHANNEL_OUT_LFE);
+        case 7: // 7.0 = 5.0 + Sides
+            return (CHANNEL_OUT_FL | CHANNEL_OUT_FC | CHANNEL_OUT_FR
+                    | CHANNEL_OUT_BL | CHANNEL_OUT_BR
+                    | CHANNEL_OUT_SL | CHANNEL_OUT_SR);
+        case 8: // 7.1 = 7.0 + LFE
+            return (CHANNEL_OUT_FL | CHANNEL_OUT_FC | CHANNEL_OUT_FR
+                    | CHANNEL_OUT_BL | CHANNEL_OUT_BR | CHANNEL_OUT_SL | CHANNEL_OUT_SR
+                    | CHANNEL_OUT_LFE);
+        default:
+            return 0;
+    }
+}
+
 class C2SoftAacDecFactory : public C2ComponentFactory {
 public:
     C2SoftAacDecFactory() : mHelper(std::static_pointer_cast<C2ReflectorHelper>(
@@ -921,11 +1143,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftAacDecFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

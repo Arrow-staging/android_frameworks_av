@@ -23,8 +23,11 @@
 #include <media/stagefright/MediaWriter.h>
 #include <utils/List.h>
 #include <utils/threads.h>
+#include <map>
 #include <media/stagefright/foundation/AHandlerReflector.h>
 #include <media/stagefright/foundation/ALooper.h>
+#include <mutex>
+#include <queue>
 
 namespace android {
 
@@ -43,7 +46,7 @@ public:
 
     // Returns INVALID_OPERATION if there is no source or track.
     virtual status_t start(MetaData *param = NULL);
-    virtual status_t stop() { return reset(); }
+    virtual status_t stop();
     virtual status_t pause();
     virtual bool reachedEOS();
     virtual status_t dump(int fd, const Vector<String16>& args);
@@ -58,6 +61,10 @@ public:
     void writeFourcc(const char *fourcc);
     void write(const void *data, size_t size);
     inline size_t write(const void *ptr, size_t size, size_t nmemb);
+    // Write to file system by calling ::write() or post error message to looper on failure.
+    void writeOrPostError(int fd, const void *buf, size_t count);
+    // Seek in the file by calling ::lseek64() or post error message to looper on failure.
+    void seekOrPostError(int fd, off64_t offset, int whence);
     void endBox();
     uint32_t interleaveDuration() const { return mInterleaveDurationUs; }
     status_t setInterleaveDuration(uint32_t duration);
@@ -79,11 +86,10 @@ private:
     friend struct AHandlerReflector<MPEG4Writer>;
 
     enum {
-        kWhatSwitch                          = 'swch',
-    };
-
-    enum {
-        kMaxCttsOffsetTimeUs = 1000000LL,  // 1 second
+        kWhatSwitch                  = 'swch',
+        kWhatIOError                 = 'ioer',
+        kWhatFallocateError          = 'faer',
+        kWhatNoIOErrorSoFar          = 'noie'
     };
 
     int  mFd;
@@ -91,15 +97,18 @@ private:
     sp<MetaData> mStartMeta;
     status_t mInitCheck;
     bool mIsRealTimeRecording;
+    bool mIsBackgroundMode;
     bool mUse4ByteNalLength;
-    bool mUse32BitOffset;
     bool mIsFileSizeLimitExplicitlyRequested;
     bool mPaused;
     bool mStarted;  // Writer thread + track threads started successfully
     bool mWriterThreadStarted;  // Only writer thread started successfully
     bool mSendNotify;
     off64_t mOffset;
-    off_t mMdatOffset;
+    off64_t mPreAllocateFileEndOffset;  //End of file offset during preallocation.
+    off64_t mMdatOffset;
+    off64_t mMaxOffsetAppend; // File offset written upto while appending.
+    off64_t mMdatEndOffset;  // End offset of mdat atom.
     uint8_t *mInMemoryCache;
     off64_t mInMemoryCacheOffset;
     off64_t mInMemoryCacheSize;
@@ -110,17 +119,31 @@ private:
     uint32_t mInterleaveDurationUs;
     int32_t mTimeScale;
     int64_t mStartTimestampUs;
-    int32_t mStartTimeOffsetBFramesUs; // Start time offset when B Frames are present
+    int32_t mStartTimeOffsetBFramesUs;  // Longest offset needed for reordering tracks with B Frames
     int mLatitudex10000;
     int mLongitudex10000;
     bool mAreGeoTagsAvailable;
     int32_t mStartTimeOffsetMs;
     bool mSwitchPending;
+    bool mWriteSeekErr;
+    bool mFallocateErr;
+    bool mPreAllocationEnabled;
+    status_t mResetStatus;
+    // Queue to hold top long write durations
+    std::priority_queue<std::chrono::microseconds, std::vector<std::chrono::microseconds>,
+                        std::greater<std::chrono::microseconds>> mWriteDurationPQ;
+    const uint8_t kWriteDurationsCount = 5;
 
     sp<ALooper> mLooper;
     sp<AHandlerReflector<MPEG4Writer> > mReflector;
 
     Mutex mLock;
+    // Serialize reset calls from client of MPEG4Writer and MP4WtrCtrlHlpLooper.
+    std::mutex mResetMutex;
+    // Serialize preallocation calls from different track threads.
+    std::mutex mFallocMutex;
+    bool mPreAllocFirstTime; // Pre-allocate space for file and track headers only once per file.
+    uint64_t mPrevAllTracksTotalMetaDataSizeEstimate;
 
     List<Track *> mTracks;
 
@@ -136,6 +159,7 @@ private:
     int64_t estimateMoovBoxSize(int32_t bitRate);
     int64_t estimateFileLevelMetaSize(MetaData *params);
     void writeCachedBoxToFile(const char *type);
+    void printWriteDurations();
 
     struct Chunk {
         Track               *mTrack;        // Owner
@@ -204,19 +228,23 @@ private:
     } ItemProperty;
 
     bool mHasFileLevelMeta;
+    uint64_t mFileLevelMetaDataSize;
     bool mHasMoovBox;
     uint32_t mPrimaryItemId;
     uint32_t mAssociationEntryCount;
     uint32_t mNumGrids;
+    uint16_t mNextItemId;
     bool mHasRefs;
-    Vector<ItemInfo> mItems;
+    std::map<uint32_t, ItemInfo> mItems;
     Vector<ItemProperty> mProperties;
 
     // Writer thread handling
     status_t startWriterThread();
-    void stopWriterThread();
+    status_t stopWriterThread();
     static void *ThreadWrapper(void *me);
     void threadFunc();
+    status_t setupAndStartLooper();
+    void stopAndReleaseLooper();
 
     // Buffer a single chunk to be written out later.
     void bufferChunk(const Chunk& chunk);
@@ -248,6 +276,10 @@ private:
     // By default, real time recording is on.
     bool isRealTimeRecording() const;
 
+    // Return whether the writer is used in background mode for media
+    // transcoding.
+    bool isBackgroundMode() const;
+
     void lock();
     void unlock();
 
@@ -263,15 +295,16 @@ private:
     void addLengthPrefixedSample_l(MediaBuffer *buffer);
     void addMultipleLengthPrefixedSamples_l(MediaBuffer *buffer);
     uint16_t addProperty_l(const ItemProperty &);
+    status_t reserveItemId_l(size_t numItems, uint16_t *itemIdBase);
     uint16_t addItem_l(const ItemInfo &);
     void addRefs_l(uint16_t itemId, const ItemRefs &);
 
     bool exceedsFileSizeLimit();
-    bool use32BitFileOffset() const;
     bool exceedsFileDurationLimit();
     bool approachingFileSizeLimit();
     bool isFileStreamable() const;
-    void trackProgressStatus(size_t trackId, int64_t timeUs, status_t err = OK);
+    void trackProgressStatus(uint32_t trackId, int64_t timeUs, status_t err = OK);
+    status_t validateAllTracksId(bool akKey4BitTrackIds);
     void writeCompositionMatrix(int32_t degrees);
     void writeMvhdBox(int64_t durationUs);
     void writeMoovBox(int64_t durationUs);
@@ -280,13 +313,23 @@ private:
     void writeGeoDataBox();
     void writeLatitude(int degreex10000);
     void writeLongitude(int degreex10000);
-    void finishCurrentSession();
+    status_t finishCurrentSession();
 
     void addDeviceMeta();
     void writeHdlr(const char *handlerType);
     void writeKeys();
     void writeIlst();
     void writeMoovLevelMetaBox();
+
+    /*
+     * Allocate space needed for MOOV atom in advance and maintain just enough before write
+     * of any data.  Stop writing and save MOOV atom if there was any error.
+     */
+    bool preAllocate(uint64_t wantSize);
+    /*
+     * Truncate file as per the size used for metadata and actual data in a session.
+     */
+    bool truncatePreAllocation();
 
     // HEIF writing
     void writeIlocBox();
@@ -301,9 +344,9 @@ private:
     void writeFileLevelMetaBox();
 
     void sendSessionSummary();
-    void release();
+    status_t release();
     status_t switchFd();
-    status_t reset(bool stopSource = true);
+    status_t reset(bool stopSource = true, bool waitForAnyPreviousCallToComplete = true);
 
     static uint32_t getMpeg4Time();
 

@@ -17,8 +17,7 @@
 #pragma once
 
 #include "EngineBase.h"
-#include "AudioPolicyManagerInterface.h"
-#include <AudioGain.h>
+#include "EngineInterface.h"
 #include <policy.h>
 
 namespace android
@@ -40,6 +39,7 @@ enum legacy_strategy {
     STRATEGY_TRANSMITTED_THROUGH_SPEAKER,
     STRATEGY_ACCESSIBILITY,
     STRATEGY_REROUTING,
+    STRATEGY_CALL_ASSISTANT,
 };
 
 class Engine : public EngineBase
@@ -48,12 +48,9 @@ public:
     Engine();
     virtual ~Engine() = default;
 
-    template <class RequestedInterface>
-    RequestedInterface *queryInterface();
-
 private:
     ///
-    /// from EngineBase, so from AudioPolicyManagerInterface
+    /// from EngineBase, so from EngineInterface
     ///
     status_t setForceUse(audio_policy_force_use_t usage,
                          audio_policy_forced_cfg_t config) override;
@@ -65,8 +62,10 @@ private:
     DeviceVector getOutputDevicesForStream(audio_stream_type_t stream,
                                            bool fromCache = false) const override;
 
-    sp<DeviceDescriptor> getInputDeviceForAttributes(
-            const audio_attributes_t &attr, AudioMix **mix = nullptr) const override;
+    sp<DeviceDescriptor> getInputDeviceForAttributes(const audio_attributes_t &attr,
+                                                     uid_t uid = 0,
+                                                     sp<AudioPolicyMix> *mix = nullptr)
+                                                     const override;
 
     void updateDeviceSelectionCache() override;
 
@@ -77,15 +76,26 @@ private:
 
     status_t setDefaultDevice(audio_devices_t device);
 
-    audio_devices_t getDeviceForStrategyInt(legacy_strategy strategy,
-                                            DeviceVector availableOutputDevices,
-                                            DeviceVector availableInputDevices,
-                                            const SwAudioOutputCollection &outputs,
-                                            uint32_t outputDeviceTypesToIgnore) const;
+    void filterOutputDevicesForStrategy(legacy_strategy strategy,
+                                            DeviceVector& availableOutputDevices,
+                                            const SwAudioOutputCollection &outputs) const;
+
+    product_strategy_t remapStrategyFromContext(product_strategy_t strategy,
+                                            const SwAudioOutputCollection &outputs) const;
+
+    DeviceVector getDevicesForStrategyInt(legacy_strategy strategy,
+                                          DeviceVector availableOutputDevices,
+                                          const SwAudioOutputCollection &outputs) const;
 
     DeviceVector getDevicesForProductStrategy(product_strategy_t strategy) const;
 
-    audio_devices_t getDeviceForInputSource(audio_source_t inputSource) const;
+    sp<DeviceDescriptor> getDeviceForInputSource(audio_source_t inputSource) const;
+
+    product_strategy_t getProductStrategyFromLegacy(legacy_strategy legacyStrategy) const;
+    audio_devices_t getPreferredDeviceTypeForLegacyStrategy(
+        const DeviceVector& availableOutputDevices, legacy_strategy legacyStrategy) const;
+    DeviceVector getPreferredAvailableDevicesForProductStrategy(
+        const DeviceVector& availableOutputDevices, product_strategy_t strategy) const;
 
     DeviceStrategyMap mDevicesForStrategies;
 

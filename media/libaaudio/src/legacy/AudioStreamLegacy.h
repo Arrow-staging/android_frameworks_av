@@ -17,8 +17,10 @@
 #ifndef LEGACY_AUDIO_STREAM_LEGACY_H
 #define LEGACY_AUDIO_STREAM_LEGACY_H
 
-#include <media/AudioTimestamp.h>
+#include <media/AudioRecord.h>
 #include <media/AudioSystem.h>
+#include <media/AudioTimestamp.h>
+#include <media/AudioTrack.h>
 
 #include <aaudio/AAudio.h>
 
@@ -29,8 +31,6 @@
 
 namespace aaudio {
 
-
-typedef void (*aaudio_legacy_callback_t)(int event, void* user, void *info);
 
 enum {
     /**
@@ -56,21 +56,18 @@ enum {
 typedef int32_t aaudio_callback_operation_t;
 
 
-class AudioStreamLegacy : public AudioStream, public FixedBlockProcessor {
+class AudioStreamLegacy : public AudioStream,
+                          public FixedBlockProcessor,
+                          protected android::AudioTrack::IAudioTrackCallback,
+                          protected android::AudioRecord::IAudioRecordCallback {
 public:
     AudioStreamLegacy();
 
-    virtual ~AudioStreamLegacy();
+    virtual ~AudioStreamLegacy() = default;
 
-    aaudio_legacy_callback_t getLegacyCallback();
 
     int32_t callDataCallbackFrames(uint8_t *buffer, int32_t numFrames);
 
-    // This is public so it can be called from the C callback function.
-    // This is called from the AudioTrack/AudioRecord client.
-    virtual void processCallback(int event, void *info) = 0;
-
-    void processCallbackCommon(aaudio_callback_operation_t opcode, void *info);
 
     // Implement FixedBlockProcessor
     int32_t onProcessFixedBlock(uint8_t *buffer, int32_t numBytes) override;
@@ -86,30 +83,19 @@ public:
     }
 
 protected:
-
-    class StreamDeviceCallback : public android::AudioSystem::AudioDeviceCallback
-    {
-    public:
-
-        StreamDeviceCallback(AudioStreamLegacy *parent) : mParent(parent) {}
-        virtual ~StreamDeviceCallback() {}
-
-        virtual void onAudioDeviceUpdate(audio_io_handle_t audioIo __unused,
-                                         audio_port_handle_t deviceId) {
-            if (mParent != nullptr) {
-                mParent->onAudioDeviceUpdate(deviceId);
-            }
-        }
-
-        AudioStreamLegacy *mParent;
-    };
-
+    size_t onMoreData(const android::AudioTrack::Buffer& buffer) override;
+    // TODO (b/216175830) this method is duplicated in order to ease refactoring which will
+    // reconsolidate.
+    size_t onMoreData(const android::AudioRecord::Buffer& buffer) override;
+    void onNewIAudioTrack() override;
+    void onNewIAudioRecord() override { onNewIAudioTrack(); }
     aaudio_result_t getBestTimestamp(clockid_t clockId,
                                      int64_t *framePosition,
                                      int64_t *timeNanoseconds,
                                      android::ExtendedTimestamp *extendedTimestamp);
 
-    void onAudioDeviceUpdate(audio_port_handle_t deviceId);
+    void onAudioDeviceUpdate(audio_io_handle_t audioIo,
+            audio_port_handle_t deviceId) override;
 
     /*
      * Check to see whether a callback thread has requested a disconnected.
@@ -128,16 +114,33 @@ protected:
         return mFramesRead.increment(frames);
     }
 
+    /**
+     * Get the framesPerBurst from the underlying API.
+     * @return framesPerBurst
+     */
+    virtual int32_t getFramesPerBurstFromDevice() const = 0;
+
+    /**
+     * Get the bufferCapacity from the underlying API.
+     * @return bufferCapacity in frames
+     */
+    virtual int32_t getBufferCapacityFromDevice() const = 0;
+
+    // This is used for exact matching by MediaMetrics. So do not change it.
+    // MediaMetricsConstants.h: AMEDIAMETRICS_PROP_CALLERNAME_VALUE_AAUDIO
+    static constexpr char     kCallerName[] = "aaudio";
+
     MonotonicCounter           mFramesWritten;
     MonotonicCounter           mFramesRead;
     MonotonicCounter           mTimestampPosition;
 
     FixedBlockAdapter         *mBlockAdapter = nullptr;
+    int32_t                    mBlockAdapterBytesPerFrame = 0;
     aaudio_wrapping_frames_t   mPositionWhenStarting = 0;
     int32_t                    mCallbackBufferSize = 0;
-    const android::sp<StreamDeviceCallback>   mDeviceCallback;
 
     AtomicRequestor            mRequestDisconnect;
+
 };
 
 } /* namespace aaudio */

@@ -22,13 +22,17 @@
 
 #include <aaudio/AAudio.h>
 #include <audio_utils/primitives.h>
+#include <media/AidlConversion.h>
 #include <media/AudioRecord.h>
 #include <utils/String16.h>
 
+#include "core/AudioGlobal.h"
 #include "legacy/AudioStreamLegacy.h"
 #include "legacy/AudioStreamRecord.h"
 #include "utility/AudioClock.h"
 #include "utility/FixedBlockWriter.h"
+
+using android::content::AttributionSourceState;
 
 using namespace android;
 using namespace aaudio;
@@ -61,9 +65,8 @@ aaudio_result_t AudioStreamRecord::open(const AudioStreamBuilder& builder)
     const audio_session_t sessionId = AAudioConvert_aaudioToAndroidSessionId(requestedSessionId);
 
     // TODO Support UNSPECIFIED in AudioRecord. For now, use stereo if unspecified.
-    int32_t samplesPerFrame = (getSamplesPerFrame() == AAUDIO_UNSPECIFIED)
-                              ? 2 : getSamplesPerFrame();
-    audio_channel_mask_t channelMask = audio_channel_in_mask_from_count(samplesPerFrame);
+    audio_channel_mask_t channelMask =
+            AAudio_getChannelMaskForOpen(getChannelMask(), getSamplesPerFrame(), true /*isInput*/);
 
     size_t frameCount = (builder.getBufferCapacity() == AAUDIO_UNSPECIFIED) ? 0
                         : builder.getBufferCapacity();
@@ -87,46 +90,24 @@ aaudio_result_t AudioStreamRecord::open(const AudioStreamBuilder& builder)
             break;
     }
 
+    const audio_format_t requestedFormat = getFormat();
     // Preserve behavior of API 26
-    if (getFormat() == AUDIO_FORMAT_DEFAULT) {
+    if (requestedFormat == AUDIO_FORMAT_DEFAULT) {
         setFormat(AUDIO_FORMAT_PCM_FLOAT);
     }
 
-    // Maybe change device format to get a FAST path.
-    // AudioRecord does not support FAST mode for FLOAT data.
-    // TODO AudioRecord should allow FLOAT data paths for FAST tracks.
-    // So IF the user asks for low latency FLOAT
-    // AND the sampleRate is likely to be compatible with FAST
-    // THEN request I16 and convert to FLOAT when passing to user.
-    // Note that hard coding 48000 Hz is not ideal because the sampleRate
-    // for a FAST path might not be 48000 Hz.
-    // It normally is but there is a chance that it is not.
-    // And there is no reliable way to know that in advance.
-    // Luckily the consequences of a wrong guess are minor.
-    // We just may not get a FAST track.
-    // But we wouldn't have anyway without this hack.
-    constexpr int32_t kMostLikelySampleRateForFast = 48000;
-    if (getFormat() == AUDIO_FORMAT_PCM_FLOAT
-            && perfMode == AAUDIO_PERFORMANCE_MODE_LOW_LATENCY
-            && (samplesPerFrame <= 2) // FAST only for mono and stereo
-            && (getSampleRate() == kMostLikelySampleRateForFast
-                || getSampleRate() == AAUDIO_UNSPECIFIED)) {
-        setDeviceFormat(AUDIO_FORMAT_PCM_16_BIT);
-    } else {
-        setDeviceFormat(getFormat());
-    }
 
+    setDeviceFormat(getFormat());
+
+    // To avoid glitching, let AudioFlinger pick the optimal burst size.
     uint32_t notificationFrames = 0;
 
     // Setup the callback if there is one.
-    AudioRecord::callback_t callback = nullptr;
-    void *callbackData = nullptr;
+    sp<AudioRecord::IAudioRecordCallback> callback;
     AudioRecord::transfer_type streamTransferType = AudioRecord::transfer_type::TRANSFER_SYNC;
     if (builder.getDataCallbackProc() != nullptr) {
         streamTransferType = AudioRecord::transfer_type::TRANSFER_CALLBACK;
-        callback = getLegacyCallback();
-        callbackData = this;
-        notificationFrames = builder.getFramesPerDataCallback();
+        callback = sp<AudioRecord::IAudioRecordCallback>::fromExisting(this);
     }
     mCallbackBufferSize = builder.getFramesPerDataCallback();
 
@@ -140,13 +121,23 @@ aaudio_result_t AudioStreamRecord::open(const AudioStreamBuilder& builder)
     const audio_source_t source =
             AAudioConvert_inputPresetToAudioSource(builder.getInputPreset());
 
+    const audio_flags_mask_t attrFlags =
+            AAudioConvert_privacySensitiveToAudioFlagsMask(builder.isPrivacySensitive());
     const audio_attributes_t attributes = {
             .content_type = contentType,
             .usage = AUDIO_USAGE_UNKNOWN, // only used for output
             .source = source,
-            .flags = AUDIO_FLAG_NONE, // Different than the AUDIO_INPUT_FLAGS
+            .flags = attrFlags, // Different than the AUDIO_INPUT_FLAGS
             .tags = ""
     };
+
+    // TODO b/182392769: use attribution source util
+    AttributionSourceState attributionSource;
+    attributionSource.uid = VALUE_OR_FATAL(legacy2aidl_uid_t_int32_t(getuid()));
+    attributionSource.pid = VALUE_OR_FATAL(legacy2aidl_pid_t_int32_t(getpid()));
+    attributionSource.packageName = builder.getOpPackageName();
+    attributionSource.attributionTag = builder.getAttributionTag();
+    attributionSource.token = sp<BBinder>::make();
 
     // ----------- open the AudioRecord ---------------------
     // Might retry, but never more than once.
@@ -154,7 +145,7 @@ aaudio_result_t AudioStreamRecord::open(const AudioStreamBuilder& builder)
         const audio_format_t requestedInternalFormat = getDeviceFormat();
 
         mAudioRecord = new AudioRecord(
-                mOpPackageName // const String16& opPackageName TODO does not compile
+                attributionSource
         );
         mAudioRecord->set(
                 AUDIO_SOURCE_DEFAULT, // ignored because we pass attributes below
@@ -163,7 +154,6 @@ aaudio_result_t AudioStreamRecord::open(const AudioStreamBuilder& builder)
                 channelMask,
                 frameCount,
                 callback,
-                callbackData,
                 notificationFrames,
                 false /*threadCanCallJava*/,
                 sessionId,
@@ -175,10 +165,13 @@ aaudio_result_t AudioStreamRecord::open(const AudioStreamBuilder& builder)
                 selectedDeviceId
         );
 
+        // Set it here so it can be logged by the destructor if the open failed.
+        mAudioRecord->setCallerName(kCallerName);
+
         // Did we get a valid track?
         status_t status = mAudioRecord->initCheck();
         if (status != OK) {
-            close();
+            safeReleaseClose();
             ALOGE("open(), initCheck() returned %d", status);
             return AAudioConvert_androidToAAudioResult(status);
         }
@@ -198,18 +191,29 @@ aaudio_result_t AudioStreamRecord::open(const AudioStreamBuilder& builder)
         }
     }
 
-    // Get the actual values from the AudioRecord.
-    setSamplesPerFrame(mAudioRecord->channelCount());
+    mMetricsId = std::string(AMEDIAMETRICS_KEY_PREFIX_AUDIO_RECORD)
+            + std::to_string(mAudioRecord->getPortId());
+    android::mediametrics::LogItem(mMetricsId)
+            .set(AMEDIAMETRICS_PROP_PERFORMANCEMODE,
+                 AudioGlobal_convertPerformanceModeToText(builder.getPerformanceMode()))
+            .set(AMEDIAMETRICS_PROP_SHARINGMODE,
+                 AudioGlobal_convertSharingModeToText(builder.getSharingMode()))
+            .set(AMEDIAMETRICS_PROP_ENCODINGCLIENT, toString(requestedFormat).c_str()).record();
 
-    int32_t actualSampleRate = mAudioRecord->getSampleRate();
-    ALOGW_IF(actualSampleRate != getSampleRate(),
-             "open() sampleRate changed from %d to %d",
-             getSampleRate(), actualSampleRate);
-    setSampleRate(actualSampleRate);
+    // Get the actual values from the AudioRecord.
+    setChannelMask(AAudioConvert_androidToAAudioChannelMask(
+            mAudioRecord->channelMask(), true /*isInput*/,
+            AAudio_isChannelIndexMask(getChannelMask())));
+    setSampleRate(mAudioRecord->getSampleRate());
+    setBufferCapacity(getBufferCapacityFromDevice());
+    setFramesPerBurst(getFramesPerBurstFromDevice());
 
     // We may need to pass the data through a block size adapter to guarantee constant size.
     if (mCallbackBufferSize != AAUDIO_UNSPECIFIED) {
-        int callbackSizeBytes = getBytesPerFrame() * mCallbackBufferSize;
+        // The block adapter runs before the format conversion.
+        // So we need to use the device frame size.
+        mBlockAdapterBytesPerFrame = getBytesPerDeviceFrame();
+        int callbackSizeBytes = mBlockAdapterBytesPerFrame * mCallbackBufferSize;
         mFixedBlockWriter.open(callbackSizeBytes);
         mBlockAdapter = &mFixedBlockWriter;
     } else {
@@ -269,21 +273,39 @@ aaudio_result_t AudioStreamRecord::open(const AudioStreamBuilder& builder)
             : (aaudio_session_id_t) mAudioRecord->getSessionId();
     setSessionId(actualSessionId);
 
-    mAudioRecord->addAudioDeviceCallback(mDeviceCallback);
+    mAudioRecord->addAudioDeviceCallback(this);
 
     return AAUDIO_OK;
 }
 
-aaudio_result_t AudioStreamRecord::close()
-{
-    // TODO add close() or release() to AudioRecord API then call it from here
-    if (getState() != AAUDIO_STREAM_STATE_CLOSED) {
-        mAudioRecord->removeAudioDeviceCallback(mDeviceCallback);
-        mAudioRecord.clear();
-        setState(AAUDIO_STREAM_STATE_CLOSED);
+aaudio_result_t AudioStreamRecord::release_l() {
+    // TODO add close() or release() to AudioFlinger's AudioRecord API.
+    //  Then call it from here
+    if (getState() != AAUDIO_STREAM_STATE_CLOSING) {
+        mAudioRecord->removeAudioDeviceCallback(this);
+        logReleaseBufferState();
+        // Data callbacks may still be running!
+        return AudioStream::release_l();
+    } else {
+        return AAUDIO_OK; // already released
     }
-    mFixedBlockWriter.close();
-    return AudioStream::close();
+}
+
+void AudioStreamRecord::close_l() {
+    // The callbacks are normally joined in the AudioRecord destructor.
+    // But if another object has a reference to the AudioRecord then
+    // it will not get deleted here.
+    // So we should join callbacks explicitly before returning.
+    // Unlock around the join to avoid deadlocks if the callback tries to lock.
+    // This can happen if the callback returns AAUDIO_CALLBACK_RESULT_STOP
+    mStreamLock.unlock();
+    mAudioRecord->stopAndJoinCallbacks();
+    mStreamLock.lock();
+
+    mAudioRecord.clear();
+    // Do not close mFixedBlockReader. It has a unique_ptr to its buffer
+    // so it will clean up by itself.
+    AudioStream::close_l();
 }
 
 const void * AudioStreamRecord::maybeConvertDeviceData(const void *audioData, int32_t numFrames) {
@@ -304,24 +326,7 @@ const void * AudioStreamRecord::maybeConvertDeviceData(const void *audioData, in
     }
 }
 
-void AudioStreamRecord::processCallback(int event, void *info) {
-    switch (event) {
-        case AudioRecord::EVENT_MORE_DATA:
-            processCallbackCommon(AAUDIO_CALLBACK_OPERATION_PROCESS_DATA, info);
-            break;
-
-            // Stream got rerouted so we disconnect.
-        case AudioRecord::EVENT_NEW_IAUDIORECORD:
-            processCallbackCommon(AAUDIO_CALLBACK_OPERATION_DISCONNECTED, info);
-            break;
-
-        default:
-            break;
-    }
-    return;
-}
-
-aaudio_result_t AudioStreamRecord::requestStart()
+aaudio_result_t AudioStreamRecord::requestStart_l()
 {
     if (mAudioRecord.get() == nullptr) {
         return AAUDIO_ERROR_INVALID_STATE;
@@ -330,18 +335,22 @@ aaudio_result_t AudioStreamRecord::requestStart()
     // Enable callback before starting AudioRecord to avoid shutting
     // down because of a race condition.
     mCallbackEnabled.store(true);
+    aaudio_stream_state_t originalState = getState();
+    // Set before starting the callback so that we are in the correct state
+    // before updateStateMachine() can be called by the callback.
+    setState(AAUDIO_STREAM_STATE_STARTING);
     mFramesWritten.reset32(); // service writes frames
     mTimestampPosition.reset32();
     status_t err = mAudioRecord->start(); // resets position to zero
     if (err != OK) {
+        mCallbackEnabled.store(false);
+        setState(originalState);
         return AAudioConvert_androidToAAudioResult(err);
-    } else {
-        setState(AAUDIO_STREAM_STATE_STARTING);
     }
     return AAUDIO_OK;
 }
 
-aaudio_result_t AudioStreamRecord::requestStop() {
+aaudio_result_t AudioStreamRecord::requestStop_l() {
     if (mAudioRecord.get() == nullptr) {
         return AAUDIO_ERROR_INVALID_STATE;
     }
@@ -454,7 +463,7 @@ aaudio_result_t AudioStreamRecord::read(void *buffer,
     return (aaudio_result_t) framesRead;
 }
 
-aaudio_result_t AudioStreamRecord::setBufferSize(int32_t requestedFrames)
+aaudio_result_t AudioStreamRecord::setBufferSize(int32_t /*requestedFrames*/)
 {
     return getBufferSize();
 }
@@ -464,7 +473,7 @@ int32_t AudioStreamRecord::getBufferSize() const
     return getBufferCapacity(); // TODO implement in AudioRecord?
 }
 
-int32_t AudioStreamRecord::getBufferCapacity() const
+int32_t AudioStreamRecord::getBufferCapacityFromDevice() const
 {
     return static_cast<int32_t>(mAudioRecord->frameCount());
 }
@@ -474,8 +483,7 @@ int32_t AudioStreamRecord::getXRunCount() const
     return 0; // TODO implement when AudioRecord supports it
 }
 
-int32_t AudioStreamRecord::getFramesPerBurst() const
-{
+int32_t AudioStreamRecord::getFramesPerBurstFromDevice() const {
     return static_cast<int32_t>(mAudioRecord->getNotificationPeriodInFrames());
 }
 
@@ -503,7 +511,7 @@ int64_t AudioStreamRecord::getFramesWritten() {
         case AAUDIO_STREAM_STATE_STARTED:
             result = mAudioRecord->getPosition(&position);
             if (result == OK) {
-                mFramesWritten.update32(position);
+                mFramesWritten.update32((int32_t)position);
             }
             break;
         case AAUDIO_STREAM_STATE_STOPPING:

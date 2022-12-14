@@ -660,6 +660,16 @@ sp<VendorTagDescriptorCache> VendorTagDescriptorCache::getGlobalVendorTagCache()
     return sGlobalVendorTagDescriptorCache;
 }
 
+bool VendorTagDescriptorCache::isVendorCachePresent(metadata_vendor_id_t vendorId) {
+    Mutex::Autolock al(sLock);
+    if ((sGlobalVendorTagDescriptorCache.get() != nullptr) &&
+            (sGlobalVendorTagDescriptorCache->getVendorIdsAndTagDescriptors().find(vendorId) !=
+             sGlobalVendorTagDescriptorCache->getVendorIdsAndTagDescriptors().end())) {
+        return true;
+    }
+    return false;
+}
+
 extern "C" {
 
 int vendor_tag_descriptor_get_tag_count(const vendor_tag_ops_t* /*v*/) {
@@ -750,7 +760,7 @@ int vendor_tag_descriptor_cache_get_tag_type(uint32_t tag,
     Mutex::Autolock al(sLock);
     if (sGlobalVendorTagDescriptorCache == NULL) {
         ALOGE("%s: Vendor tag descriptor cache not initialized.", __FUNCTION__);
-        return VENDOR_TAG_NAME_ERR;
+        return VENDOR_TAG_TYPE_ERR;
     }
     return sGlobalVendorTagDescriptorCache->getTagType(tag, id);
 }

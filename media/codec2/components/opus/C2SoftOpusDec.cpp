@@ -31,40 +31,38 @@ extern "C" {
 
 namespace android {
 
+namespace {
+
 constexpr char COMPONENT_NAME[] = "c2.android.opus.decoder";
 
-class C2SoftOpusDec::IntfImpl : public C2InterfaceHelper {
-   public:
-    explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper>& helper)
-        : C2InterfaceHelper(helper) {
+}  // namespace
+
+class C2SoftOpusDec::IntfImpl : public SimpleInterface<void>::BaseParams {
+public:
+    explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
+        : SimpleInterface<void>::BaseParams(
+                helper,
+                COMPONENT_NAME,
+                C2Component::KIND_DECODER,
+                C2Component::DOMAIN_AUDIO,
+                MEDIA_MIMETYPE_AUDIO_OPUS) {
+        noPrivateBuffers();
+        noInputReferences();
+        noOutputReferences();
+        noInputLatency();
+        noTimeStretch();
         setDerivedInstance(this);
 
         addParameter(
-                DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::input(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mInputMediaType, C2_PARAMKEY_INPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::input>(
-                        MEDIA_MIMETYPE_AUDIO_OPUS))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputMediaType, C2_PARAMKEY_OUTPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::output>(
-                        MEDIA_MIMETYPE_AUDIO_RAW))
+                DefineParam(mAttrib, C2_PARAMKEY_COMPONENT_ATTRIBUTES)
+                .withConstValue(new C2ComponentAttributesSetting(
+                    C2Component::ATTRIB_IS_TEMPORAL))
                 .build());
 
         addParameter(
                 DefineParam(mSampleRate, C2_PARAMKEY_SAMPLE_RATE)
                 .withDefault(new C2StreamSampleRateInfo::output(0u, 48000))
-                .withFields({C2F(mSampleRate, value).equalTo(48000)})
+                .withFields({C2F(mSampleRate, value).inRange(8000, 48000)})
                 .withSetter((Setter<decltype(*mSampleRate)>::StrictValueWithNoDeps))
                 .build());
 
@@ -88,11 +86,7 @@ class C2SoftOpusDec::IntfImpl : public C2InterfaceHelper {
                 .build());
     }
 
-   private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
+private:
     std::shared_ptr<C2StreamSampleRateInfo::output> mSampleRate;
     std::shared_ptr<C2StreamChannelCountInfo::output> mChannelCount;
     std::shared_ptr<C2StreamBitrateInfo::input> mBitrate;
@@ -252,20 +246,25 @@ void C2SoftOpusDec::process(
     const uint8_t *data = rView.data() + inOffset;
     if (mInputBufferCount < 3) {
         if (mInputBufferCount == 0) {
-            size_t opusHeadSize = inSize;
+            size_t opusHeadSize = 0;
             size_t codecDelayBufSize = 0;
             size_t seekPreRollBufSize = 0;
-            void *opusHeadBuf = (void *)data;
+            void *opusHeadBuf = NULL;
             void *codecDelayBuf = NULL;
             void *seekPreRollBuf = NULL;
 
-            GetOpusHeaderBuffers(data, inSize, &opusHeadBuf,
-                                &opusHeadSize, &codecDelayBuf,
-                                &codecDelayBufSize, &seekPreRollBuf,
-                                &seekPreRollBufSize);
+            if (!GetOpusHeaderBuffers(data, inSize, &opusHeadBuf,
+                                     &opusHeadSize, &codecDelayBuf,
+                                     &codecDelayBufSize, &seekPreRollBuf,
+                                     &seekPreRollBufSize)) {
+                ALOGE("%s encountered error in GetOpusHeaderBuffers", __func__);
+                mSignalledError = true;
+                work->result = C2_CORRUPTED;
+                return;
+            }
 
             if (!ParseOpusHeader((uint8_t *)opusHeadBuf, opusHeadSize, &mHeader)) {
-                ALOGE("Encountered error while Parsing Opus Header.");
+                ALOGE("%s Encountered error while Parsing Opus Header.", __func__);
                 mSignalledError = true;
                 work->result = C2_CORRUPTED;
                 return;
@@ -304,16 +303,16 @@ void C2SoftOpusDec::process(
                 return;
             }
 
-            if (codecDelayBuf && codecDelayBufSize == 8) {
+            if (codecDelayBuf && codecDelayBufSize == sizeof(uint64_t)) {
                 uint64_t value;
                 memcpy(&value, codecDelayBuf, sizeof(uint64_t));
                 mCodecDelay = ns_to_samples(value, kRate);
                 mSamplesToDiscard = mCodecDelay;
                 ++mInputBufferCount;
             }
-            if (seekPreRollBuf && seekPreRollBufSize == 8) {
+            if (seekPreRollBuf && seekPreRollBufSize == sizeof(uint64_t)) {
                 uint64_t value;
-                memcpy(&value, codecDelayBuf, sizeof(uint64_t));
+                memcpy(&value, seekPreRollBuf, sizeof(uint64_t));
                 mSeekPreRoll = ns_to_samples(value, kRate);
                 ++mInputBufferCount;
             }
@@ -474,11 +473,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftOpusDecFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

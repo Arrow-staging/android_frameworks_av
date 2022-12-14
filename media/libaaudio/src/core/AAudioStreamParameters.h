@@ -26,8 +26,8 @@ namespace aaudio {
 
 class AAudioStreamParameters {
 public:
-    AAudioStreamParameters();
-    virtual ~AAudioStreamParameters();
+    AAudioStreamParameters() = default;
+    virtual ~AAudioStreamParameters() = default;
 
     int32_t getDeviceId() const {
         return mDeviceId;
@@ -47,13 +47,6 @@ public:
 
     int32_t getSamplesPerFrame() const {
         return mSamplesPerFrame;
-    }
-
-    /**
-     * This is also known as channelCount.
-     */
-    void setSamplesPerFrame(int32_t samplesPerFrame) {
-        mSamplesPerFrame = samplesPerFrame;
     }
 
     audio_format_t getFormat() const {
@@ -104,6 +97,22 @@ public:
         mContentType = contentType;
     }
 
+    aaudio_spatialization_behavior_t getSpatializationBehavior() const {
+        return mSpatializationBehavior;
+    }
+
+    void setSpatializationBehavior(aaudio_spatialization_behavior_t spatializationBehavior) {
+        mSpatializationBehavior = spatializationBehavior;
+    }
+
+    bool isContentSpatialized() const {
+        return mIsContentSpatialized;
+    }
+
+    void setIsContentSpatialized(bool isSpatialized) {
+        mIsContentSpatialized = isSpatialized;
+    }
+
     aaudio_input_preset_t getInputPreset() const {
         return mInputPreset;
     }
@@ -112,12 +121,54 @@ public:
         mInputPreset = inputPreset;
     }
 
+    aaudio_allowed_capture_policy_t getAllowedCapturePolicy() const {
+        return mAllowedCapturePolicy;
+    }
+
+    void setAllowedCapturePolicy(aaudio_allowed_capture_policy_t policy) {
+        mAllowedCapturePolicy = policy;
+    }
+
     aaudio_session_id_t getSessionId() const {
         return mSessionId;
     }
 
     void setSessionId(aaudio_session_id_t sessionId) {
         mSessionId = sessionId;
+    }
+
+    bool isPrivacySensitive() const {
+        return mIsPrivacySensitive;
+    }
+
+    void setPrivacySensitive(bool privacySensitive) {
+        mIsPrivacySensitive = privacySensitive;
+    }
+
+    const std::optional<std::string> getOpPackageName() const {
+        return mOpPackageName;
+    }
+
+    // TODO b/182392769: reexamine if Identity can be used
+    void setOpPackageName(const std::optional<std::string>& opPackageName) {
+        mOpPackageName = opPackageName;
+    }
+
+    const std::optional<std::string> getAttributionTag() const {
+        return mAttributionTag;
+    }
+
+    void setAttributionTag(const std::optional<std::string>& attributionTag) {
+        mAttributionTag = attributionTag;
+    }
+
+    aaudio_channel_mask_t getChannelMask() const {
+        return mChannelMask;
+    }
+
+    void setChannelMask(aaudio_channel_mask_t channelMask) {
+        mChannelMask = channelMask;
+        mSamplesPerFrame = AAudioConvert_channelMaskToCount(channelMask);
     }
 
     /**
@@ -138,17 +189,27 @@ public:
     void dump() const;
 
 private:
-    int32_t                    mSamplesPerFrame = AAUDIO_UNSPECIFIED;
-    int32_t                    mSampleRate      = AAUDIO_UNSPECIFIED;
-    int32_t                    mDeviceId        = AAUDIO_UNSPECIFIED;
-    aaudio_sharing_mode_t      mSharingMode     = AAUDIO_SHARING_MODE_SHARED;
-    audio_format_t             mAudioFormat     = AUDIO_FORMAT_DEFAULT;
-    aaudio_direction_t         mDirection       = AAUDIO_DIRECTION_OUTPUT;
-    aaudio_usage_t             mUsage           = AAUDIO_UNSPECIFIED;
-    aaudio_content_type_t      mContentType     = AAUDIO_UNSPECIFIED;
-    aaudio_input_preset_t      mInputPreset     = AAUDIO_UNSPECIFIED;
-    int32_t                    mBufferCapacity  = AAUDIO_UNSPECIFIED;
-    aaudio_session_id_t        mSessionId       = AAUDIO_SESSION_ID_NONE;
+    bool validateChannelMask() const;
+
+    int32_t                         mSamplesPerFrame      = AAUDIO_UNSPECIFIED;
+    int32_t                         mSampleRate           = AAUDIO_UNSPECIFIED;
+    int32_t                         mDeviceId             = AAUDIO_UNSPECIFIED;
+    aaudio_sharing_mode_t           mSharingMode          = AAUDIO_SHARING_MODE_SHARED;
+    audio_format_t                  mAudioFormat          = AUDIO_FORMAT_DEFAULT;
+    aaudio_direction_t              mDirection            = AAUDIO_DIRECTION_OUTPUT;
+    aaudio_usage_t                  mUsage                = AAUDIO_UNSPECIFIED;
+    aaudio_content_type_t           mContentType          = AAUDIO_UNSPECIFIED;
+    aaudio_spatialization_behavior_t mSpatializationBehavior
+                                                          = AAUDIO_UNSPECIFIED;
+    bool                            mIsContentSpatialized = false;
+    aaudio_input_preset_t           mInputPreset          = AAUDIO_UNSPECIFIED;
+    int32_t                         mBufferCapacity       = AAUDIO_UNSPECIFIED;
+    aaudio_allowed_capture_policy_t mAllowedCapturePolicy = AAUDIO_UNSPECIFIED;
+    aaudio_session_id_t             mSessionId            = AAUDIO_SESSION_ID_NONE;
+    bool                            mIsPrivacySensitive   = false;
+    std::optional<std::string>      mOpPackageName        = {};
+    std::optional<std::string>      mAttributionTag       = {};
+    aaudio_channel_mask_t           mChannelMask          = AAUDIO_UNSPECIFIED;
 };
 
 } /* namespace aaudio */

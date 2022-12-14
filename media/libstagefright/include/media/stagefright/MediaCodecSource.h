@@ -17,7 +17,7 @@
 #ifndef MediaCodecSource_H_
 #define MediaCodecSource_H_
 
-#include <media/MediaSource.h>
+#include <media/stagefright/MediaSource.h>
 #include <media/stagefright/foundation/ABase.h>
 #include <media/stagefright/foundation/AHandlerReflector.h>
 #include <media/stagefright/foundation/Mutexed.h>
@@ -64,11 +64,14 @@ struct MediaCodecSource : public MediaSource,
 
     // MediaBufferObserver
     virtual void signalBufferReturned(MediaBufferBase *buffer);
+    virtual status_t setEncodingBitrate(int32_t bitRate /* bps */);
 
     // for AHandlerReflector
     void onMessageReceived(const sp<AMessage> &msg);
 
 
+
+    status_t requestIDRFrame();
 
 protected:
     virtual ~MediaCodecSource();

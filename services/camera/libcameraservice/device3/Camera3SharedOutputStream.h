@@ -36,10 +36,16 @@ public:
     Camera3SharedOutputStream(int id, const std::vector<sp<Surface>>& surfaces,
             uint32_t width, uint32_t height, int format,
             uint64_t consumerUsage, android_dataspace dataSpace,
-            camera3_stream_rotation_t rotation, nsecs_t timestampOffset,
+            camera_stream_rotation_t rotation, nsecs_t timestampOffset,
             const String8& physicalCameraId,
+            const std::unordered_set<int32_t> &sensorPixelModesUsed, IPCTransport transport,
             int setId = CAMERA3_STREAM_SET_ID_INVALID,
-            bool useHalBufManager = false);
+            bool useHalBufManager = false,
+            int64_t dynamicProfile = ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
+            int64_t streamUseCase = ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
+            bool deviceTimeBaseIsRealtime = false,
+            int timestampBase = OutputConfiguration::TIMESTAMP_BASE_DEFAULT,
+            int mirrorMode = OutputConfiguration::MIRROR_MODE_AUTO);
 
     virtual ~Camera3SharedOutputStream();
 
@@ -64,6 +70,12 @@ public:
             const std::vector<OutputStreamInfo> &outputInfo,
             const std::vector<size_t> &removedSurfaceIds,
             KeyedVector<sp<Surface>, size_t> *outputMap/*out*/);
+
+    virtual bool getOfflineProcessingSupport() const {
+        // As per Camera spec. shared streams currently do not support
+        // offline mode.
+        return false;
+    }
 
 private:
 
@@ -110,7 +122,7 @@ private:
     /**
      * Internal Camera3Stream interface
      */
-    virtual status_t getBufferLocked(camera3_stream_buffer *buffer,
+    virtual status_t getBufferLocked(camera_stream_buffer *buffer,
             const std::vector<size_t>& surface_ids);
 
     virtual status_t queueBufferToConsumer(sp<ANativeWindow>& consumer,

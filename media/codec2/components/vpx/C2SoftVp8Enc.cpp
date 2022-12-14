@@ -23,8 +23,6 @@
 
 namespace android {
 
-constexpr char COMPONENT_NAME[] = "c2.android.vp8.encoder";
-
 C2SoftVp8Enc::C2SoftVp8Enc(const char* name, c2_node_id_t id,
                            const std::shared_ptr<IntfImpl>& intfImpl)
     : C2SoftVpxEnc(name, id, intfImpl), mDCTPartitions(0), mProfile(1) {}
@@ -103,11 +101,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftVp8EncFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

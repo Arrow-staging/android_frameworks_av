@@ -19,11 +19,11 @@
 
 #include <audio_utils/clock.h>
 #include <audio_utils/PowerLog.h>
+#include <cutils/bitops.h>
 #include <cutils/properties.h>
 #include <system/audio.h>
 
 namespace android {
-namespace CPP_VERSION {
 
 class StreamPowerLog {
 public:
@@ -98,7 +98,6 @@ private:
     size_t mFrameSize;
 };
 
-} // namespace CPP_VERSION
 } // namespace android
 
 #endif // ANDROID_HARDWARE_STREAM_POWER_LOG_H

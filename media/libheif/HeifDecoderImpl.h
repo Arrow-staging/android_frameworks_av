@@ -40,15 +40,21 @@ public:
 
     bool init(HeifStream* stream, HeifFrameInfo* frameInfo) override;
 
+    bool getSequenceInfo(HeifFrameInfo* frameInfo, size_t *frameCount) override;
+
     bool getEncodedColor(HeifEncodedColor* outColor) const override;
 
     bool setOutputColor(HeifColorFormat heifColor) override;
 
     bool decode(HeifFrameInfo* frameInfo) override;
 
+    bool decodeSequence(int frameIndex, HeifFrameInfo* frameInfo) override;
+
     bool getScanline(uint8_t* dst) override;
 
     size_t skipScanlines(size_t count) override;
+
+    uint32_t getColorDepth() override;
 
 private:
     struct DecodeThread;
@@ -56,13 +62,15 @@ private:
     sp<IDataSource> mDataSource;
     sp<MediaMetadataRetriever> mRetriever;
     sp<IMemory> mFrameMemory;
+    HeifFrameInfo mImageInfo;
+    HeifFrameInfo mSequenceInfo;
     android_pixel_format_t mOutputColor;
     size_t mCurScanline;
-    uint32_t mWidth;
-    uint32_t mHeight;
+    size_t mTotalScanline;
     bool mFrameDecoded;
     bool mHasImage;
     bool mHasVideo;
+    size_t mSequenceLength;
 
     // Slice decoding only
     Mutex mLock;
@@ -75,6 +83,7 @@ private:
 
     bool decodeAsync();
     bool getScanlineInner(uint8_t* dst);
+    bool reinit(HeifFrameInfo* frameInfo);
 };
 
 } // namespace android

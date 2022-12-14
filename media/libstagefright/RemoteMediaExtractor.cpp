@@ -18,9 +18,10 @@
 #define LOG_TAG "RemoteMediaExtractor"
 #include <utils/Log.h>
 
+#include <binder/IPCThreadState.h>
 #include <media/stagefright/InterfaceUtils.h>
-#include <media/MediaAnalyticsItem.h>
-#include <media/MediaSource.h>
+#include <media/MediaMetricsItem.h>
+#include <media/stagefright/MediaSource.h>
 #include <media/stagefright/RemoteMediaExtractor.h>
 
 // still doing some on/off toggling here.
@@ -39,6 +40,16 @@ static const char *kExtractorFormat = "android.media.mediaextractor.fmt";
 static const char *kExtractorMime = "android.media.mediaextractor.mime";
 static const char *kExtractorTracks = "android.media.mediaextractor.ntrk";
 
+// The following are not available in frameworks/base/media/java/android/media/MediaExtractor.java
+// because they are not applicable or useful to that API.
+static const char *kExtractorEntryPoint = "android.media.mediaextractor.entry";
+static const char *kExtractorLogSessionId = "android.media.mediaextractor.logSessionId";
+
+static const char *kEntryPointSdk = "sdk";
+static const char *kEntryPointWithJvm = "ndk-with-jvm";
+static const char *kEntryPointNoJvm = "ndk-no-jvm";
+static const char *kEntryPointOther = "other";
+
 RemoteMediaExtractor::RemoteMediaExtractor(
         MediaExtractor *extractor,
         const sp<DataSource> &source,
@@ -47,15 +58,20 @@ RemoteMediaExtractor::RemoteMediaExtractor(
      mSource(source),
      mExtractorPlugin(plugin) {
 
-    mAnalyticsItem = nullptr;
+    mMetricsItem = nullptr;
     if (MEDIA_LOG) {
-        mAnalyticsItem = MediaAnalyticsItem::create(kKeyExtractor);
+        mMetricsItem = mediametrics::Item::create(kKeyExtractor);
+
+        // we're in the extractor service, we want to attribute to the app
+        // that invoked us.
+        int uid = IPCThreadState::self()->getCallingUid();
+        mMetricsItem->setUid(uid);
 
         // track the container format (mpeg, aac, wvm, etc)
         size_t ntracks = extractor->countTracks();
-        mAnalyticsItem->setCString(kExtractorFormat, extractor->name());
+        mMetricsItem->setCString(kExtractorFormat, extractor->name());
         // tracks (size_t)
-        mAnalyticsItem->setInt32(kExtractorTracks, ntracks);
+        mMetricsItem->setInt32(kExtractorTracks, ntracks);
         // metadata
         MetaDataBase pMetaData;
         if (extractor->getMetaData(pMetaData) == OK) {
@@ -64,10 +80,13 @@ RemoteMediaExtractor::RemoteMediaExtractor(
             // 'mime'
             const char *mime = nullptr;
             if (pMetaData.findCString(kKeyMIMEType, &mime)) {
-                mAnalyticsItem->setCString(kExtractorMime,  mime);
+                mMetricsItem->setCString(kExtractorMime,  mime);
             }
             // what else is interesting and not already available?
         }
+        // By default, we set the entry point to be "other". Clients of this
+        // class will override this value by calling setEntryPoint.
+        mMetricsItem->setCString(kExtractorEntryPoint, kEntryPointOther);
     }
 }
 
@@ -78,15 +97,15 @@ RemoteMediaExtractor::~RemoteMediaExtractor() {
     mExtractorPlugin = nullptr;
     // log the current record, provided it has some information worth recording
     if (MEDIA_LOG) {
-        if (mAnalyticsItem != nullptr) {
-            if (mAnalyticsItem->count() > 0) {
-                mAnalyticsItem->selfrecord();
+        if (mMetricsItem != nullptr) {
+            if (mMetricsItem->count() > 0) {
+                mMetricsItem->selfrecord();
             }
         }
     }
-    if (mAnalyticsItem != nullptr) {
-        delete mAnalyticsItem;
-        mAnalyticsItem = nullptr;
+    if (mMetricsItem != nullptr) {
+        delete mMetricsItem;
+        mMetricsItem = nullptr;
     }
 }
 
@@ -117,11 +136,11 @@ sp<MetaData> RemoteMediaExtractor::getMetaData() {
 }
 
 status_t RemoteMediaExtractor::getMetrics(Parcel *reply) {
-    if (mAnalyticsItem == nullptr || reply == nullptr) {
+    if (mMetricsItem == nullptr || reply == nullptr) {
         return UNKNOWN_ERROR;
     }
 
-    mAnalyticsItem->writeToParcel(reply);
+    mMetricsItem->writeToParcel(reply);
     return OK;
 }
 
@@ -133,8 +152,35 @@ status_t RemoteMediaExtractor::setMediaCas(const HInterfaceToken &casToken) {
     return mExtractor->setMediaCas((uint8_t*)casToken.data(), casToken.size());
 }
 
-const char * RemoteMediaExtractor::name() {
-    return mExtractor->name();
+String8 RemoteMediaExtractor::name() {
+    return String8(mExtractor->name());
+}
+
+status_t RemoteMediaExtractor::setEntryPoint(EntryPoint entryPoint) {
+    const char* entryPointString;
+    switch (entryPoint) {
+      case EntryPoint::SDK:
+            entryPointString = kEntryPointSdk;
+            break;
+        case EntryPoint::NDK_WITH_JVM:
+            entryPointString = kEntryPointWithJvm;
+            break;
+        case EntryPoint::NDK_NO_JVM:
+            entryPointString = kEntryPointNoJvm;
+            break;
+        case EntryPoint::OTHER:
+            entryPointString = kEntryPointOther;
+            break;
+        default:
+            return BAD_VALUE;
+    }
+    mMetricsItem->setCString(kExtractorEntryPoint, entryPointString);
+    return OK;
+}
+
+status_t RemoteMediaExtractor::setLogSessionId(const String8& logSessionId) {
+    mMetricsItem->setCString(kExtractorLogSessionId, logSessionId.c_str());
+    return OK;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

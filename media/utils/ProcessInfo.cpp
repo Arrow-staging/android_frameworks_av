@@ -21,10 +21,14 @@
 #include <media/stagefright/ProcessInfo.h>
 
 #include <binder/IPCThreadState.h>
-#include <binder/IProcessInfoService.h>
 #include <binder/IServiceManager.h>
+#include <private/android_filesystem_config.h>
+#include <processinfo/IProcessInfoService.h>
 
 namespace android {
+
+static constexpr int32_t INVALID_ADJ = -10000;
+static constexpr int32_t NATIVE_ADJ = -1000;
 
 ProcessInfo::ProcessInfo() {}
 
@@ -34,8 +38,6 @@ bool ProcessInfo::getPriority(int pid, int* priority) {
 
     size_t length = 1;
     int32_t state;
-    static const int32_t INVALID_ADJ = -10000;
-    static const int32_t NATIVE_ADJ = -1000;
     int32_t score = INVALID_ADJ;
     status_t err = service->getProcessStatesAndOomScoresFromPids(length, &pid, &state, &score);
     if (err != OK) {
@@ -44,8 +46,17 @@ bool ProcessInfo::getPriority(int pid, int* priority) {
     }
     ALOGV("pid %d state %d score %d", pid, state, score);
     if (score <= NATIVE_ADJ) {
-        ALOGE("pid %d invalid OOM adjustments value %d", pid, score);
-        return false;
+        std::scoped_lock lock{mOverrideLock};
+
+        // If this process if not tracked by ActivityManagerService, look for overrides.
+        auto it = mOverrideMap.find(pid);
+        if (it != mOverrideMap.end()) {
+            ALOGI("pid %d invalid OOM score %d, override to %d", pid, score, it->second.oomScore);
+            score = it->second.oomScore;
+        } else {
+            ALOGE("pid %d invalid OOM score %d", pid, score);
+            return false;
+        }
     }
 
     // Use OOM adjustments value as the priority. Lower the value, higher the priority.
@@ -53,10 +64,47 @@ bool ProcessInfo::getPriority(int pid, int* priority) {
     return true;
 }
 
-bool ProcessInfo::isValidPid(int pid) {
+bool ProcessInfo::isPidTrusted(int pid) {
+    return isPidUidTrusted(pid, -1);
+}
+
+bool ProcessInfo::isPidUidTrusted(int pid, int uid) {
     int callingPid = IPCThreadState::self()->getCallingPid();
-    // Trust it if this is called from the same process otherwise pid has to match the calling pid.
-    return (callingPid == getpid()) || (callingPid == pid);
+    int callingUid = IPCThreadState::self()->getCallingUid();
+    // Always trust when the caller is acting on their own behalf.
+    if (pid == callingPid && (uid == callingUid || uid == -1)) { // UID can be optional
+        return true;
+    }
+    // Implicitly trust when the caller is our own process.
+    if (callingPid == getpid()) {
+        return true;
+    }
+    // Implicitly trust when a media process is calling.
+    if (callingUid == AID_MEDIA) {
+        return true;
+    }
+    // Otherwise, allow the caller to act as another process when the caller has permissions.
+    return checkCallingPermission(String16("android.permission.MEDIA_RESOURCE_OVERRIDE_PID"));
+}
+
+bool ProcessInfo::overrideProcessInfo(int pid, int procState, int oomScore) {
+    std::scoped_lock lock{mOverrideLock};
+
+    mOverrideMap.erase(pid);
+
+    // Disable the override if oomScore is set to NATIVE_ADJ or below.
+    if (oomScore <= NATIVE_ADJ) {
+        return false;
+    }
+
+    mOverrideMap.emplace(pid, ProcessInfoOverride{procState, oomScore});
+    return true;
+}
+
+void ProcessInfo::removeProcessInfoOverride(int pid) {
+    std::scoped_lock lock{mOverrideLock};
+
+    mOverrideMap.erase(pid);
 }
 
 ProcessInfo::~ProcessInfo() {}

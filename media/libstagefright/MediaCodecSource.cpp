@@ -22,14 +22,15 @@
 
 #include <gui/IGraphicBufferProducer.h>
 #include <gui/Surface.h>
-#include <media/ICrypto.h>
+#include <mediadrm/ICrypto.h>
 #include <media/MediaBufferHolder.h>
 #include <media/MediaCodecBuffer.h>
-#include <media/MediaSource.h>
+#include <media/stagefright/MediaSource.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/ALooper.h>
 #include <media/stagefright/foundation/AMessage.h>
+#include <media/stagefright/foundation/ColorUtils.h>
 #include <media/stagefright/MediaBuffer.h>
 #include <media/stagefright/MediaCodec.h>
 #include <media/stagefright/MediaCodecConstants.h>
@@ -168,9 +169,7 @@ status_t MediaCodecSource::Puller::postSynchronouslyAndReturnError(
 }
 
 status_t MediaCodecSource::Puller::setStopTimeUs(int64_t stopTimeUs) {
-    sp<AMessage> msg = new AMessage(kWhatSetStopTimeUs, this);
-    msg->setInt64("stop-time-us", stopTimeUs);
-    return postSynchronouslyAndReturnError(msg);
+    return mSource->setStopTimeUs(stopTimeUs);
 }
 
 status_t MediaCodecSource::Puller::start(const sp<MetaData> &meta, const sp<AMessage> &notify) {
@@ -188,19 +187,11 @@ status_t MediaCodecSource::Puller::start(const sp<MetaData> &meta, const sp<AMes
 }
 
 void MediaCodecSource::Puller::stop() {
-    bool interrupt = false;
-    {
-        // mark stopping before actually reaching kWhatStop on the looper, so the pulling will
-        // stop.
-        Mutexed<Queue>::Locked queue(mQueue);
-        queue->mPulling = false;
-        interrupt = queue->mReadPendingSince && (queue->mReadPendingSince < ALooper::GetNowUs() - 1000000);
-        queue->flush(); // flush any unprocessed pulled buffers
-    }
-
-    if (interrupt) {
-        interruptSource();
-    }
+    // mark stopping before actually reaching kWhatStop on the looper, so the pulling will
+    // stop.
+    Mutexed<Queue>::Locked queue(mQueue);
+    queue->mPulling = false;
+    queue->flush(); // flush any unprocessed pulled buffers
 }
 
 void MediaCodecSource::Puller::interruptSource() {
@@ -221,6 +212,7 @@ void MediaCodecSource::Puller::pause() {
 
 void MediaCodecSource::Puller::resume() {
     Mutexed<Queue>::Locked queue(mQueue);
+    queue->flush();
     queue->mPaused = false;
 }
 
@@ -432,6 +424,30 @@ status_t MediaCodecSource::read(
 void MediaCodecSource::signalBufferReturned(MediaBufferBase *buffer) {
     buffer->setObserver(0);
     buffer->release();
+}
+
+status_t MediaCodecSource::setEncodingBitrate(int32_t bitRate) {
+    ALOGV("setEncodingBitrate (%d)", bitRate);
+
+    if (mEncoder == NULL) {
+        ALOGW("setEncodingBitrate (%d) : mEncoder is null", bitRate);
+        return BAD_VALUE;
+    }
+
+    sp<AMessage> params = new AMessage;
+    params->setInt32("video-bitrate", bitRate);
+
+    return mEncoder->setParameters(params);
+}
+
+status_t MediaCodecSource::requestIDRFrame() {
+    if (mEncoder == NULL) {
+        ALOGW("requestIDRFrame : mEncoder is null");
+        return BAD_VALUE;
+    } else {
+        mEncoder->requestIDRFrame();
+        return OK;
+    }
 }
 
 MediaCodecSource::MediaCodecSource(
@@ -659,9 +675,9 @@ void MediaCodecSource::signalEOS(status_t err) {
     if (mStopping && reachedEOS) {
         ALOGI("encoder (%s) stopped", mIsVideo ? "video" : "audio");
         if (mPuller != NULL) {
-            mPuller->stopSource();
+            mPuller->interruptSource();
         }
-        ALOGV("source (%s) stopped", mIsVideo ? "video" : "audio");
+        ALOGI("source (%s) stopped", mIsVideo ? "video" : "audio");
         // posting reply to everyone that's waiting
         List<sp<AReplyToken>>::iterator it;
         for (it = mStopReplyIDQueue.begin();
@@ -689,6 +705,9 @@ void MediaCodecSource::resume(int64_t resumeStartTimeUs) {
 status_t MediaCodecSource::feedEncoderInputBuffers() {
     MediaBufferBase* mbuf = NULL;
     while (!mAvailEncoderInputIndices.empty() && mPuller->readBuffer(&mbuf)) {
+        if (!mEncoder) {
+            return BAD_VALUE;
+        }
         size_t bufferIndex = *mAvailEncoderInputIndices.begin();
         mAvailEncoderInputIndices.erase(mAvailEncoderInputIndices.begin());
 
@@ -743,6 +762,23 @@ status_t MediaCodecSource::feedEncoderInputBuffers() {
             memcpy(inbuf->data(), mbuf->data(), size);
 
             if (mIsVideo) {
+                int32_t ds = 0;
+                if (mbuf->meta_data().findInt32(kKeyColorSpace, &ds)
+                        && ds != HAL_DATASPACE_UNKNOWN) {
+                    android_dataspace dataspace = static_cast<android_dataspace>(ds);
+                    ColorUtils::convertDataSpaceToV0(dataspace);
+                    ALOGD("Updating dataspace to %x", dataspace);
+                    int32_t standard, transfer, range;
+                    ColorUtils::getColorConfigFromDataSpace(
+                            dataspace, &range, &standard, &transfer);
+                    sp<AMessage> msg = new AMessage;
+                    msg->setInt32(KEY_COLOR_STANDARD, standard);
+                    msg->setInt32(KEY_COLOR_TRANSFER, transfer);
+                    msg->setInt32(KEY_COLOR_RANGE, range);
+                    msg->setInt32("android._dataspace", dataspace);
+                    mEncoder->setParameters(msg);
+                }
+
                 // video encoder will release MediaBuffer when done
                 // with underlying data.
                 inbuf->meta()->setObject("mediaBufferHolder", new MediaBufferHolder(mbuf));
@@ -831,7 +867,9 @@ status_t MediaCodecSource::onStart(MetaData *params) {
 }
 
 void MediaCodecSource::onPause(int64_t pauseStartTimeUs) {
-    if ((mFlags & FLAG_USE_SURFACE_INPUT) && (mEncoder != NULL)) {
+    if (mStopping || mOutput.lock()->mEncoderReachedEOS) {
+        // Nothing to do
+    } else if ((mFlags & FLAG_USE_SURFACE_INPUT) && (mEncoder != NULL)) {
         sp<AMessage> params = new AMessage;
         params->setInt32(PARAMETER_KEY_SUSPEND, true);
         params->setInt64(PARAMETER_KEY_SUSPEND_TIME, pauseStartTimeUs);
@@ -848,7 +886,7 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
     {
         int32_t eos = 0;
         if (msg->findInt32("eos", &eos) && eos) {
-            ALOGV("puller (%s) reached EOS", mIsVideo ? "video" : "audio");
+            ALOGI("puller (%s) reached EOS", mIsVideo ? "video" : "audio");
             signalEOS();
             break;
         }
@@ -905,9 +943,16 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
 
             sp<MediaCodecBuffer> outbuf;
             status_t err = mEncoder->getOutputBuffer(index, &outbuf);
-            if (err != OK || outbuf == NULL || outbuf->data() == NULL
-                || outbuf->size() == 0) {
+            if (err != OK || outbuf == NULL || outbuf->data() == NULL) {
                 signalEOS();
+                break;
+            } else if (outbuf->size() == 0) {
+                // Zero length CSD buffers are not treated as an error
+                if (flags & MediaCodec::BUFFER_FLAG_CODECCONFIG) {
+                    mEncoder->releaseOutputBuffer(index);
+                } else {
+                    signalEOS();
+                }
                 break;
             }
 
@@ -1066,12 +1111,7 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
         if (generation != mGeneration) {
              break;
         }
-
-        if (!(mFlags & FLAG_USE_SURFACE_INPUT)) {
-            ALOGV("source (%s) stopping", mIsVideo ? "video" : "audio");
-            mPuller->interruptSource();
-            ALOGV("source (%s) stopped", mIsVideo ? "video" : "audio");
-        }
+        ALOGD("source (%s) stopping stalled", mIsVideo ? "video" : "audio");
         signalEOS();
         break;
     }
@@ -1103,7 +1143,7 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
         if (mFlags & FLAG_USE_SURFACE_INPUT) {
             sp<AMessage> params = new AMessage;
             params->setInt64(PARAMETER_KEY_OFFSET_TIME, mInputBufferTimeOffsetUs);
-            err = mEncoder->setParameters(params);
+            err = mEncoder ? mEncoder->setParameters(params) : BAD_VALUE;
         }
 
         sp<AMessage> response = new AMessage;
@@ -1123,7 +1163,7 @@ void MediaCodecSource::onMessageReceived(const sp<AMessage> &msg) {
         if (mFlags & FLAG_USE_SURFACE_INPUT) {
             sp<AMessage> params = new AMessage;
             params->setInt64("stop-time-us", stopTimeUs);
-            err = mEncoder->setParameters(params);
+            err = mEncoder ? mEncoder->setParameters(params) : BAD_VALUE;
         } else {
             err = mPuller->setStopTimeUs(stopTimeUs);
         }

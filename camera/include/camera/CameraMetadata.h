@@ -40,6 +40,11 @@ class CameraMetadata: public Parcelable {
      * dataCapacity extra storage */
     CameraMetadata(size_t entryCapacity, size_t dataCapacity = 10);
 
+    /**
+     * Move constructor, acquires other's metadata buffer
+     */
+    CameraMetadata(CameraMetadata &&other);
+
     ~CameraMetadata();
 
     /** Takes ownership of passed-in buffer */
@@ -52,6 +57,11 @@ class CameraMetadata: public Parcelable {
      */
     CameraMetadata &operator=(const CameraMetadata &other);
     CameraMetadata &operator=(const camera_metadata_t *buffer);
+
+    /**
+     * Move assignment operator, acquires other's metadata buffer
+     */
+    CameraMetadata &operator=(CameraMetadata &&other);
 
     /**
      * Get reference to the underlying metadata buffer. Ownership remains with
@@ -116,6 +126,11 @@ class CameraMetadata: public Parcelable {
      * Is the buffer empty (no entires)
      */
     bool isEmpty() const;
+
+    /**
+     * Return the allocated camera metadata buffer size in bytes.
+     */
+    size_t bufferSize() const;
 
     /**
      * Sort metadata buffer for faster find
@@ -226,6 +241,11 @@ class CameraMetadata: public Parcelable {
      */
     static status_t getTagFromName(const char *name,
             const VendorTagDescriptor* vTags, uint32_t *tag);
+
+    /**
+     * Return the current vendor tag id associated with this metadata.
+     */
+    metadata_vendor_id_t getVendorId();
 
   private:
     camera_metadata_t *mBuffer;

@@ -62,7 +62,7 @@ void MediaBufferGroup::init(size_t buffers, size_t buffer_size, size_t growthLim
         mInternal->mGrowthLimit = buffers;
     }
 
-#ifndef NO_IMEMORY
+#if !defined(NO_IMEMORY) && !defined(__ANDROID_APEX__)
     if (buffer_size >= kSharedMemoryThreshold) {
         ALOGD("creating MemoryDealer");
         // Using a single MemoryDealer is efficient for a group of shared memory objects.
@@ -75,7 +75,7 @@ void MediaBufferGroup::init(size_t buffers, size_t buffer_size, size_t growthLim
 
         for (size_t i = 0; i < buffers; ++i) {
             sp<IMemory> mem = memoryDealer->allocate(augmented_size);
-            if (mem.get() == nullptr || mem->pointer() == nullptr) {
+            if (mem.get() == nullptr || mem->unsecurePointer() == nullptr) {
                 ALOGW("Only allocated %zu shared buffers of size %zu", i, buffer_size);
                 break;
             }

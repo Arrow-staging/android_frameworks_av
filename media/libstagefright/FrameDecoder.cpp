@@ -18,19 +18,24 @@
 #define LOG_TAG "FrameDecoder"
 
 #include "include/FrameDecoder.h"
+#include "include/FrameCaptureLayer.h"
+#include "include/HevcUtils.h"
 #include <binder/MemoryBase.h>
 #include <binder/MemoryHeapBase.h>
 #include <gui/Surface.h>
 #include <inttypes.h>
-#include <media/ICrypto.h>
+#include <mediadrm/ICrypto.h>
 #include <media/IMediaSource.h>
 #include <media/MediaCodecBuffer.h>
 #include <media/stagefright/foundation/avc_utils.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/AMessage.h>
+#include <media/stagefright/foundation/ColorUtils.h>
 #include <media/stagefright/ColorConverter.h>
+#include <media/stagefright/FrameCaptureProcessor.h>
 #include <media/stagefright/MediaBuffer.h>
 #include <media/stagefright/MediaCodec.h>
+#include <media/stagefright/MediaCodecConstants.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/Utils.h>
@@ -40,11 +45,12 @@
 namespace android {
 
 static const int64_t kBufferTimeOutUs = 10000LL; // 10 msec
-static const size_t kRetryCount = 50; // must be >0
+static const size_t kRetryCount = 100; // must be >0
+static const int64_t kDefaultSampleDurationUs = 33333LL; // 33ms
 
 sp<IMemory> allocVideoFrame(const sp<MetaData>& trackMeta,
         int32_t width, int32_t height, int32_t tileWidth, int32_t tileHeight,
-        int32_t dstBpp, bool metaOnly = false) {
+        int32_t dstBpp, uint32_t bitDepth, bool allocRotated, bool metaOnly) {
     int32_t rotationAngle;
     if (!trackMeta->findInt32(kKeyRotation, &rotationAngle)) {
         rotationAngle = 0;  // By default, no rotation
@@ -62,6 +68,12 @@ sp<IMemory> allocVideoFrame(const sp<MetaData>& trackMeta,
     if (trackMeta->findInt32(kKeySARWidth, &sarWidth)
             && trackMeta->findInt32(kKeySARHeight, &sarHeight)
             && sarHeight != 0) {
+        int32_t multVal;
+        if (width < 0 || sarWidth < 0 ||
+            __builtin_mul_overflow(width, sarWidth, &multVal)) {
+            ALOGE("displayWidth overflow %dx%d", width, sarWidth);
+            return NULL;
+        }
         displayWidth = (width * sarWidth) / sarHeight;
         displayHeight = height;
     } else if (trackMeta->findInt32(kKeyDisplayWidth, &displayWidth)
@@ -74,8 +86,29 @@ sp<IMemory> allocVideoFrame(const sp<MetaData>& trackMeta,
         displayHeight = height;
     }
 
+    if (allocRotated) {
+        if (rotationAngle == 90 || rotationAngle == 270) {
+            // swap width and height for 90 & 270 degrees rotation
+            std::swap(width, height);
+            std::swap(displayWidth, displayHeight);
+            std::swap(tileWidth, tileHeight);
+        }
+        // Rotation is already applied.
+        rotationAngle = 0;
+    }
+
+    if (!metaOnly) {
+        int32_t multVal;
+        if (width < 0 || height < 0 || dstBpp < 0 ||
+            __builtin_mul_overflow(dstBpp, width, &multVal) ||
+            __builtin_mul_overflow(multVal, height, &multVal)) {
+            ALOGE("Frame size overflow %dx%d bpp %d", width, height, dstBpp);
+            return NULL;
+        }
+    }
+
     VideoFrame frame(width, height, displayWidth, displayHeight,
-            tileWidth, tileHeight, rotationAngle, dstBpp, !metaOnly, iccSize);
+            tileWidth, tileHeight, rotationAngle, dstBpp, bitDepth, !metaOnly, iccSize);
 
     size_t size = frame.getFlattenedSize();
     sp<MemoryHeapBase> heap = new MemoryHeapBase(size, 0, "MetadataRetrieverClient");
@@ -84,14 +117,35 @@ sp<IMemory> allocVideoFrame(const sp<MetaData>& trackMeta,
         return NULL;
     }
     sp<IMemory> frameMem = new MemoryBase(heap, 0, size);
-    if (frameMem == NULL) {
+    if (frameMem == NULL || frameMem->unsecurePointer() == NULL) {
         ALOGE("not enough memory for VideoFrame size=%zu", size);
         return NULL;
     }
-    VideoFrame* frameCopy = static_cast<VideoFrame*>(frameMem->pointer());
+    VideoFrame* frameCopy = static_cast<VideoFrame*>(frameMem->unsecurePointer());
     frameCopy->init(frame, iccData, iccSize);
 
     return frameMem;
+}
+
+sp<IMemory> allocVideoFrame(const sp<MetaData>& trackMeta,
+        int32_t width, int32_t height, int32_t tileWidth, int32_t tileHeight,
+        int32_t dstBpp, uint8_t bitDepth, bool allocRotated = false) {
+    return allocVideoFrame(trackMeta, width, height, tileWidth, tileHeight, dstBpp, bitDepth,
+            allocRotated, false /*metaOnly*/);
+}
+
+sp<IMemory> allocMetaFrame(const sp<MetaData>& trackMeta,
+        int32_t width, int32_t height, int32_t tileWidth, int32_t tileHeight,
+        int32_t dstBpp, uint8_t bitDepth) {
+    return allocVideoFrame(trackMeta, width, height, tileWidth, tileHeight, dstBpp, bitDepth,
+            false /*allocRotated*/, true /*metaOnly*/);
+}
+
+bool isAvif(const sp<MetaData> &trackMeta) {
+    const char *mime;
+    return trackMeta->findCString(kKeyMIMEType, &mime)
+        && (!strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_AV1)
+            || !strcasecmp(mime, MEDIA_MIMETYPE_IMAGE_AVIF));
 }
 
 bool findThumbnailInfo(
@@ -100,9 +154,10 @@ bool findThumbnailInfo(
     uint32_t dummyType;
     const void *dummyData;
     size_t dummySize;
+    int codecConfigKey = isAvif(trackMeta) ? kKeyThumbnailAV1C : kKeyThumbnailHVCC;
     return trackMeta->findInt32(kKeyThumbnailWidth, width)
         && trackMeta->findInt32(kKeyThumbnailHeight, height)
-        && trackMeta->findData(kKeyThumbnailHVCC,
+        && trackMeta->findData(codecConfigKey,
                 type ?: &dummyType, data ?: &dummyData, size ?: &dummySize);
 }
 
@@ -117,23 +172,34 @@ bool findGridInfo(const sp<MetaData> &trackMeta,
 bool getDstColorFormat(
         android_pixel_format_t colorFormat,
         OMX_COLOR_FORMATTYPE *dstFormat,
+        ui::PixelFormat *captureFormat,
         int32_t *dstBpp) {
     switch (colorFormat) {
         case HAL_PIXEL_FORMAT_RGB_565:
         {
             *dstFormat = OMX_COLOR_Format16bitRGB565;
+            *captureFormat = ui::PixelFormat::RGB_565;
             *dstBpp = 2;
             return true;
         }
         case HAL_PIXEL_FORMAT_RGBA_8888:
         {
             *dstFormat = OMX_COLOR_Format32BitRGBA8888;
+            *captureFormat = ui::PixelFormat::RGBA_8888;
             *dstBpp = 4;
             return true;
         }
         case HAL_PIXEL_FORMAT_BGRA_8888:
         {
             *dstFormat = OMX_COLOR_Format32bitBGRA8888;
+            *captureFormat = ui::PixelFormat::BGRA_8888;
+            *dstBpp = 4;
+            return true;
+        }
+        case HAL_PIXEL_FORMAT_RGBA_1010102:
+        {
+            *dstFormat = (OMX_COLOR_FORMATTYPE)COLOR_Format32bitABGR2101010;
+            *captureFormat = ui::PixelFormat::RGBA_1010102;
             *dstBpp = 4;
             return true;
         }
@@ -148,11 +214,12 @@ bool getDstColorFormat(
 
 //static
 sp<IMemory> FrameDecoder::getMetadataOnly(
-        const sp<MetaData> &trackMeta, int colorFormat, bool thumbnail) {
+        const sp<MetaData> &trackMeta, int colorFormat, bool thumbnail, uint32_t bitDepth) {
     OMX_COLOR_FORMATTYPE dstFormat;
+    ui::PixelFormat captureFormat;
     int32_t dstBpp;
-    if (!getDstColorFormat(
-            (android_pixel_format_t)colorFormat, &dstFormat, &dstBpp)) {
+    if (!getDstColorFormat((android_pixel_format_t)colorFormat,
+            &dstFormat, &captureFormat, &dstBpp)) {
         return NULL;
     }
 
@@ -170,8 +237,20 @@ sp<IMemory> FrameDecoder::getMetadataOnly(
             tileWidth = tileHeight = 0;
         }
     }
-    return allocVideoFrame(trackMeta,
-            width, height, tileWidth, tileHeight, dstBpp, true /*metaOnly*/);
+
+    sp<IMemory> metaMem =
+            allocMetaFrame(trackMeta, width, height, tileWidth, tileHeight, dstBpp, bitDepth);
+
+    // try to fill sequence meta's duration based on average frame rate,
+    // default to 33ms if frame rate is unavailable.
+    int32_t frameRate;
+    VideoFrame* meta = static_cast<VideoFrame*>(metaMem->unsecurePointer());
+    if (trackMeta->findInt32(kKeyFrameRate, &frameRate) && frameRate > 0) {
+        meta->mDurationUs = 1000000LL / frameRate;
+    } else {
+        meta->mDurationUs = kDefaultSampleDurationUs;
+    }
+    return metaMem;
 }
 
 FrameDecoder::FrameDecoder(
@@ -194,15 +273,28 @@ FrameDecoder::~FrameDecoder() {
     }
 }
 
+bool isHDR(const sp<AMessage> &format) {
+    uint32_t standard, transfer;
+    if (!format->findInt32("color-standard", (int32_t*)&standard)) {
+        standard = 0;
+    }
+    if (!format->findInt32("color-transfer", (int32_t*)&transfer)) {
+        transfer = 0;
+    }
+    return standard == ColorUtils::kColorStandardBT2020 &&
+            (transfer == ColorUtils::kColorTransferST2084 ||
+            transfer == ColorUtils::kColorTransferHLG);
+}
+
 status_t FrameDecoder::init(
-        int64_t frameTimeUs, size_t numFrames, int option, int colorFormat) {
-    if (!getDstColorFormat(
-            (android_pixel_format_t)colorFormat, &mDstFormat, &mDstBpp)) {
+        int64_t frameTimeUs, int option, int colorFormat) {
+    if (!getDstColorFormat((android_pixel_format_t)colorFormat,
+            &mDstFormat, &mCaptureFormat, &mDstBpp)) {
         return ERROR_UNSUPPORTED;
     }
 
     sp<AMessage> videoFormat = onGetFormatAndSeekOptions(
-            frameTimeUs, numFrames, option, &mReadOptions);
+            frameTimeUs, option, &mReadOptions, &mSurface);
     if (videoFormat == NULL) {
         ALOGE("video format or seek mode not supported");
         return ERROR_UNSUPPORTED;
@@ -219,7 +311,7 @@ status_t FrameDecoder::init(
     }
 
     err = decoder->configure(
-            videoFormat, NULL /* surface */, NULL /* crypto */, 0 /* flags */);
+            videoFormat, mSurface, NULL /* crypto */, 0 /* flags */);
     if (err != OK) {
         ALOGW("configure returned error %d (%s)", err, asString(err));
         decoder->release();
@@ -253,19 +345,7 @@ sp<IMemory> FrameDecoder::extractFrame(FrameRect *rect) {
         return NULL;
     }
 
-    return mFrames.size() > 0 ? mFrames[0] : NULL;
-}
-
-status_t FrameDecoder::extractFrames(std::vector<sp<IMemory> >* frames) {
-    status_t err = extractInternal();
-    if (err != OK) {
-        return err;
-    }
-
-    for (size_t i = 0; i < mFrames.size(); i++) {
-        frames->push_back(mFrames[i]);
-    }
-    return OK;
+    return mFrameMemory;
 }
 
 status_t FrameDecoder::extractInternal() {
@@ -379,8 +459,13 @@ status_t FrameDecoder::extractInternal() {
                         ALOGE("failed to get output buffer %zu", index);
                         break;
                     }
-                    err = onOutputReceived(videoFrameBuffer, mOutputFormat, ptsUs, &done);
-                    mDecoder->releaseOutputBuffer(index);
+                    if (mSurface != nullptr) {
+                        mDecoder->renderOutputBufferAndRelease(index);
+                        err = onOutputReceived(videoFrameBuffer, mOutputFormat, ptsUs, &done);
+                    } else {
+                        err = onOutputReceived(videoFrameBuffer, mOutputFormat, ptsUs, &done);
+                        mDecoder->releaseOutputBuffer(index);
+                    }
                 } else {
                     ALOGW("Received error %d (%s) instead of output", err, asString(err));
                     done = true;
@@ -404,22 +489,24 @@ VideoFrameDecoder::VideoFrameDecoder(
         const sp<MetaData> &trackMeta,
         const sp<IMediaSource> &source)
     : FrameDecoder(componentName, trackMeta, source),
-      mIsAvcOrHevc(false),
+      mFrame(NULL),
+      mIsAvc(false),
+      mIsHevc(false),
       mSeekMode(MediaSource::ReadOptions::SEEK_PREVIOUS_SYNC),
       mTargetTimeUs(-1LL),
-      mNumFrames(0),
-      mNumFramesDecoded(0) {
+      mDefaultSampleDurationUs(0) {
 }
 
 sp<AMessage> VideoFrameDecoder::onGetFormatAndSeekOptions(
-        int64_t frameTimeUs, size_t numFrames, int seekMode, MediaSource::ReadOptions *options) {
+        int64_t frameTimeUs, int seekMode,
+        MediaSource::ReadOptions *options,
+        sp<Surface> *window) {
     mSeekMode = static_cast<MediaSource::ReadOptions::SeekMode>(seekMode);
     if (mSeekMode < MediaSource::ReadOptions::SEEK_PREVIOUS_SYNC ||
             mSeekMode > MediaSource::ReadOptions::SEEK_FRAME_INDEX) {
         ALOGE("Unknown seek mode: %d", mSeekMode);
         return NULL;
     }
-    mNumFrames = numFrames;
 
     const char *mime;
     if (!trackMeta()->findCString(kKeyMIMEType, &mime)) {
@@ -427,8 +514,8 @@ sp<AMessage> VideoFrameDecoder::onGetFormatAndSeekOptions(
         return NULL;
     }
 
-    mIsAvcOrHevc = !strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_AVC)
-            || !strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_HEVC);
+    mIsAvc = !strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_AVC);
+    mIsHevc = !strcasecmp(mime, MEDIA_MIMETYPE_VIDEO_HEVC);
 
     if (frameTimeUs < 0) {
         int64_t thumbNailTime = -1ll;
@@ -448,8 +535,11 @@ sp<AMessage> VideoFrameDecoder::onGetFormatAndSeekOptions(
         return NULL;
     }
 
-    // TODO: Use Flexible color instead
-    videoFormat->setInt32("color-format", OMX_COLOR_FormatYUV420Planar);
+    if (dstFormat() == COLOR_Format32bitABGR2101010) {
+        videoFormat->setInt32("color-format", COLOR_FormatYUVP010);
+    } else {
+        videoFormat->setInt32("color-format", OMX_COLOR_FormatYUV420Planar);
+    }
 
     // For the thumbnail extraction case, try to allocate single buffer in both
     // input and output ports, if seeking to a sync frame. NOTE: This request may
@@ -460,6 +550,23 @@ sp<AMessage> VideoFrameDecoder::onGetFormatAndSeekOptions(
         videoFormat->setInt32("android._num-input-buffers", 1);
         videoFormat->setInt32("android._num-output-buffers", 1);
     }
+
+    if (isHDR(videoFormat)) {
+        *window = initSurface();
+        if (*window == NULL) {
+            ALOGE("Failed to init surface control for HDR, fallback to non-hdr");
+        } else {
+            videoFormat->setInt32("color-format", OMX_COLOR_FormatAndroidOpaque);
+        }
+    }
+
+    int32_t frameRate;
+    if (trackMeta()->findInt32(kKeyFrameRate, &frameRate) && frameRate > 0) {
+        mDefaultSampleDurationUs = 1000000LL / frameRate;
+    } else {
+        mDefaultSampleDurationUs = kDefaultSampleDurationUs;
+    }
+
     return videoFormat;
 }
 
@@ -474,11 +581,19 @@ status_t VideoFrameDecoder::onInputReceived(
         ALOGV("Seeking closest: targetTimeUs=%lld", (long long)mTargetTimeUs);
     }
 
-    if (mIsAvcOrHevc && !isSeekingClosest
-            && IsIDR(codecBuffer->data(), codecBuffer->size())) {
+    if (!isSeekingClosest
+            && ((mIsAvc && IsIDR(codecBuffer->data(), codecBuffer->size()))
+            || (mIsHevc && IsIDR(
+            codecBuffer->data(), codecBuffer->size())))) {
         // Only need to decode one IDR frame, unless we're seeking with CLOSEST
         // option, in which case we need to actually decode to targetTimeUs.
         *flags |= MediaCodec::BUFFER_FLAG_EOS;
+    }
+    int64_t durationUs;
+    if (sampleMeta.findInt64(kKeyDuration, &durationUs)) {
+        mSampleDurations.push_back(durationUs);
+    } else {
+        mSampleDurations.push_back(mDefaultSampleDurationUs);
     }
     return OK;
 }
@@ -487,6 +602,11 @@ status_t VideoFrameDecoder::onOutputReceived(
         const sp<MediaCodecBuffer> &videoFrameBuffer,
         const sp<AMessage> &outputFormat,
         int64_t timeUs, bool *done) {
+    int64_t durationUs = mDefaultSampleDurationUs;
+    if (!mSampleDurations.empty()) {
+        durationUs = *mSampleDurations.begin();
+        mSampleDurations.erase(mSampleDurations.begin());
+    }
     bool shouldOutput = (mTargetTimeUs < 0LL) || (timeUs >= mTargetTimeUs);
 
     // If this is not the target frame, skip color convert.
@@ -495,7 +615,7 @@ status_t VideoFrameDecoder::onOutputReceived(
         return OK;
     }
 
-    *done = (++mNumFramesDecoded >= mNumFrames);
+    *done = true;
 
     if (outputFormat == NULL) {
         return ERROR_MALFORMED;
@@ -504,11 +624,20 @@ status_t VideoFrameDecoder::onOutputReceived(
     int32_t width, height, stride, srcFormat;
     if (!outputFormat->findInt32("width", &width) ||
             !outputFormat->findInt32("height", &height) ||
-            !outputFormat->findInt32("stride", &stride) ||
             !outputFormat->findInt32("color-format", &srcFormat)) {
         ALOGE("format missing dimension or color: %s",
                 outputFormat->debugString().c_str());
         return ERROR_MALFORMED;
+    }
+
+    if (!outputFormat->findInt32("stride", &stride)) {
+        if (mCaptureLayer == NULL) {
+            ALOGE("format must have stride for byte buffer mode: %s",
+                    outputFormat->debugString().c_str());
+            return ERROR_MALFORMED;
+        }
+        // for surface output, set stride to width, we don't actually need it.
+        stride = width;
     }
 
     int32_t crop_left, crop_top, crop_right, crop_bottom;
@@ -518,15 +647,40 @@ status_t VideoFrameDecoder::onOutputReceived(
         crop_bottom = height - 1;
     }
 
-    sp<IMemory> frameMem = allocVideoFrame(
-            trackMeta(),
-            (crop_right - crop_left + 1),
-            (crop_bottom - crop_top + 1),
-            0,
-            0,
-            dstBpp());
-    addFrame(frameMem);
-    VideoFrame* frame = static_cast<VideoFrame*>(frameMem->pointer());
+    int32_t slice_height;
+    if (outputFormat->findInt32("slice-height", &slice_height) && slice_height > 0) {
+        height = slice_height;
+    }
+
+    uint32_t bitDepth = 8;
+    if (COLOR_FormatYUVP010 == srcFormat) {
+        bitDepth = 10;
+    }
+
+    if (mFrame == NULL) {
+        sp<IMemory> frameMem = allocVideoFrame(
+                trackMeta(),
+                (crop_right - crop_left + 1),
+                (crop_bottom - crop_top + 1),
+                0,
+                0,
+                dstBpp(),
+                bitDepth,
+                mCaptureLayer != nullptr /*allocRotated*/);
+        if (frameMem == nullptr) {
+            return NO_MEMORY;
+        }
+
+        mFrame = static_cast<VideoFrame*>(frameMem->unsecurePointer());
+
+        setFrame(frameMem);
+    }
+
+    mFrame->mDurationUs = durationUs;
+
+    if (mCaptureLayer != nullptr) {
+        return captureSurface();
+    }
 
     ColorConverter converter((OMX_COLOR_FORMATTYPE)srcFormat, dstFormat());
 
@@ -547,9 +701,11 @@ status_t VideoFrameDecoder::onOutputReceived(
                 (const uint8_t *)videoFrameBuffer->data(),
                 width, height, stride,
                 crop_left, crop_top, crop_right, crop_bottom,
-                frame->getFlattenedData(),
-                frame->mWidth, frame->mHeight, frame->mRowBytes,
-                crop_left, crop_top, crop_right, crop_bottom);
+                mFrame->getFlattenedData(),
+                mFrame->mWidth, mFrame->mHeight, mFrame->mRowBytes,
+                // since the frame is allocated with top-left adjusted,
+                // the dst rect should start at {0,0} as well.
+                0, 0, mFrame->mWidth - 1, mFrame->mHeight - 1);
         return OK;
     }
 
@@ -558,9 +714,60 @@ status_t VideoFrameDecoder::onOutputReceived(
     return ERROR_UNSUPPORTED;
 }
 
+sp<Surface> VideoFrameDecoder::initSurface() {
+    // create the consumer listener interface, and hold sp so that this
+    // interface lives as long as the GraphicBufferSource.
+    sp<FrameCaptureLayer> captureLayer = new FrameCaptureLayer();
+    if (captureLayer->init() != OK) {
+        ALOGE("failed to init capture layer");
+        return nullptr;
+    }
+    mCaptureLayer = captureLayer;
+
+    return captureLayer->getSurface();
+}
+
+status_t VideoFrameDecoder::captureSurface() {
+    sp<GraphicBuffer> outBuffer;
+    status_t err = mCaptureLayer->capture(
+            captureFormat(), Rect(0, 0, mFrame->mWidth, mFrame->mHeight), &outBuffer);
+
+    if (err != OK) {
+        ALOGE("failed to capture layer (err %d)", err);
+        return err;
+    }
+
+    ALOGV("capture: %dx%d, format %d, stride %d",
+            outBuffer->getWidth(),
+            outBuffer->getHeight(),
+            outBuffer->getPixelFormat(),
+            outBuffer->getStride());
+
+    uint8_t *base;
+    int32_t outBytesPerPixel, outBytesPerStride;
+    err = outBuffer->lock(
+            GraphicBuffer::USAGE_SW_READ_OFTEN,
+            reinterpret_cast<void**>(&base),
+            &outBytesPerPixel,
+            &outBytesPerStride);
+    if (err != OK) {
+        ALOGE("failed to lock graphic buffer: err %d", err);
+        return err;
+    }
+
+    uint8_t *dst = mFrame->getFlattenedData();
+    for (size_t y = 0 ; y < fmin(mFrame->mHeight, outBuffer->getHeight()) ; y++) {
+        memcpy(dst, base, fmin(mFrame->mWidth, outBuffer->getWidth()) * mFrame->mBytesPerPixel);
+        dst += mFrame->mRowBytes;
+        base += outBuffer->getStride() * mFrame->mBytesPerPixel;
+    }
+    outBuffer->unlock();
+    return OK;
+}
+
 ////////////////////////////////////////////////////////////////////////
 
-ImageDecoder::ImageDecoder(
+MediaImageDecoder::MediaImageDecoder(
         const AString &componentName,
         const sp<MetaData> &trackMeta,
         const sp<IMediaSource> &source)
@@ -576,9 +783,9 @@ ImageDecoder::ImageDecoder(
       mTargetTiles(0) {
 }
 
-sp<AMessage> ImageDecoder::onGetFormatAndSeekOptions(
-        int64_t frameTimeUs, size_t /*numFrames*/,
-        int /*seekMode*/, MediaSource::ReadOptions *options) {
+sp<AMessage> MediaImageDecoder::onGetFormatAndSeekOptions(
+        int64_t frameTimeUs, int /*seekMode*/,
+        MediaSource::ReadOptions *options, sp<Surface> * /*window*/) {
     sp<MetaData> overrideMeta;
     if (frameTimeUs < 0) {
         uint32_t type;
@@ -596,7 +803,10 @@ sp<AMessage> ImageDecoder::onGetFormatAndSeekOptions(
         overrideMeta->remove(kKeyDisplayHeight);
         overrideMeta->setInt32(kKeyWidth, mWidth);
         overrideMeta->setInt32(kKeyHeight, mHeight);
-        overrideMeta->setData(kKeyHVCC, type, data, size);
+        // The AV1 codec configuration data is passed via CSD0 to the AV1
+        // decoder.
+        const int codecConfigKey = isAvif(trackMeta()) ? kKeyOpaqueCSD0 : kKeyHVCC;
+        overrideMeta->setData(codecConfigKey, type, data, size);
         options->setSeekTo(-1);
     } else {
         CHECK(trackMeta()->findInt32(kKeyWidth, &mWidth));
@@ -609,8 +819,16 @@ sp<AMessage> ImageDecoder::onGetFormatAndSeekOptions(
     if (overrideMeta == NULL) {
         // check if we're dealing with a tiled heif
         int32_t tileWidth, tileHeight, gridRows, gridCols;
+        int32_t widthColsProduct = 0;
+        int32_t heightRowsProduct = 0;
         if (findGridInfo(trackMeta(), &tileWidth, &tileHeight, &gridRows, &gridCols)) {
-            if (mWidth <= tileWidth * gridCols && mHeight <= tileHeight * gridRows) {
+            if (__builtin_mul_overflow(tileWidth, gridCols, &widthColsProduct) ||
+                    __builtin_mul_overflow(tileHeight, gridRows, &heightRowsProduct)) {
+                ALOGE("Multiplication overflowed Grid size: %dx%d, Picture size: %dx%d",
+                        gridCols, gridRows, tileWidth, tileHeight);
+                return nullptr;
+            }
+            if (mWidth <= widthColsProduct && mHeight <= heightRowsProduct) {
                 ALOGV("grid: %dx%d, tile size: %dx%d, picture size: %dx%d",
                         gridCols, gridRows, tileWidth, tileHeight, mWidth, mHeight);
 
@@ -639,8 +857,11 @@ sp<AMessage> ImageDecoder::onGetFormatAndSeekOptions(
         return NULL;
     }
 
-    // TODO: Use Flexible color instead
-    videoFormat->setInt32("color-format", OMX_COLOR_FormatYUV420Planar);
+    if (dstFormat() == COLOR_Format32bitABGR2101010) {
+        videoFormat->setInt32("color-format", COLOR_FormatYUVP010);
+    } else {
+        videoFormat->setInt32("color-format", OMX_COLOR_FormatYUV420Planar);
+    }
 
     if ((mGridRows == 1) && (mGridCols == 1)) {
         videoFormat->setInt32("android._num-input-buffers", 1);
@@ -649,7 +870,7 @@ sp<AMessage> ImageDecoder::onGetFormatAndSeekOptions(
     return videoFormat;
 }
 
-status_t ImageDecoder::onExtractRect(FrameRect *rect) {
+status_t MediaImageDecoder::onExtractRect(FrameRect *rect) {
     // TODO:
     // This callback is for verifying whether we can decode the rect,
     // and if so, set up the internal variables for decoding.
@@ -688,28 +909,48 @@ status_t ImageDecoder::onExtractRect(FrameRect *rect) {
     return OK;
 }
 
-status_t ImageDecoder::onOutputReceived(
+status_t MediaImageDecoder::onOutputReceived(
         const sp<MediaCodecBuffer> &videoFrameBuffer,
         const sp<AMessage> &outputFormat, int64_t /*timeUs*/, bool *done) {
     if (outputFormat == NULL) {
         return ERROR_MALFORMED;
     }
 
-    int32_t width, height, stride;
-    CHECK(outputFormat->findInt32("width", &width));
-    CHECK(outputFormat->findInt32("height", &height));
-    CHECK(outputFormat->findInt32("stride", &stride));
+    int32_t width, height, stride, srcFormat;
+    if (outputFormat->findInt32("width", &width) == false) {
+        ALOGE("MediaImageDecoder::onOutputReceived:width is missing in outputFormat");
+        return ERROR_MALFORMED;
+    }
+    if (outputFormat->findInt32("height", &height) == false) {
+        ALOGE("MediaImageDecoder::onOutputReceived:height is missing in outputFormat");
+        return ERROR_MALFORMED;
+    }
+    if (outputFormat->findInt32("stride", &stride) == false) {
+        ALOGE("MediaImageDecoder::onOutputReceived:stride is missing in outputFormat");
+        return ERROR_MALFORMED;
+    }
+    if (outputFormat->findInt32("color-format", &srcFormat) == false) {
+        ALOGE("MediaImageDecoder::onOutputReceived: color format is missing in outputFormat");
+        return ERROR_MALFORMED;
+    }
+
+    uint32_t bitDepth = 8;
+    if (COLOR_FormatYUVP010 == srcFormat) {
+        bitDepth = 10;
+    }
 
     if (mFrame == NULL) {
         sp<IMemory> frameMem = allocVideoFrame(
-                trackMeta(), mWidth, mHeight, mTileWidth, mTileHeight, dstBpp());
-        mFrame = static_cast<VideoFrame*>(frameMem->pointer());
+                trackMeta(), mWidth, mHeight, mTileWidth, mTileHeight, dstBpp(), bitDepth);
 
-        addFrame(frameMem);
+        if (frameMem == nullptr) {
+            return NO_MEMORY;
+        }
+
+        mFrame = static_cast<VideoFrame*>(frameMem->unsecurePointer());
+
+        setFrame(frameMem);
     }
-
-    int32_t srcFormat;
-    CHECK(outputFormat->findInt32("color-format", &srcFormat));
 
     ColorConverter converter((OMX_COLOR_FORMATTYPE)srcFormat, dstFormat());
 
@@ -725,12 +966,6 @@ status_t ImageDecoder::onOutputReceived(
     }
     converter.setSrcColorSpace(standard, range, transfer);
 
-    int32_t dstLeft, dstTop, dstRight, dstBottom;
-    dstLeft = mTilesDecoded % mGridCols * width;
-    dstTop = mTilesDecoded / mGridCols * height;
-    dstRight = dstLeft + width - 1;
-    dstBottom = dstTop + height - 1;
-
     int32_t crop_left, crop_top, crop_right, crop_bottom;
     if (!outputFormat->findRect("crop", &crop_left, &crop_top, &crop_right, &crop_bottom)) {
         crop_left = crop_top = 0;
@@ -738,15 +973,30 @@ status_t ImageDecoder::onOutputReceived(
         crop_bottom = height - 1;
     }
 
+    int32_t slice_height;
+    if (outputFormat->findInt32("slice-height", &slice_height) && slice_height > 0) {
+        height = slice_height;
+    }
+
+    int32_t crop_width, crop_height;
+    crop_width = crop_right - crop_left + 1;
+    crop_height = crop_bottom - crop_top + 1;
+
+    int32_t dstLeft, dstTop, dstRight, dstBottom;
+    dstLeft = mTilesDecoded % mGridCols * crop_width;
+    dstTop = mTilesDecoded / mGridCols * crop_height;
+    dstRight = dstLeft + crop_width - 1;
+    dstBottom = dstTop + crop_height - 1;
+
     // apply crop on bottom-right
     // TODO: need to move this into the color converter itself.
     if (dstRight >= mWidth) {
-        crop_right = mWidth - dstLeft - 1;
-        dstRight = dstLeft + crop_right;
+        crop_right = crop_left + mWidth - dstLeft - 1;
+        dstRight = mWidth - 1;
     }
     if (dstBottom >= mHeight) {
-        crop_bottom = mHeight - dstTop - 1;
-        dstBottom = dstTop + crop_bottom;
+        crop_bottom = crop_top + mHeight - dstTop - 1;
+        dstBottom = mHeight - 1;
     }
 
     *done = (++mTilesDecoded >= mTargetTiles);

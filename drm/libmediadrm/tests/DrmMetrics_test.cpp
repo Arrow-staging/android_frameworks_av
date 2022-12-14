@@ -16,6 +16,7 @@
 
 #define LOG_TAG "DrmMetricsTest"
 #include "mediadrm/DrmMetrics.h"
+#include "mediadrm/DrmMetricsConsumer.h"
 
 #include <android/hardware/drm/1.0/types.h>
 #include <android/hardware/drm/1.1/types.h>
@@ -30,7 +31,7 @@
 using ::android::drm_metrics::DrmFrameworkMetrics;
 using ::android::hardware::hidl_vec;
 using ::android::hardware::drm::V1_0::EventType;
-using ::android::hardware::drm::V1_0::KeyStatusType;
+using ::android::hardware::drm::V1_2::KeyStatusType;
 using ::android::hardware::drm::V1_0::Status;
 using ::android::hardware::drm::V1_1::DrmMetricGroup;
 using ::android::os::PersistableBundle;
@@ -58,8 +59,9 @@ class FakeMediaDrmMetrics : public MediaDrmMetrics {
 TEST_F(MediaDrmMetricsTest, EmptySuccess) {
   MediaDrmMetrics metrics;
   PersistableBundle bundle;
+  DrmMetricsConsumer consumer(&bundle);
 
-  metrics.Export(&bundle);
+  consumer.consumeFrameworkMetrics(metrics);
   EXPECT_TRUE(bundle.empty());
 }
 
@@ -81,12 +83,13 @@ TEST_F(MediaDrmMetricsTest, AllValuesSuccessCounts) {
   metrics.mProvideProvisionResponseCounter.Increment(OK);
   metrics.mGetDeviceUniqueIdCounter.Increment(OK);
 
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::USABLE);
-  metrics.mEventCounter.Increment(EventType::PROVISION_REQUIRED);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::USABLE);
+  metrics.mEventCounter.Increment((uint32_t)EventType::PROVISION_REQUIRED);
 
   PersistableBundle bundle;
+  DrmMetricsConsumer consumer(&bundle);
 
-  metrics.Export(&bundle);
+  consumer.consumeFrameworkMetrics(metrics);
   EXPECT_EQ(11U, bundle.size());
 
   // Verify the list of pairs of int64 metrics.
@@ -148,16 +151,16 @@ TEST_F(MediaDrmMetricsTest, AllValuesFull) {
   metrics.mGetDeviceUniqueIdCounter.Increment(OK);
   metrics.mGetDeviceUniqueIdCounter.Increment(UNEXPECTED_NULL);
 
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::USABLE);
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::EXPIRED);
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::OUTPUTNOTALLOWED);
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::STATUSPENDING);
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::INTERNALERROR);
-  metrics.mEventCounter.Increment(EventType::PROVISION_REQUIRED);
-  metrics.mEventCounter.Increment(EventType::KEY_NEEDED);
-  metrics.mEventCounter.Increment(EventType::KEY_EXPIRED);
-  metrics.mEventCounter.Increment(EventType::VENDOR_DEFINED);
-  metrics.mEventCounter.Increment(EventType::SESSION_RECLAIMED);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::USABLE);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::EXPIRED);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::OUTPUTNOTALLOWED);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::STATUSPENDING);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::INTERNALERROR);
+  metrics.mEventCounter.Increment((uint32_t)EventType::PROVISION_REQUIRED);
+  metrics.mEventCounter.Increment((uint32_t)EventType::KEY_NEEDED);
+  metrics.mEventCounter.Increment((uint32_t)EventType::KEY_EXPIRED);
+  metrics.mEventCounter.Increment((uint32_t)EventType::VENDOR_DEFINED);
+  metrics.mEventCounter.Increment((uint32_t)EventType::SESSION_RECLAIMED);
 
   android::Vector<uint8_t> sessionId1;
   sessionId1.push_back(1);
@@ -174,7 +177,8 @@ TEST_F(MediaDrmMetricsTest, AllValuesFull) {
   metrics.SetSessionEnd(sessionId1);
 
   PersistableBundle bundle;
-  metrics.Export(&bundle);
+  DrmMetricsConsumer consumer(&bundle);
+  consumer.consumeFrameworkMetrics(metrics);
   EXPECT_EQ(35U, bundle.size());
 
   // Verify the list of pairs of int64 metrics.
@@ -280,16 +284,16 @@ TEST_F(MediaDrmMetricsTest, CounterValuesProtoSerialization) {
   metrics.mGetDeviceUniqueIdCounter.Increment(OK);
   metrics.mGetDeviceUniqueIdCounter.Increment(UNEXPECTED_NULL);
 
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::USABLE);
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::EXPIRED);
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::OUTPUTNOTALLOWED);
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::STATUSPENDING);
-  metrics.mKeyStatusChangeCounter.Increment(KeyStatusType::INTERNALERROR);
-  metrics.mEventCounter.Increment(EventType::PROVISION_REQUIRED);
-  metrics.mEventCounter.Increment(EventType::KEY_NEEDED);
-  metrics.mEventCounter.Increment(EventType::KEY_EXPIRED);
-  metrics.mEventCounter.Increment(EventType::VENDOR_DEFINED);
-  metrics.mEventCounter.Increment(EventType::SESSION_RECLAIMED);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::USABLE);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::EXPIRED);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::OUTPUTNOTALLOWED);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::STATUSPENDING);
+  metrics.mKeyStatusChangeCounter.Increment((uint32_t)KeyStatusType::INTERNALERROR);
+  metrics.mEventCounter.Increment((uint32_t)EventType::PROVISION_REQUIRED);
+  metrics.mEventCounter.Increment((uint32_t)EventType::KEY_NEEDED);
+  metrics.mEventCounter.Increment((uint32_t)EventType::KEY_EXPIRED);
+  metrics.mEventCounter.Increment((uint32_t)EventType::VENDOR_DEFINED);
+  metrics.mEventCounter.Increment((uint32_t)EventType::SESSION_RECLAIMED);
 
   std::string serializedMetrics;
   ASSERT_EQ(OK, metrics.GetSerializedMetrics(&serializedMetrics));
@@ -421,7 +425,7 @@ TEST_F(MediaDrmMetricsTest, HidlToBundleMetricsEmpty) {
   hidl_vec<DrmMetricGroup> hidlMetricGroups;
   PersistableBundle bundleMetricGroups;
 
-  ASSERT_EQ(OK, MediaDrmMetrics::HidlMetricsToBundle(hidlMetricGroups, &bundleMetricGroups));
+  ASSERT_EQ(OK, DrmMetricsConsumer::HidlMetricsToBundle(hidlMetricGroups, &bundleMetricGroups));
   ASSERT_EQ(0U, bundleMetricGroups.size());
 }
 
@@ -441,7 +445,7 @@ TEST_F(MediaDrmMetricsTest, HidlToBundleMetricsMultiple) {
           } } };
 
   PersistableBundle bundleMetricGroups;
-  ASSERT_EQ(OK, MediaDrmMetrics::HidlMetricsToBundle(hidl_vec<DrmMetricGroup>({hidlMetricGroup}),
+  ASSERT_EQ(OK, DrmMetricsConsumer::HidlMetricsToBundle(hidl_vec<DrmMetricGroup>({hidlMetricGroup}),
                                                      &bundleMetricGroups));
   ASSERT_EQ(1U, bundleMetricGroups.size());
   PersistableBundle bundleMetricGroup;

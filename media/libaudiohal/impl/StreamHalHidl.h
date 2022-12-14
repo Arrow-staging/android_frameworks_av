@@ -19,50 +19,43 @@
 
 #include <atomic>
 
-#include PATH(android/hardware/audio/FILE_VERSION/IStream.h)
-#include PATH(android/hardware/audio/FILE_VERSION/IStreamIn.h)
+#include PATH(android/hardware/audio/CORE_TYPES_FILE_VERSION/IStream.h)
+#include PATH(android/hardware/audio/CORE_TYPES_FILE_VERSION/IStreamIn.h)
 #include PATH(android/hardware/audio/FILE_VERSION/IStreamOut.h)
 #include <fmq/EventFlag.h>
 #include <fmq/MessageQueue.h>
+#include <media/audiohal/EffectHalInterface.h>
 #include <media/audiohal/StreamHalInterface.h>
+#include <mediautils/Synchronization.h>
 
-#include "ConversionHelperHidl.h"
+#include "CoreConversionHelperHidl.h"
 #include "StreamPowerLog.h"
 
-using ::android::hardware::audio::CPP_VERSION::IStream;
-using ::android::hardware::audio::CPP_VERSION::IStreamIn;
-using ::android::hardware::audio::CPP_VERSION::IStreamOut;
+using ::android::hardware::audio::CORE_TYPES_CPP_VERSION::IStream;
 using ::android::hardware::EventFlag;
 using ::android::hardware::MessageQueue;
 using ::android::hardware::Return;
-using ReadParameters = ::android::hardware::audio::CPP_VERSION::IStreamIn::ReadParameters;
-using ReadStatus = ::android::hardware::audio::CPP_VERSION::IStreamIn::ReadStatus;
+using ReadParameters =
+        ::android::hardware::audio::CORE_TYPES_CPP_VERSION::IStreamIn::ReadParameters;
+using ReadStatus = ::android::hardware::audio::CORE_TYPES_CPP_VERSION::IStreamIn::ReadStatus;
 using WriteCommand = ::android::hardware::audio::CPP_VERSION::IStreamOut::WriteCommand;
 using WriteStatus = ::android::hardware::audio::CPP_VERSION::IStreamOut::WriteStatus;
 
 namespace android {
-namespace CPP_VERSION {
 
 class DeviceHalHidl;
 
-class StreamHalHidl : public virtual StreamHalInterface, public ConversionHelperHidl
+class StreamHalHidl : public virtual StreamHalInterface, public CoreConversionHelperHidl
 {
   public:
-    // Return the sampling rate in Hz - eg. 44100.
-    virtual status_t getSampleRate(uint32_t *rate);
-
     // Return size of input/output buffer in bytes for this stream - eg. 4800.
     virtual status_t getBufferSize(size_t *size);
 
-    // Return the channel mask.
-    virtual status_t getChannelMask(audio_channel_mask_t *mask);
-
-    // Return the audio format - e.g. AUDIO_FORMAT_PCM_16_BIT.
-    virtual status_t getFormat(audio_format_t *format);
-
-    // Convenience method.
-    virtual status_t getAudioProperties(
-            uint32_t *sampleRate, audio_channel_mask_t *mask, audio_format_t *format);
+    // Return the base configuration of the stream:
+    //   - channel mask;
+    //   - format - e.g. AUDIO_FORMAT_PCM_16_BIT;
+    //   - sampling rate in Hz - eg. 44100.
+    virtual status_t getAudioProperties(audio_config_base_t *configBase);
 
     // Set audio stream parameters.
     virtual status_t setParameters(const String8& kvPairs);
@@ -77,7 +70,7 @@ class StreamHalHidl : public virtual StreamHalInterface, public ConversionHelper
     // Put the audio hardware input/output into standby mode.
     virtual status_t standby();
 
-    virtual status_t dump(int fd);
+    virtual status_t dump(int fd, const Vector<String16>& args) override;
 
     // Start a stream operating in mmap mode.
     virtual status_t start();
@@ -96,14 +89,21 @@ class StreamHalHidl : public virtual StreamHalInterface, public ConversionHelper
     // (must match the priority of the audioflinger's thread that calls 'read' / 'write')
     virtual status_t setHalThreadPriority(int priority);
 
+    status_t legacyCreateAudioPatch(const struct audio_port_config& port,
+                                            std::optional<audio_source_t> source,
+                                            audio_devices_t type) override;
+
+    status_t legacyReleaseAudioPatch() override;
+
   protected:
     // Subclasses can not be constructed directly by clients.
-    explicit StreamHalHidl(IStream *stream);
+    StreamHalHidl(std::string_view className, IStream *stream);
 
-    // The destructor automatically closes the stream.
-    virtual ~StreamHalHidl();
+    ~StreamHalHidl() override;
 
     status_t getCachedBufferSize(size_t *size);
+
+    status_t getHalPid(pid_t *pid);
 
     bool requestHalThreadPriority(pid_t threadPid, pid_t threadId);
 
@@ -112,7 +112,7 @@ class StreamHalHidl : public virtual StreamHalInterface, public ConversionHelper
 
   private:
     const int HAL_THREAD_PRIORITY_DEFAULT = -1;
-    IStream *mStream;
+    IStream * const mStream;
     int mHalThreadPriority;
     size_t mCachedBufferSize;
 };
@@ -173,14 +173,49 @@ class StreamOutHalHidl : public StreamOutHalInterface, public StreamHalHidl {
     void onDrainReady();
     void onError();
 
+    // Returns the Dual Mono mode presentation setting.
+    status_t getDualMonoMode(audio_dual_mono_mode_t* mode) override;
+
+    // Sets the Dual Mono mode presentation on the output device.
+    status_t setDualMonoMode(audio_dual_mono_mode_t mode) override;
+
+    // Returns the Audio Description Mix level in dB.
+    status_t getAudioDescriptionMixLevel(float* leveldB) override;
+
+    // Sets the Audio Description Mix level in dB.
+    status_t setAudioDescriptionMixLevel(float leveldB) override;
+
+    // Retrieves current playback rate parameters.
+    status_t getPlaybackRateParameters(audio_playback_rate_t* playbackRate) override;
+
+    // Sets the playback rate parameters that control playback behavior.
+    status_t setPlaybackRateParameters(const audio_playback_rate_t& playbackRate) override;
+
+    status_t setEventCallback(const sp<StreamOutHalInterfaceEventCallback>& callback) override;
+
+    // Methods used by StreamCodecFormatCallback (HIDL).
+    void onCodecFormatChanged(const std::basic_string<uint8_t>& metadataBs);
+
+    status_t setLatencyMode(audio_latency_mode_t mode) override;
+    status_t getRecommendedLatencyModes(std::vector<audio_latency_mode_t> *modes) override;
+    status_t setLatencyModeCallback(
+            const sp<StreamOutHalInterfaceLatencyModeCallback>& callback) override;
+
+    void onRecommendedLatencyModeChanged(const std::vector<audio_latency_mode_t>& modes);
+
+    status_t exit() override;
+
   private:
     friend class DeviceHalHidl;
     typedef MessageQueue<WriteCommand, hardware::kSynchronizedReadWrite> CommandMQ;
     typedef MessageQueue<uint8_t, hardware::kSynchronizedReadWrite> DataMQ;
     typedef MessageQueue<WriteStatus, hardware::kSynchronizedReadWrite> StatusMQ;
 
-    wp<StreamOutHalInterfaceCallback> mCallback;
-    sp<IStreamOut> mStream;
+    mediautils::atomic_wp<StreamOutHalInterfaceCallback> mCallback;
+    mediautils::atomic_wp<StreamOutHalInterfaceEventCallback> mEventCallback;
+    mediautils::atomic_wp<StreamOutHalInterfaceLatencyModeCallback> mLatencyModeCallback;
+
+    const sp<::android::hardware::audio::CPP_VERSION::IStreamOut> mStream;
     std::unique_ptr<CommandMQ> mCommandMQ;
     std::unique_ptr<DataMQ> mDataMQ;
     std::unique_ptr<StatusMQ> mStatusMQ;
@@ -188,7 +223,7 @@ class StreamOutHalHidl : public StreamOutHalInterface, public StreamHalHidl {
     EventFlag* mEfGroup;
 
     // Can not be constructed directly by clients.
-    StreamOutHalHidl(const sp<IStreamOut>& stream);
+    StreamOutHalHidl(const sp<::android::hardware::audio::CPP_VERSION::IStreamOut>& stream);
 
     virtual ~StreamOutHalHidl();
 
@@ -221,10 +256,11 @@ class StreamInHalHidl : public StreamInHalInterface, public StreamHalHidl {
     virtual status_t getActiveMicrophones(std::vector<media::MicrophoneInfo> *microphones);
 
     // Set microphone direction (for processing)
-    virtual status_t setMicrophoneDirection(audio_microphone_direction_t direction) override;
+    virtual status_t setPreferredMicrophoneDirection(
+                            audio_microphone_direction_t direction) override;
 
     // Set microphone zoom (for processing)
-    virtual status_t setMicrophoneFieldDimension(float zoom) override;
+    virtual status_t setPreferredMicrophoneFieldDimension(float zoom) override;
 
     // Called when the metadata of the stream's sink has been changed.
     status_t updateSinkMetadata(const SinkMetadata& sinkMetadata) override;
@@ -235,7 +271,7 @@ class StreamInHalHidl : public StreamInHalInterface, public StreamHalHidl {
     typedef MessageQueue<uint8_t, hardware::kSynchronizedReadWrite> DataMQ;
     typedef MessageQueue<ReadStatus, hardware::kSynchronizedReadWrite> StatusMQ;
 
-    sp<IStreamIn> mStream;
+    const sp<::android::hardware::audio::CORE_TYPES_CPP_VERSION::IStreamIn> mStream;
     std::unique_ptr<CommandMQ> mCommandMQ;
     std::unique_ptr<DataMQ> mDataMQ;
     std::unique_ptr<StatusMQ> mStatusMQ;
@@ -243,7 +279,8 @@ class StreamInHalHidl : public StreamInHalInterface, public StreamHalHidl {
     EventFlag* mEfGroup;
 
     // Can not be constructed directly by clients.
-    StreamInHalHidl(const sp<IStreamIn>& stream);
+    StreamInHalHidl(
+            const sp<::android::hardware::audio::CORE_TYPES_CPP_VERSION::IStreamIn>& stream);
 
     virtual ~StreamInHalHidl();
 
@@ -253,7 +290,6 @@ class StreamInHalHidl : public StreamInHalInterface, public StreamHalHidl {
     status_t prepareForReading(size_t bufferSize);
 };
 
-} // namespace CPP_VERSION
 } // namespace android
 
 #endif // ANDROID_HARDWARE_STREAM_HAL_HIDL_H

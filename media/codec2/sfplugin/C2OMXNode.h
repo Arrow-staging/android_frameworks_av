@@ -20,9 +20,10 @@
 #include <atomic>
 
 #include <android/IOMXBufferSource.h>
+#include <codec2/hidl/client.h>
+#include <media/stagefright/foundation/Mutexed.h>
 #include <media/IOMX.h>
 #include <media/OMXBuffer.h>
-#include <codec2/hidl/client.h>
 
 namespace android {
 
@@ -75,8 +76,32 @@ struct C2OMXNode : public BnOMXNode {
             OMX_INDEXTYPE *index) override;
     status_t dispatchMessage(const omx_message &msg) override;
 
+    /**
+     * Returns underlying IOMXBufferSource object.
+     */
     sp<IOMXBufferSource> getSource();
+
+    /**
+     * Configure the frame size.
+     */
     void setFrameSize(uint32_t width, uint32_t height);
+
+    /**
+     * Clean up work item reference.
+     *
+     * \param index input work index
+     */
+    void onInputBufferDone(c2_cntr64_t index);
+
+    /**
+     * Returns dataspace information from GraphicBufferSource.
+     */
+    android_dataspace getDataspace();
+
+    /**
+     * Sets priority of the queue thread.
+     */
+    void setPriority(int priority);
 
 private:
     std::weak_ptr<Codec2Client::Component> mComp;
@@ -86,6 +111,7 @@ private:
     uint32_t mWidth;
     uint32_t mHeight;
     uint64_t mUsage;
+    Mutexed<android_dataspace> mDataspace;
 
     // WORKAROUND: timestamp adjustment
 
@@ -96,6 +122,11 @@ private:
     bool mFirstInputFrame; // true for first input
     c2_cntr64_t mPrevInputTimestamp; // input timestamp for previous frame
     c2_cntr64_t mPrevCodecTimestamp; // adjusted (codec) timestamp for previous frame
+
+    Mutexed<std::map<uint64_t, buffer_id>> mBufferIdsInUse;
+
+    class QueueThread;
+    sp<QueueThread> mQueueThread;
 };
 
 }  // namespace android

@@ -17,9 +17,9 @@
 //#define LOG_NDEBUG 0
 #define LOG_TAG "AMPEG4AudioAssembler"
 
-#include "AMPEG4AudioAssembler.h"
+#include <media/stagefright/rtsp/AMPEG4AudioAssembler.h>
 
-#include "ARTPSource.h"
+#include <media/stagefright/rtsp/ARTPSource.h>
 
 #include <media/stagefright/foundation/hexdump.h>
 #include <media/stagefright/foundation/ABitReader.h>
@@ -422,6 +422,11 @@ sp<ABuffer> AMPEG4AudioAssembler::removeLATMFraming(const sp<ABuffer> &buffer) {
             CHECK((mOtherDataLenBits % 8) == 0);
             CHECK_LE(offset + (mOtherDataLenBits / 8), buffer->size());
             offset += mOtherDataLenBits / 8;
+        }
+
+        if (i < mNumSubFrames && offset >= buffer->size()) {
+            ALOGW("Skip subframes after %d, total %d", (int)i, (int)mNumSubFrames);
+            break;
         }
     }
 

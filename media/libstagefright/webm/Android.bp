@@ -1,3 +1,12 @@
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_av_media_libstagefright_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_av_media_libstagefright_license"],
+}
+
 cc_library_static {
     name: "libstagefright_webm",
 
@@ -24,15 +33,35 @@ cc_library_static {
         "WebmWriter.cpp",
     ],
 
-    include_dirs: ["frameworks/av/include"],
+    local_include_dirs: [
+        "include/webm",
+    ],
+
+    export_include_dirs: ["include"],
 
     shared_libs: [
+        "libdatasource",
         "libstagefright_foundation",
         "libutils",
         "liblog",
+        "framework-permission-aidl-cpp",
     ],
 
     header_libs: [
-        "media_ndk_headers",
+        "av-headers",
+        "libmedia_headers",
     ],
+}
+
+
+cc_library_headers {
+    name: "libstagefright_webm_headers",
+    export_include_dirs: ["include"],
+
+    host_supported: true,
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
 }

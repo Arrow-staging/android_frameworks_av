@@ -22,6 +22,8 @@
 #include <mutex>
 #include <vector>
 
+#include <android-base/thread_annotations.h>
+
 #include "client/AudioStreamInternal.h"
 #include "client/AudioStreamInternalPlay.h"
 #include "core/AAudioStreamParameters.h"
@@ -41,13 +43,17 @@ class AAudioServiceEndpoint
         , public AAudioStreamParameters {
 public:
 
-    virtual ~AAudioServiceEndpoint() = default;
+    virtual ~AAudioServiceEndpoint();
 
     virtual std::string dump() const;
 
     virtual aaudio_result_t open(const aaudio::AAudioStreamRequest &request) = 0;
 
-    virtual aaudio_result_t close() = 0;
+    /*
+     * Perform any cleanup necessary before deleting the stream.
+     * This might include releasing and closing internal streams.
+     */
+    virtual void close() = 0;
 
     aaudio_result_t registerStream(android::sp<AAudioServiceStreamBase> stream);
 
@@ -60,13 +66,24 @@ public:
                                        audio_port_handle_t clientHandle) = 0;
 
     virtual aaudio_result_t startClient(const android::AudioClient& client,
+                                        const audio_attributes_t *attr,
                                         audio_port_handle_t *clientHandle) {
-        ALOGD("AAudioServiceEndpoint::startClient(%p, ...) AAUDIO_ERROR_UNAVAILABLE", &client);
+        ALOGD("AAudioServiceEndpoint::startClient(...) AAUDIO_ERROR_UNAVAILABLE");
         return AAUDIO_ERROR_UNAVAILABLE;
     }
 
     virtual aaudio_result_t stopClient(audio_port_handle_t clientHandle) {
         ALOGD("AAudioServiceEndpoint::stopClient(...) AAUDIO_ERROR_UNAVAILABLE");
+        return AAUDIO_ERROR_UNAVAILABLE;
+    }
+
+    virtual aaudio_result_t standby() {
+        ALOGD("AAudioServiceEndpoint::standby() AAUDIO_ERROR_UNAVAILABLE");
+        return AAUDIO_ERROR_UNAVAILABLE;
+    }
+
+    virtual aaudio_result_t exitStandby(AudioEndpointParcelable* parcelable) {
+        ALOGD("AAudioServiceEndpoint::exitStandby() AAUDIO_ERROR_UNAVAILABLE");
         return AAUDIO_ERROR_UNAVAILABLE;
     }
 
@@ -108,6 +125,23 @@ public:
         return mConnected;
     }
 
+    static audio_attributes_t getAudioAttributesFrom(const AAudioStreamParameters *params);
+
+    // Stop, disconnect and release any streams registered on this endpoint.
+    void releaseRegisteredStreams();
+
+    bool isForSharing() const {
+        return mForSharing;
+    }
+
+    /**
+     *
+     * @param flag true if this endpoint is to be shared between multiple streams
+     */
+    void setForSharing(bool flag) {
+        mForSharing = flag;
+    }
+
 protected:
 
     /**
@@ -116,10 +150,11 @@ protected:
      */
     bool                     isStreamRegistered(audio_port_handle_t portHandle);
 
-    void                     disconnectRegisteredStreams();
+    std::vector<android::sp<AAudioServiceStreamBase>> disconnectRegisteredStreams();
 
     mutable std::mutex       mLockStreams;
-    std::vector<android::sp<AAudioServiceStreamBase>> mRegisteredStreams;
+    std::vector<android::sp<AAudioServiceStreamBase>> mRegisteredStreams
+            GUARDED_BY(mLockStreams);
 
     SimpleDoubleBuffer<Timestamp>  mAtomicEndpointTimestamp;
 
@@ -129,7 +164,11 @@ protected:
     int32_t                  mOpenCount = 0;
     int32_t                  mRequestedDeviceId = 0;
 
+    // True if this will be shared by one or more other streams.
+    bool                     mForSharing = false;
+
     std::atomic<bool>        mConnected{true};
+
 };
 
 } /* namespace aaudio */

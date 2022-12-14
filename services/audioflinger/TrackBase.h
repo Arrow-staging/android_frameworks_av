@@ -23,7 +23,7 @@
 class TrackBase : public ExtendedAudioBufferProvider, public RefBase {
 
 public:
-    enum track_state {
+    enum track_state : int32_t {
         IDLE,
         FLUSHED,        // for PlaybackTracks only
         STOPPED,
@@ -64,11 +64,13 @@ public:
                                 void *buffer,
                                 size_t bufferSize,
                                 audio_session_t sessionId,
+                                pid_t creatorPid,
                                 uid_t uid,
                                 bool isOut,
                                 alloc_type alloc = ALLOC_CBLK,
                                 track_type type = TYPE_DEFAULT,
-                                audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE);
+                                audio_port_handle_t portId = AUDIO_PORT_HANDLE_NONE,
+                                std::string metricsId = {});
     virtual             ~TrackBase();
     virtual status_t    initCheck() const;
 
@@ -79,6 +81,8 @@ public:
             audio_track_cblk_t* cblk() const { return mCblk; }
             audio_session_t sessionId() const { return mSessionId; }
             uid_t       uid() const { return mUid; }
+            pid_t       creatorPid() const { return mCreatorPid; }
+
             audio_port_handle_t portId() const { return mPortId; }
     virtual status_t    setSyncEvent(const sp<SyncEvent>& event);
 
@@ -91,10 +95,19 @@ public:
             bool        isPatchTrack() const { return (mType == TYPE_PATCH); }
             bool        isExternalTrack() const { return !isOutputTrack() && !isPatchTrack(); }
 
-    virtual void        invalidate() { mIsInvalid = true; }
+    virtual void        invalidate() {
+                            if (mIsInvalid) return;
+                            mTrackMetrics.logInvalidate();
+                            mIsInvalid = true;
+                        }
             bool        isInvalid() const { return mIsInvalid; }
 
+            void        terminate() { mTerminated = true; }
+            bool        isTerminated() const { return mTerminated; }
+
     audio_attributes_t  attributes() const { return mAttr; }
+
+    virtual bool        isSpatialized() const { return false; }
 
 #ifdef TEE_SINK
            void         dumpTee(int fd, const std::string &reason) const {
@@ -196,8 +209,78 @@ public:
            audio_format_t format() const { return mFormat; }
            int id() const { return mId; }
 
+    const char *getTrackStateAsString() const {
+        if (isTerminated()) {
+            return "TERMINATED";
+        }
+        switch (mState) {
+        case IDLE:
+            return "IDLE";
+        case STOPPING_1: // for Fast and Offload
+            return "STOPPING_1";
+        case STOPPING_2: // for Fast and Offload
+            return "STOPPING_2";
+        case STOPPED:
+            return "STOPPED";
+        case RESUMING:
+            return "RESUMING";
+        case ACTIVE:
+            return "ACTIVE";
+        case PAUSING:
+            return "PAUSING";
+        case PAUSED:
+            return "PAUSED";
+        case FLUSHED:
+            return "FLUSHED";
+        case STARTING_1: // for RecordTrack
+            return "STARTING_1";
+        case STARTING_2: // for RecordTrack
+            return "STARTING_2";
+        default:
+            return "UNKNOWN";
+        }
+    }
+
+    // Called by the PlaybackThread to indicate that the track is becoming active
+    // and a new interval should start with a given device list.
+    void logBeginInterval(const std::string& devices) {
+        mTrackMetrics.logBeginInterval(devices);
+    }
+
+    // Called by the PlaybackThread to indicate the track is no longer active.
+    void logEndInterval() {
+        mTrackMetrics.logEndInterval();
+    }
+
+    // Called to tally underrun frames in playback.
+    virtual void tallyUnderrunFrames(size_t /* frames */) {}
+
+    audio_channel_mask_t channelMask() const { return mChannelMask; }
+
+    /** @return true if the track has changed (metadata or volume) since
+     *          the last time this function was called,
+     *          true if this function was never called since the track creation,
+     *          false otherwise.
+     *  Thread safe.
+     */
+    bool readAndClearHasChanged() { return !mChangeNotified.test_and_set(); }
+
+    /** Set that a metadata has changed and needs to be notified to backend. Thread safe. */
+    void setMetadataHasChanged() { mChangeNotified.clear(); }
+
 protected:
     DISALLOW_COPY_AND_ASSIGN(TrackBase);
+
+    void releaseCblk() {
+        if (mCblk != nullptr) {
+            mState.clear();
+            mCblk->~audio_track_cblk_t();   // destroy our shared-structure.
+            if (mClient == 0) {
+                free(mCblk);
+            }
+            mCblk = nullptr;
+        }
+    }
 
     // AudioBufferProvider interface
     virtual status_t getNextBuffer(AudioBufferProvider::Buffer* buffer) = 0;
@@ -209,7 +292,7 @@ protected:
 
     uint32_t channelCount() const { return mChannelCount; }
 
-    audio_channel_mask_t channelMask() const { return mChannelMask; }
+    size_t frameSize() const { return mFrameSize; }
 
     virtual uint32_t sampleRate() const { return mSampleRate; }
 
@@ -228,17 +311,9 @@ protected:
         return mState == STOPPING_2;
     }
 
-    bool isTerminated() const {
-        return mTerminated;
-    }
-
-    void terminate() {
-        mTerminated = true;
-    }
-
     // Upper case characters are final states.
     // Lower case characters are transitory.
-    const char *getTrackStateString() const {
+    const char *getTrackStateAsCodedString() const {
         if (isTerminated()) {
             return "T ";
         }
@@ -283,7 +358,7 @@ protected:
                                     // except for OutputTrack when it is in local memory
     size_t              mBufferSize; // size of mBuffer in bytes
     // we don't really need a lock for these
-    track_state         mState;
+    MirroredVariable<track_state>  mState;
     const audio_attributes_t mAttr;
     const uint32_t      mSampleRate;    // initial sample rate only; for tracks which
                         // support dynamic rates, the current value is in control block
@@ -311,10 +386,30 @@ protected:
     audio_port_handle_t mPortId; // unique ID for this track used by audio policy
     bool                mIsInvalid; // non-resettable latch, set by invalidate()
 
+    // It typically takes 5 threadloop mix iterations for latency to stabilize.
+    // However, this can be 12+ iterations for BT.
+    // To be sure, we wait for latency to dip (it usually increases at the start)
+    // to assess stability and then log to MediaMetrics.
+    // Rapid start / pause calls may cause inaccurate numbers.
+    static inline constexpr int32_t LOG_START_COUNTDOWN = 12;
+    int32_t             mLogStartCountdown = 0; // Mixer period countdown
+    int64_t             mLogStartTimeNs = 0;    // Monotonic time at start()
+    int64_t             mLogStartFrames = 0;    // Timestamp frames at start()
+    double              mLogLatencyMs = 0.;     // Track the last log latency
+
+    bool                mLogForceVolumeUpdate = true; // force volume update to TrackMetrics.
+
+    TrackMetrics        mTrackMetrics;
+
     bool                mServerLatencySupported = false;
     std::atomic<bool>   mServerLatencyFromTrack{}; // latency from track or server timestamp.
     std::atomic<double> mServerLatencyMs{};        // last latency pushed from server thread.
     std::atomic<FrameTime> mKernelFrameTime{};     // last frame time on kernel side.
+    const pid_t         mCreatorPid;  // can be different from mclient->pid() for instance
+                                      // when created by NuPlayer on behalf of a client
+
+    // If the last track change was notified to the client with readAndClearHasChanged
+    std::atomic_flag    mChangeNotified = ATOMIC_FLAG_INIT;
 };
 
 // PatchProxyBufferProvider interface is implemented by PatchTrack and PatchRecord.
@@ -325,6 +420,7 @@ public:
 
     virtual ~PatchProxyBufferProvider() {}
 
+    virtual bool        producesBufferOnDemand() const = 0;
     virtual status_t    obtainBuffer(Proxy::Buffer* buffer,
                                      const struct timespec *requested = NULL) = 0;
     virtual void        releaseBuffer(Proxy::Buffer* buffer) = 0;
@@ -337,10 +433,21 @@ public:
                         PatchTrackBase(sp<ClientProxy> proxy, const ThreadBase& thread,
                                        const Timeout& timeout);
             void        setPeerTimeout(std::chrono::nanoseconds timeout);
-            void        setPeerProxy(PatchProxyBufferProvider *proxy) { mPeerProxy = proxy; }
+            template <typename T>
+            void        setPeerProxy(const sp<T> &proxy, bool holdReference) {
+                            mPeerReferenceHold = holdReference ? proxy : nullptr;
+                            mPeerProxy = proxy.get();
+                        }
+            void        clearPeerProxy() {
+                            mPeerReferenceHold.clear();
+                            mPeerProxy = nullptr;
+                        }
+
+            bool        producesBufferOnDemand() const override { return false; }
 
 protected:
     const sp<ClientProxy>       mProxy;
+    sp<RefBase>                 mPeerReferenceHold;   // keeps mPeerProxy alive during access.
     PatchProxyBufferProvider*   mPeerProxy = nullptr;
     struct timespec             mPeerTimeout{};
 

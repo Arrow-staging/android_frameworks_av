@@ -26,7 +26,7 @@
 #include <utils/Mutex.h>
 #include <utils/List.h>
 #include <utils/Vector.h>
-#include <android/frameworks/cameraservice/device/2.0/ICameraDeviceUser.h>
+#include <android/frameworks/cameraservice/device/2.1/ICameraDeviceUser.h>
 #include <android/frameworks/cameraservice/device/2.0/ICameraDeviceCallback.h>
 #include <android/frameworks/cameraservice/device/2.0/types.h>
 #include <fmq/MessageQueue.h>
@@ -36,6 +36,7 @@
 
 #include <camera/NdkCameraManager.h>
 #include <camera/NdkCameraCaptureSession.h>
+
 #include "ACameraMetadata.h"
 #include "utils.h"
 
@@ -43,7 +44,8 @@ namespace android {
 namespace acam {
 
 using ICameraDeviceCallback = frameworks::cameraservice::device::V2_0::ICameraDeviceCallback;
-using ICameraDeviceUser = frameworks::cameraservice::device::V2_0::ICameraDeviceUser;
+using ICameraDeviceUser_2_0 = frameworks::cameraservice::device::V2_0::ICameraDeviceUser;
+using ICameraDeviceUser = frameworks::cameraservice::device::V2_1::ICameraDeviceUser;
 using CaptureResultExtras = frameworks::cameraservice::device::V2_0::CaptureResultExtras;
 using PhysicalCaptureResultInfo = frameworks::cameraservice::device::V2_0::PhysicalCaptureResultInfo;
 using PhysicalCameraSettings = frameworks::cameraservice::device::V2_0::PhysicalCameraSettings;
@@ -92,6 +94,7 @@ class CameraDevice final : public RefBase {
 
     camera_status_t createCaptureRequest(
             ACameraDevice_request_template templateId,
+            const ACameraIdList* physicalCameraIdList,
             ACaptureRequest** request) const;
 
     camera_status_t createCaptureSession(
@@ -99,6 +102,9 @@ class CameraDevice final : public RefBase {
             const ACaptureRequest* sessionParameters,
             const ACameraCaptureSession_stateCallbacks* callbacks,
             /*out*/ACameraCaptureSession** session);
+
+    camera_status_t isSessionConfigurationSupported(
+            const ACaptureSessionOutputContainer* sessionOutputContainer) const;
 
     // Callbacks from camera service
     class ServiceCallback : public ICameraDeviceCallback {
@@ -129,8 +135,12 @@ class CameraDevice final : public RefBase {
     bool setDeviceMetadataQueues();
     inline ACameraDevice* getWrapper() const { return mWrapper; };
 
+    // Stop the looper thread and unregister the handler
+    void stopLooperAndDisconnect();
+
   private:
     friend ACameraCaptureSession;
+    friend ACameraDevice;
 
     camera_status_t checkCameraClosedOrErrorLocked() const;
 
@@ -176,8 +186,11 @@ class CameraDevice final : public RefBase {
     //      metadata associated with it.
     camera_status_t allocateCaptureRequestLocked(
             const ACaptureRequest* request, sp<CaptureRequest>& outReq);
+    void allocateOneCaptureRequestMetadata(
+            PhysicalCameraSettings& cameraSettings,
+            const std::string& id, const sp<ACameraMetadata>& metadata);
 
-    static ACaptureRequest* allocateACaptureRequest(sp<CaptureRequest>& req);
+    static ACaptureRequest* allocateACaptureRequest(sp<CaptureRequest>& req, const char* deviceId);
     static void freeACaptureRequest(ACaptureRequest*);
 
     // only For session to hold device lock
@@ -189,7 +202,7 @@ class CameraDevice final : public RefBase {
     void notifySessionEndOfLifeLocked(ACameraCaptureSession* session);
 
     camera_status_t configureStreamsLocked(const ACaptureSessionOutputContainer* outputs,
-           const ACaptureRequest* sessionParameters);
+           const ACaptureRequest* sessionParameters, nsecs_t startTimeNs);
 
     // Input message will be posted and cleared after this returns
     void postSessionMsgAndCleanup(sp<AMessage>& msg);
@@ -232,9 +245,11 @@ class CameraDevice final : public RefBase {
         kWhatSessionStateCb,   // onReady, onActive
         // Capture callbacks
         kWhatCaptureStart,     // onCaptureStarted
+        kWhatCaptureStart2,     // onCaptureStarted2
         kWhatCaptureResult,    // onCaptureProgressed, onCaptureCompleted
         kWhatLogicalCaptureResult, // onLogicalCameraCaptureCompleted
         kWhatCaptureFail,      // onCaptureFailed
+        kWhatLogicalCaptureFail, // onLogicalCameraCaptureFailed
         kWhatCaptureSeqEnd,    // onCaptureSequenceCompleted
         kWhatCaptureSeqAbort,  // onCaptureSequenceAborted
         kWhatCaptureBufferLost,// onCaptureBufferLost
@@ -254,12 +269,15 @@ class CameraDevice final : public RefBase {
     static const char* kSequenceIdKey;
     static const char* kFrameNumberKey;
     static const char* kAnwKey;
+    static const char* kFailingPhysicalCameraId;
 
     class CallbackHandler : public AHandler {
       public:
+        explicit CallbackHandler(const char *id);
         void onMessageReceived(const sp<AMessage> &msg) override;
 
       private:
+        std::string mId;
         // This handler will cache all capture session sp until kWhatCleanUpSessions
         // is processed. This is used to guarantee the last session reference is always
         // being removed in callback thread without holding camera device lock
@@ -292,23 +310,48 @@ class CameraDevice final : public RefBase {
                        const Vector<sp<CaptureRequest>>&  requests,
                        bool                               isRepeating,
                        ACameraCaptureSession_logicalCamera_captureCallbacks* lcbs);
-
-        template <class T>
-        void initCaptureCallbacks(T* cbs) {
+        CallbackHolder(sp<ACameraCaptureSession>          session,
+                       const Vector<sp<CaptureRequest> >& requests,
+                       bool                               isRepeating,
+                       ACameraCaptureSession_captureCallbacksV2* cbs);
+        CallbackHolder(sp<ACameraCaptureSession>          session,
+                       const Vector<sp<CaptureRequest> >& requests,
+                       bool                               isRepeating,
+                       ACameraCaptureSession_logicalCamera_captureCallbacksV2* lcbs);
+        void clearCallbacks() {
             mContext = nullptr;
             mOnCaptureStarted = nullptr;
+            mOnCaptureStarted2 = nullptr;
             mOnCaptureProgressed = nullptr;
             mOnCaptureCompleted = nullptr;
             mOnLogicalCameraCaptureCompleted = nullptr;
+            mOnLogicalCameraCaptureFailed = nullptr;
             mOnCaptureFailed = nullptr;
             mOnCaptureSequenceCompleted = nullptr;
             mOnCaptureSequenceAborted = nullptr;
             mOnCaptureBufferLost = nullptr;
+        }
+
+        template <class T>
+        void initCaptureCallbacksV2(T* cbs) {
+            clearCallbacks();
+            if (cbs != nullptr) {
+                mContext = cbs->context;
+                mOnCaptureStarted2 = cbs->onCaptureStarted;
+                mOnCaptureProgressed = cbs->onCaptureProgressed;
+                mOnCaptureSequenceCompleted = cbs->onCaptureSequenceCompleted;
+                mOnCaptureSequenceAborted = cbs->onCaptureSequenceAborted;
+                mOnCaptureBufferLost = cbs->onCaptureBufferLost;
+            }
+        }
+
+        template <class T>
+        void initCaptureCallbacks(T* cbs) {
+            clearCallbacks();
             if (cbs != nullptr) {
                 mContext = cbs->context;
                 mOnCaptureStarted = cbs->onCaptureStarted;
                 mOnCaptureProgressed = cbs->onCaptureProgressed;
-                mOnCaptureFailed = cbs->onCaptureFailed;
                 mOnCaptureSequenceCompleted = cbs->onCaptureSequenceCompleted;
                 mOnCaptureSequenceAborted = cbs->onCaptureSequenceAborted;
                 mOnCaptureBufferLost = cbs->onCaptureBufferLost;
@@ -318,13 +361,16 @@ class CameraDevice final : public RefBase {
         sp<ACameraCaptureSession>   mSession;
         Vector<sp<CaptureRequest>>  mRequests;
         const bool                  mIsRepeating;
+        const bool                  mIs2Callback;
         const bool                  mIsLogicalCameraCallback;
 
         void*                       mContext;
         ACameraCaptureSession_captureCallback_start mOnCaptureStarted;
+        ACameraCaptureSession_captureCallback_startV2 mOnCaptureStarted2;
         ACameraCaptureSession_captureCallback_result mOnCaptureProgressed;
         ACameraCaptureSession_captureCallback_result mOnCaptureCompleted;
         ACameraCaptureSession_logicalCamera_captureCallback_result mOnLogicalCameraCaptureCompleted;
+        ACameraCaptureSession_logicalCamera_captureCallback_failed mOnLogicalCameraCaptureFailed;
         ACameraCaptureSession_captureCallback_failed mOnCaptureFailed;
         ACameraCaptureSession_captureCallback_sequenceEnd mOnCaptureSequenceCompleted;
         ACameraCaptureSession_captureCallback_sequenceAbort mOnCaptureSequenceAborted;
@@ -371,8 +417,7 @@ struct ACameraDevice {
                   sp<ACameraMetadata> chars) :
             mDevice(new android::acam::CameraDevice(id, cb, std::move(chars), this)) {}
 
-    ~ACameraDevice() {};
-
+    ~ACameraDevice();
     /*******************
      * NDK public APIs *
      *******************/
@@ -380,8 +425,9 @@ struct ACameraDevice {
 
     camera_status_t createCaptureRequest(
             ACameraDevice_request_template templateId,
+            const ACameraIdList* physicalCameraIdList,
             ACaptureRequest** request) const {
-        return mDevice->createCaptureRequest(templateId, request);
+        return mDevice->createCaptureRequest(templateId, physicalCameraIdList, request);
     }
 
     camera_status_t createCaptureSession(
@@ -390,6 +436,11 @@ struct ACameraDevice {
             const ACameraCaptureSession_stateCallbacks* callbacks,
             /*out*/ACameraCaptureSession** session) {
         return mDevice->createCaptureSession(outputs, sessionParameters, callbacks, session);
+    }
+
+    camera_status_t isSessionConfigurationSupported(
+            const ACaptureSessionOutputContainer* sessionOutputContainer) const {
+        return mDevice->isSessionConfigurationSupported(sessionOutputContainer);
     }
 
     /***********************

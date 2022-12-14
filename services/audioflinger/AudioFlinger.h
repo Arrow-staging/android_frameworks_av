@@ -33,16 +33,19 @@
 #include <sys/types.h>
 #include <limits.h>
 
+#include <android/media/BnAudioTrack.h>
+#include <android/media/IAudioFlingerClient.h>
+#include <android/media/IAudioTrackCallback.h>
 #include <android/os/BnExternalVibrationController.h>
-#include <android-base/macros.h>
+#include <android/content/AttributionSourceState.h>
 
+
+#include <android-base/macros.h>
 #include <cutils/atomic.h>
 #include <cutils/compiler.h>
-#include <cutils/properties.h>
 
+#include <cutils/properties.h>
 #include <media/IAudioFlinger.h>
-#include <media/IAudioFlingerClient.h>
-#include <media/IAudioTrack.h>
 #include <media/AudioSystem.h>
 #include <media/AudioTrack.h>
 #include <media/MmapStreamInterface.h>
@@ -54,7 +57,9 @@
 #include <utils/TypeHelpers.h>
 #include <utils/Vector.h>
 
+#include <binder/AppOpsManager.h>
 #include <binder/BinderService.h>
+#include <binder/IAppOpsCallback.h>
 #include <binder/MemoryDealer.h>
 
 #include <system/audio.h>
@@ -63,13 +68,19 @@
 #include <media/audiohal/EffectBufferHalInterface.h>
 #include <media/audiohal/StreamHalInterface.h>
 #include <media/AudioBufferProvider.h>
+#include <media/AudioContainers.h>
+#include <media/AudioDeviceTypeAddr.h>
 #include <media/AudioMixer.h>
+#include <media/DeviceDescriptorBase.h>
 #include <media/ExtendedAudioBufferProvider.h>
-#include <media/LinearMap.h>
 #include <media/VolumeShaper.h>
+#include <mediautils/ServiceUtilities.h>
+#include <mediautils/Synchronization.h>
+#include <mediautils/ThreadSnapshot.h>
 
 #include <audio_utils/clock.h>
 #include <audio_utils/FdToString.h>
+#include <audio_utils/LinearMap.h>
 #include <audio_utils/SimpleLog.h>
 #include <audio_utils/TimestampVerifier.h>
 
@@ -81,16 +92,20 @@
 #include "SpdifStreamOut.h"
 #include "AudioHwDevice.h"
 #include "NBAIO_Tee.h"
+#include "ThreadMetrics.h"
+#include "TrackMetrics.h"
 
-#include <powermanager/IPowerManager.h>
+#include <android/os/IPowerManager.h>
 
 #include <media/nblog/NBLog.h>
 #include <private/media/AudioEffectShared.h>
 #include <private/media/AudioTrackShared.h>
 
 #include <vibrator/ExternalVibration.h>
+#include <vibrator/ExternalVibrationUtils.h>
 
 #include "android/media/BnAudioRecord.h"
+#include "android/media/BnEffect.h"
 
 namespace android {
 
@@ -98,6 +113,7 @@ class AudioMixer;
 class AudioBuffer;
 class AudioResampler;
 class DeviceHalInterface;
+class DevicesFactoryHalCallback;
 class DevicesFactoryHalInterface;
 class EffectsFactoryHalInterface;
 class FastMixer;
@@ -111,25 +127,24 @@ static const nsecs_t kDefaultStandbyTimeInNsecs = seconds(3);
 
 #define INCLUDING_FROM_AUDIOFLINGER_H
 
-class AudioFlinger :
-    public BinderService<AudioFlinger>,
-    public BnAudioFlinger
+using android::content::AttributionSourceState;
+
+class AudioFlinger : public AudioFlingerServerAdapter::Delegate
 {
-    friend class BinderService<AudioFlinger>;   // for AudioFlinger()
-
 public:
-    static const char* getServiceName() ANDROID_API { return "media.audio_flinger"; }
+    static void instantiate() ANDROID_API;
 
-    virtual     status_t    dump(int fd, const Vector<String16>& args);
+    static AttributionSourceState checkAttributionSourcePackage(
+        const AttributionSourceState& attributionSource);
+
+    status_t dump(int fd, const Vector<String16>& args) override;
 
     // IAudioFlinger interface, in binder opcode order
-    virtual sp<IAudioTrack> createTrack(const CreateTrackInput& input,
-                                        CreateTrackOutput& output,
-                                        status_t *status);
+    status_t createTrack(const media::CreateTrackRequest& input,
+                         media::CreateTrackResponse& output) override;
 
-    virtual sp<media::IAudioRecord> createRecord(const CreateRecordInput& input,
-                                                 CreateRecordOutput& output,
-                                                 status_t *status);
+    status_t createRecord(const media::CreateRecordRequest& input,
+                          media::CreateRecordResponse& output) override;
 
     virtual     uint32_t    sampleRate(audio_io_handle_t ioHandle) const;
     virtual     audio_format_t format(audio_io_handle_t output) const;
@@ -160,23 +175,18 @@ public:
     virtual     status_t    setMicMute(bool state);
     virtual     bool        getMicMute() const;
 
-    virtual     void        setRecordSilenced(uid_t uid, bool silenced);
+    virtual     void        setRecordSilenced(audio_port_handle_t portId, bool silenced);
 
     virtual     status_t    setParameters(audio_io_handle_t ioHandle, const String8& keyValuePairs);
     virtual     String8     getParameters(audio_io_handle_t ioHandle, const String8& keys) const;
 
-    virtual     void        registerClient(const sp<IAudioFlingerClient>& client);
+    virtual     void        registerClient(const sp<media::IAudioFlingerClient>& client);
 
     virtual     size_t      getInputBufferSize(uint32_t sampleRate, audio_format_t format,
                                                audio_channel_mask_t channelMask) const;
 
-    virtual status_t openOutput(audio_module_handle_t module,
-                                audio_io_handle_t *output,
-                                audio_config_t *config,
-                                audio_devices_t *devices,
-                                const String8& address,
-                                uint32_t *latencyMs,
-                                audio_output_flags_t flags);
+    virtual status_t openOutput(const media::OpenOutputRequest& request,
+                                media::OpenOutputResponse* response);
 
     virtual audio_io_handle_t openDuplicateOutput(audio_io_handle_t output1,
                                                   audio_io_handle_t output2);
@@ -187,13 +197,8 @@ public:
 
     virtual status_t restoreOutput(audio_io_handle_t output);
 
-    virtual status_t openInput(audio_module_handle_t module,
-                               audio_io_handle_t *input,
-                               audio_config_t *config,
-                               audio_devices_t *device,
-                               const String8& address,
-                               audio_source_t source,
-                               audio_input_flags_t flags);
+    virtual status_t openInput(const media::OpenInputRequest& request,
+                               media::OpenInputResponse* response);
 
     virtual status_t closeInput(audio_io_handle_t input);
 
@@ -209,7 +214,7 @@ public:
     // This is the binder API.  For the internal API see nextUniqueId().
     virtual audio_unique_id_t newAudioUniqueId(audio_unique_id_use_t use);
 
-    virtual void acquireAudioSessionId(audio_session_t audioSession, pid_t pid);
+    void acquireAudioSessionId(audio_session_t audioSession, pid_t pid, uid_t uid) override;
 
     virtual void releaseAudioSessionId(audio_session_t audioSession, pid_t pid);
 
@@ -222,20 +227,15 @@ public:
                                          uint32_t preferredTypeFlag,
                                          effect_descriptor_t *descriptor) const;
 
-    virtual sp<IEffect> createEffect(
-                        effect_descriptor_t *pDesc,
-                        const sp<IEffectClient>& effectClient,
-                        int32_t priority,
-                        audio_io_handle_t io,
-                        audio_session_t sessionId,
-                        const String16& opPackageName,
-                        pid_t pid,
-                        status_t *status /*non-NULL*/,
-                        int *id,
-                        int *enabled);
+    virtual status_t createEffect(const media::CreateEffectRequest& request,
+                                  media::CreateEffectResponse* response);
 
     virtual status_t moveEffects(audio_session_t sessionId, audio_io_handle_t srcOutput,
                         audio_io_handle_t dstOutput);
+
+            void setEffectSuspended(int effectId,
+                                    audio_session_t sessionId,
+                                    bool suspended) override;
 
     virtual audio_module_handle_t loadHwModule(const char *name);
 
@@ -249,7 +249,7 @@ public:
                                     struct audio_port *ports);
 
     /* Get attributes for a given audio port */
-    virtual status_t getAudioPort(struct audio_port *port);
+    virtual status_t getAudioPort(struct audio_port_v7 *port);
 
     /* Create an audio patch between several source and sink ports */
     virtual status_t createAudioPatch(const struct audio_patch *patch,
@@ -270,14 +270,37 @@ public:
 
     /* Indicate JAVA services are ready (scheduling, power management ...) */
     virtual status_t systemReady();
+    virtual status_t audioPolicyReady() { mAudioPolicyReady.store(true); return NO_ERROR; }
+            bool isAudioPolicyReady() const { return mAudioPolicyReady.load(); }
+
 
     virtual status_t getMicrophones(std::vector<media::MicrophoneInfo> *microphones);
 
-    virtual     status_t    onTransact(
-                                uint32_t code,
-                                const Parcel& data,
-                                Parcel* reply,
-                                uint32_t flags);
+    virtual status_t setAudioHalPids(const std::vector<pid_t>& pids);
+
+    virtual status_t setVibratorInfos(const std::vector<media::AudioVibratorInfo>& vibratorInfos);
+
+    virtual status_t updateSecondaryOutputs(
+            const TrackSecondaryOutputsMap& trackSecondaryOutputs);
+
+    virtual status_t getMmapPolicyInfos(
+            media::audio::common::AudioMMapPolicyType policyType,
+            std::vector<media::audio::common::AudioMMapPolicyInfo> *policyInfos);
+
+    virtual int32_t getAAudioMixerBurstCount();
+
+    virtual int32_t getAAudioHardwareBurstMinUsec();
+
+    virtual status_t setDeviceConnectedState(const struct audio_port_v7 *port, bool connected);
+
+    virtual status_t setRequestedLatencyMode(
+            audio_io_handle_t output, audio_latency_mode_t mode);
+
+    virtual status_t getSupportedLatencyModes(audio_io_handle_t output,
+            std::vector<audio_latency_mode_t>* modes);
+
+    status_t onTransactWrapper(TransactionCode code, const Parcel& data, uint32_t flags,
+        const std::function<status_t()>& delegate) override;
 
     // end of IAudioFlinger interface
 
@@ -297,6 +320,17 @@ public:
 
     static int onExternalVibrationStart(const sp<os::ExternalVibration>& externalVibration);
     static void onExternalVibrationStop(const sp<os::ExternalVibration>& externalVibration);
+
+    status_t addEffectToHal(audio_port_handle_t deviceId,
+            audio_module_handle_t hwModuleId, sp<EffectHalInterface> effect);
+    status_t removeEffectFromHal(audio_port_handle_t deviceId,
+            audio_module_handle_t hwModuleId, sp<EffectHalInterface> effect);
+
+    void updateDownStreamPatches_l(const struct audio_patch *patch,
+                                   const std::set<audio_io_handle_t> streams);
+
+    std::optional<media::AudioVibratorInfo> getDefaultVibratorInfo_l();
+
 private:
     // FIXME The 400 is temporarily too high until a leak of writers in media.log is fixed.
     static const size_t kLogMemorySize = 400 * 1024;
@@ -307,6 +341,24 @@ private:
     Mutex               mUnregisteredWritersLock;
 
 public:
+    // Life cycle of gAudioFlinger and AudioFlinger:
+    //
+    // AudioFlinger is created once and survives until audioserver crashes
+    // irrespective of sp<> and wp<> as it is refcounted by ServiceManager and we
+    // don't issue a ServiceManager::tryUnregisterService().
+    //
+    // gAudioFlinger is an atomic pointer set on AudioFlinger::onFirstRef().
+    // After this is set, it is safe to obtain a wp<> or sp<> from it as the
+    // underlying object does not go away.
+    //
+    // Note: For most inner classes, it is acceptable to hold a reference to the outer
+    // AudioFlinger instance as creation requires AudioFlinger to exist in the first place.
+    //
+    // An atomic here ensures underlying writes have completed before setting
+    // the pointer. Access by memory_order_seq_cst.
+    //
+
+    static inline std::atomic<AudioFlinger *> gAudioFlinger = nullptr;
 
     class SyncEvent;
 
@@ -325,7 +377,10 @@ public:
 
         virtual ~SyncEvent() {}
 
-        void trigger() { Mutex::Autolock _l(mLock); if (mCallback) mCallback(this); }
+        void trigger() {
+            Mutex::Autolock _l(mLock);
+            if (mCallback) mCallback(wp<SyncEvent>(this));
+        }
         bool isCancelled() const { Mutex::Autolock _l(mLock); return (mCallback == NULL); }
         void cancel() { Mutex::Autolock _l(mLock); mCallback = NULL; }
         AudioSystem::sync_event_t type() const { return mType; }
@@ -366,8 +421,7 @@ private:
     virtual     void        onFirstRef();
 
     AudioHwDevice*          findSuitableHwDev_l(audio_module_handle_t module,
-                                                audio_devices_t devices);
-    void                    purgeStaleEffects_l();
+                                                audio_devices_t deviceType);
 
     // Set kEnableExtendedChannels to true to enable greater than stereo output
     // for the MixerThread and device sink.  Number of channels allowed is
@@ -380,7 +434,7 @@ private:
         case AUDIO_CHANNEL_REPRESENTATION_POSITION: {
             // Haptic channel mask is only applicable for channel position mask.
             const uint32_t channelCount = audio_channel_count_from_out_mask(
-                    channelMask & ~AUDIO_CHANNEL_HAPTIC_ALL);
+                    static_cast<audio_channel_mask_t>(channelMask & ~AUDIO_CHANNEL_HAPTIC_ALL));
             const uint32_t maxChannelCount = kEnableExtendedChannels
                     ? AudioMixer::MAX_NUM_CHANNELS : FCC_2;
             if (channelCount < FCC_2 // mono is not supported at this time
@@ -431,8 +485,7 @@ private:
     static uint32_t         mScreenState;
 
     // Internal dump utilities.
-    static const int kDumpLockRetries = 50;
-    static const int kDumpLockSleepUs = 20000;
+    static const int kDumpLockTimeoutNs = 1 * NANOS_PER_SECOND;
     static bool dumpTryLock(Mutex& mutex);
     void dumpPermissionDenial(int fd, const Vector<String16>& args);
     void dumpClients(int fd, const Vector<String16>& args);
@@ -464,11 +517,14 @@ private:
     class NotificationClient : public IBinder::DeathRecipient {
     public:
                             NotificationClient(const sp<AudioFlinger>& audioFlinger,
-                                                const sp<IAudioFlingerClient>& client,
-                                                pid_t pid);
+                                                const sp<media::IAudioFlingerClient>& client,
+                                                pid_t pid,
+                                                uid_t uid);
         virtual             ~NotificationClient();
 
-                sp<IAudioFlingerClient> audioFlingerClient() const { return mAudioFlingerClient; }
+                sp<media::IAudioFlingerClient> audioFlingerClient() const { return mAudioFlingerClient; }
+                pid_t getPid() const { return mPid; }
+                uid_t getUid() const { return mUid; }
 
                 // IBinder::DeathRecipient
                 virtual     void        binderDied(const wp<IBinder>& who);
@@ -478,7 +534,8 @@ private:
 
         const sp<AudioFlinger>  mAudioFlinger;
         const pid_t             mPid;
-        const sp<IAudioFlingerClient> mAudioFlingerClient;
+        const uid_t             mUid;
+        const sp<media::IAudioFlingerClient> mAudioFlingerClient;
     };
 
     // --- MediaLogNotifier ---
@@ -511,6 +568,7 @@ private:
     const sp<MediaLogNotifier> mMediaLogNotifier;
 
     // This is a helper that is called during incoming binder calls.
+    // Requests media.log to start merging log buffers
     void requestLogMerge();
 
     class TrackHandle;
@@ -524,9 +582,14 @@ private:
     class AsyncCallbackThread;
     class Track;
     class RecordTrack;
+    class EffectBase;
     class EffectModule;
     class EffectHandle;
     class EffectChain;
+    class DeviceEffectProxy;
+    class DeviceEffectManager;
+    class PatchPanel;
+    class DeviceEffectManagerCallback;
 
     struct AudioStreamIn;
     struct TeePatch;
@@ -543,6 +606,16 @@ private:
         bool        mute;
     };
 
+    // Abstraction for the Audio Source for the RecordThread (HAL or PassthruPatchRecord).
+    struct Source
+    {
+        virtual ~Source() = default;
+        // The following methods have the same signatures as in StreamHalInterface.
+        virtual status_t read(void *buffer, size_t bytes, size_t *read) = 0;
+        virtual status_t getCapturePosition(int64_t *frames, int64_t *time) = 0;
+        virtual status_t standby() = 0;
+    };
+
     // --- PlaybackThread ---
 #ifdef FLOAT_EFFECT_CHAIN
 #define EFFECT_BUFFER_FORMAT AUDIO_FORMAT_PCM_FLOAT
@@ -554,32 +627,65 @@ using effect_buffer_t = int16_t;
 
 #include "Threads.h"
 
-#include "Effects.h"
-
 #include "PatchPanel.h"
 
+#include "Effects.h"
+
+#include "DeviceEffectManager.h"
+
+    // Find io handle by session id.
+    // Preference is given to an io handle with a matching effect chain to session id.
+    // If none found, AUDIO_IO_HANDLE_NONE is returned.
+    template <typename T>
+    static audio_io_handle_t findIoHandleBySessionId_l(
+            audio_session_t sessionId, const T& threads) {
+        audio_io_handle_t io = AUDIO_IO_HANDLE_NONE;
+
+        for (size_t i = 0; i < threads.size(); i++) {
+            const uint32_t sessionType = threads.valueAt(i)->hasAudioSession(sessionId);
+            if (sessionType != 0) {
+                io = threads.keyAt(i);
+                if ((sessionType & AudioFlinger::ThreadBase::EFFECT_SESSION) != 0) {
+                    break; // effect chain here.
+                }
+            }
+        }
+        return io;
+    }
+
     // server side of the client's IAudioTrack
-    class TrackHandle : public android::BnAudioTrack {
+    class TrackHandle : public android::media::BnAudioTrack {
     public:
         explicit            TrackHandle(const sp<PlaybackThread::Track>& track);
         virtual             ~TrackHandle();
-        virtual sp<IMemory> getCblk() const;
-        virtual status_t    start();
-        virtual void        stop();
-        virtual void        flush();
-        virtual void        pause();
-        virtual status_t    attachAuxEffect(int effectId);
-        virtual status_t    setParameters(const String8& keyValuePairs);
-        virtual status_t    selectPresentation(int presentationId, int programId);
-        virtual media::VolumeShaper::Status applyVolumeShaper(
-                const sp<media::VolumeShaper::Configuration>& configuration,
-                const sp<media::VolumeShaper::Operation>& operation) override;
-        virtual sp<media::VolumeShaper::State> getVolumeShaperState(int id) override;
-        virtual status_t    getTimestamp(AudioTimestamp& timestamp);
-        virtual void        signal(); // signal playback thread for a change in control block
 
-        virtual status_t onTransact(
-            uint32_t code, const Parcel& data, Parcel* reply, uint32_t flags);
+        binder::Status getCblk(std::optional<media::SharedFileRegion>* _aidl_return) override;
+        binder::Status start(int32_t* _aidl_return) override;
+        binder::Status stop() override;
+        binder::Status flush() override;
+        binder::Status pause() override;
+        binder::Status attachAuxEffect(int32_t effectId, int32_t* _aidl_return) override;
+        binder::Status setParameters(const std::string& keyValuePairs,
+                                     int32_t* _aidl_return) override;
+        binder::Status selectPresentation(int32_t presentationId, int32_t programId,
+                                          int32_t* _aidl_return) override;
+        binder::Status getTimestamp(media::AudioTimestampInternal* timestamp,
+                                    int32_t* _aidl_return) override;
+        binder::Status signal() override;
+        binder::Status applyVolumeShaper(const media::VolumeShaperConfiguration& configuration,
+                                         const media::VolumeShaperOperation& operation,
+                                         int32_t* _aidl_return) override;
+        binder::Status getVolumeShaperState(
+                int32_t id,
+                std::optional<media::VolumeShaperState>* _aidl_return) override;
+        binder::Status getDualMonoMode(media::AudioDualMonoMode* _aidl_return) override;
+        binder::Status setDualMonoMode(media::AudioDualMonoMode mode) override;
+        binder::Status getAudioDescriptionMixLevel(float* _aidl_return) override;
+        binder::Status setAudioDescriptionMixLevel(float leveldB) override;
+        binder::Status getPlaybackRateParameters(
+                media::AudioPlaybackRate* _aidl_return) override;
+        binder::Status setPlaybackRateParameters(
+                const media::AudioPlaybackRate& playbackRate) override;
 
     private:
         const sp<PlaybackThread::Track> mTrack;
@@ -594,10 +700,12 @@ using effect_buffer_t = int16_t;
                 int /*audio_session_t*/ triggerSession);
         virtual binder::Status   stop();
         virtual binder::Status   getActiveMicrophones(
-                std::vector<media::MicrophoneInfo>* activeMicrophones);
-        virtual binder::Status   setMicrophoneDirection(
+                std::vector<media::MicrophoneInfoData>* activeMicrophones);
+        virtual binder::Status   setPreferredMicrophoneDirection(
                 int /*audio_microphone_direction_t*/ direction);
-        virtual binder::Status   setMicrophoneFieldDimension(float zoom);
+        virtual binder::Status   setPreferredMicrophoneFieldDimension(float zoom);
+        virtual binder::Status   shareAudioHistory(const std::string& sharedAudioPackageName,
+                                                   int64_t sharedAudioStartMs);
 
     private:
         const sp<RecordThread::RecordTrack> mRecordTrack;
@@ -617,8 +725,10 @@ using effect_buffer_t = int16_t;
         virtual status_t createMmapBuffer(int32_t minSizeFrames,
                                           struct audio_mmap_buffer_info *info);
         virtual status_t getMmapPosition(struct audio_mmap_position *position);
+        virtual status_t getExternalPosition(uint64_t *position, int64_t *timeNanos);
         virtual status_t start(const AudioClient& client,
-                                         audio_port_handle_t *handle);
+                               const audio_attributes_t *attr,
+                               audio_port_handle_t *handle);
         virtual status_t stop(audio_port_handle_t handle);
         virtual status_t standby();
 
@@ -638,17 +748,18 @@ using effect_buffer_t = int16_t;
                                            audio_io_handle_t *input,
                                            audio_config_t *config,
                                            audio_devices_t device,
-                                           const String8& address,
+                                           const char* address,
                                            audio_source_t source,
                                            audio_input_flags_t flags,
                                            audio_devices_t outputDevice,
                                            const String8& outputDeviceAddress);
               sp<ThreadBase> openOutput_l(audio_module_handle_t module,
-                                              audio_io_handle_t *output,
-                                              audio_config_t *config,
-                                              audio_devices_t devices,
-                                              const String8& address,
-                                              audio_output_flags_t flags);
+                                          audio_io_handle_t *output,
+                                          audio_config_t *halConfig,
+                                          audio_config_base_t *mixerConfig,
+                                          audio_devices_t deviceType,
+                                          const String8& address,
+                                          audio_output_flags_t flags);
 
               void closeOutputFinish(const sp<PlaybackThread>& thread);
               void closeInputFinish(const sp<RecordThread>& thread);
@@ -656,9 +767,11 @@ using effect_buffer_t = int16_t;
               // no range check, AudioFlinger::mLock held
               bool streamMute_l(audio_stream_type_t stream) const
                                 { return mStreamTypes[stream].mute; }
-              void ioConfigChanged(audio_io_config_event event,
+              void ioConfigChanged(audio_io_config_event_t event,
                                    const sp<AudioIoDescriptor>& ioDesc,
                                    pid_t pid = 0);
+              void onSupportedLatencyModesChanged(
+                    audio_io_handle_t output, const std::vector<audio_latency_mode_t>& modes);
 
               // Allocate an audio_unique_id_t.
               // Specific types are audio_io_handle_t, audio_session_t, effect ID (int),
@@ -675,17 +788,27 @@ using effect_buffer_t = int16_t;
 
               status_t moveEffectChain_l(audio_session_t sessionId,
                                      PlaybackThread *srcThread,
-                                     PlaybackThread *dstThread,
-                                     bool reRegister);
+                                     PlaybackThread *dstThread);
+
+              status_t moveAuxEffectToIo(int EffectId,
+                                         const sp<PlaybackThread>& dstThread,
+                                         sp<PlaybackThread> *srcThread);
 
               // return thread associated with primary hardware device, or NULL
               PlaybackThread *primaryPlaybackThread_l() const;
-              audio_devices_t primaryOutputDevice_l() const;
+              DeviceTypeSet primaryOutputDevice_l() const;
 
               // return the playback thread with smallest HAL buffer size, and prefer fast
               PlaybackThread *fastPlaybackThread_l() const;
 
-              sp<PlaybackThread> getEffectThread_l(audio_session_t sessionId, int EffectId);
+              sp<ThreadBase> getEffectThread_l(audio_session_t sessionId, int effectId);
+
+              ThreadBase *hapticPlaybackThread_l() const;
+
+              void updateSecondaryOutputsForTrack_l(
+                      PlaybackThread::Track* track,
+                      PlaybackThread* thread,
+                      const std::vector<audio_io_handle_t>& secondaryOutputs) const;
 
 
                 void        removeClient_l(pid_t pid);
@@ -711,7 +834,10 @@ using effect_buffer_t = int16_t;
                 // Return true if the effect was found in mOrphanEffectChains, false otherwise.
                 bool            updateOrphanEffectChains(const sp<EffectModule>& effect);
 
-                void broacastParametersToRecordThreads_l(const String8& keyValuePairs);
+                std::vector< sp<EffectModule> > purgeStaleEffects_l();
+
+                void broadcastParametersToRecordThreads_l(const String8& keyValuePairs);
+                void updateOutDevicesForRecordThreads_l(const DeviceDescriptorBaseVector& devices);
                 void forwardParametersToDownstreamPatches_l(
                         audio_io_handle_t upStream, const String8& keyValuePairs,
                         std::function<bool(const sp<PlaybackThread>&)> useThread = nullptr);
@@ -720,7 +846,7 @@ using effect_buffer_t = int16_t;
     // For emphasis, we could also make all pointers to them be "const *",
     // but that would clutter the code unnecessarily.
 
-    struct AudioStreamIn {
+    struct AudioStreamIn : public Source {
         AudioHwDevice* const audioHwDev;
         sp<StreamInHalInterface> stream;
         audio_input_flags_t flags;
@@ -729,6 +855,13 @@ using effect_buffer_t = int16_t;
 
         AudioStreamIn(AudioHwDevice *dev, sp<StreamInHalInterface> in, audio_input_flags_t flags) :
             audioHwDev(dev), stream(in), flags(flags) {}
+        status_t read(void *buffer, size_t bytes, size_t *read) override {
+            return stream->read(buffer, bytes, read);
+        }
+        status_t getCapturePosition(int64_t *frames, int64_t *time) override {
+            return stream->getCapturePosition(frames, time);
+        }
+        status_t standby() override { return stream->standby(); }
     };
 
     struct TeePatch {
@@ -738,10 +871,11 @@ using effect_buffer_t = int16_t;
 
     // for mAudioSessionRefs only
     struct AudioSessionRef {
-        AudioSessionRef(audio_session_t sessionid, pid_t pid) :
-            mSessionid(sessionid), mPid(pid), mCnt(1) {}
+        AudioSessionRef(audio_session_t sessionid, pid_t pid, uid_t uid) :
+            mSessionid(sessionid), mPid(pid), mUid(uid), mCnt(1) {}
         const audio_session_t mSessionid;
         const pid_t mPid;
+        const uid_t mUid;
         int         mCnt;
     };
 
@@ -757,11 +891,13 @@ using effect_buffer_t = int16_t;
                 // NOTE: If both mLock and mHardwareLock mutexes must be held,
                 // always take mLock before mHardwareLock
 
-                // These two fields are immutable after onFirstRef(), so no lock needed to access
-                AudioHwDevice*                      mPrimaryHardwareDev; // mAudioHwDevs[0] or NULL
+                // guarded by mHardwareLock
+                AudioHwDevice* mPrimaryHardwareDev;
                 DefaultKeyedVector<audio_module_handle_t, AudioHwDevice*>  mAudioHwDevs;
 
+                // These two fields are immutable after onFirstRef(), so no lock needed to access
                 sp<DevicesFactoryHalInterface> mDevicesFactoryHal;
+                sp<DevicesFactoryHalCallback> mDevicesFactoryHalCallback;
 
     // for dump, indicates which hardware operation is currently in progress (but not stream ops)
     enum hardware_call_state {
@@ -786,6 +922,8 @@ using effect_buffer_t = int16_t;
         AUDIO_HW_GET_PARAMETER,         // get_parameters
         AUDIO_HW_SET_MASTER_MUTE,       // set_master_mute
         AUDIO_HW_GET_MASTER_MUTE,       // get_master_mute
+        AUDIO_HW_GET_MICROPHONES,       // getMicrophones
+        AUDIO_HW_SET_CONNECTED_STATE,   // setConnectedState
     };
 
     mutable     hardware_call_state                 mHardwareStatus;    // for dump only
@@ -869,11 +1007,28 @@ private:
     PatchPanel mPatchPanel;
     sp<EffectsFactoryHalInterface> mEffectsFactoryHal;
 
+    DeviceEffectManager mDeviceEffectManager;
+
     bool       mSystemReady;
+    std::atomic_bool mAudioPolicyReady{};
+
+    mediautils::UidInfo mUidInfo;
 
     SimpleLog  mRejectedSetParameterLog;
     SimpleLog  mAppSetParameterLog;
     SimpleLog  mSystemSetParameterLog;
+
+    std::vector<media::AudioVibratorInfo> mAudioVibratorInfos;
+
+    static inline constexpr const char *mMetricsId = AMEDIAMETRICS_KEY_AUDIO_FLINGER;
+
+    // Keep in sync with java definition in media/java/android/media/AudioRecord.java
+    static constexpr int32_t kMaxSharedAudioHistoryMs = 5000;
+
+    std::map<media::audio::common::AudioMMapPolicyType,
+             std::vector<media::audio::common::AudioMMapPolicyInfo>> mPolicyInfos;
+    int32_t mAAudioBurstsPerBuffer = 0;
+    int32_t mAAudioHwBurstMinMicros = 0;
 };
 
 #undef INCLUDING_FROM_AUDIOFLINGER_H

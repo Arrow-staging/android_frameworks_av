@@ -16,13 +16,16 @@
 
 //#define LOG_NDEBUG 0
 #define LOG_TAG "Codec2BufferUtils"
+#define ATRACE_TAG  ATRACE_TAG_VIDEO
 #include <utils/Log.h>
+#include <utils/Trace.h>
 
 #include <libyuv.h>
 
 #include <list>
 #include <mutex>
 
+#include <android/hardware_buffer.h>
 #include <media/hardware/HardwareAPI.h>
 #include <media/stagefright/foundation/AUtils.h>
 
@@ -35,8 +38,8 @@ namespace android {
 namespace {
 
 /**
- * A flippable, optimizable memcpy. Constructs such as (from ? src : dst) do not work as the results are
- * always const.
+ * A flippable, optimizable memcpy. Constructs such as (from ? src : dst)
+ * do not work as the results are always const.
  */
 template<bool ToA, size_t S>
 struct MemCopier {
@@ -87,7 +90,7 @@ static status_t _ImageCopy(View &view, const MediaImage2 *img, ImagePixel *imgBa
         uint32_t planeW = img->mWidth / plane.colSampling;
         uint32_t planeH = img->mHeight / plane.rowSampling;
 
-        bool canCopyByRow = (plane.colInc == 1) && (img->mPlane[i].mColInc == 1);
+        bool canCopyByRow = (plane.colInc == bpp) && (img->mPlane[i].mColInc == bpp);
         bool canCopyByPlane = canCopyByRow && (plane.rowInc == img->mPlane[i].mRowInc);
         if (canCopyByPlane) {
             MemCopier<ToMediaImage, 0>::copy(imgRow, viewRow, plane.rowInc * planeH);
@@ -118,72 +121,171 @@ static status_t _ImageCopy(View &view, const MediaImage2 *img, ImagePixel *imgBa
 }  // namespace
 
 status_t ImageCopy(uint8_t *imgBase, const MediaImage2 *img, const C2GraphicView &view) {
-    if (view.width() != img->mWidth || view.height() != img->mHeight) {
+    if (img == nullptr
+        || imgBase == nullptr
+        || view.crop().width != img->mWidth
+        || view.crop().height != img->mHeight) {
         return BAD_VALUE;
     }
-    if ((IsNV12(view) && IsI420(img)) || (IsI420(view) && IsNV12(img))) {
-        // Take shortcuts to use libyuv functions between NV12 and I420 conversion.
-        const uint8_t* src_y = view.data()[0];
-        const uint8_t* src_u = view.data()[1];
-        const uint8_t* src_v = view.data()[2];
-        int32_t src_stride_y = view.layout().planes[0].rowInc;
-        int32_t src_stride_u = view.layout().planes[1].rowInc;
-        int32_t src_stride_v = view.layout().planes[2].rowInc;
-        uint8_t* dst_y = imgBase + img->mPlane[0].mOffset;
-        uint8_t* dst_u = imgBase + img->mPlane[1].mOffset;
-        uint8_t* dst_v = imgBase + img->mPlane[2].mOffset;
-        int32_t dst_stride_y = img->mPlane[0].mRowInc;
-        int32_t dst_stride_u = img->mPlane[1].mRowInc;
-        int32_t dst_stride_v = img->mPlane[2].mRowInc;
-        if (IsNV12(view) && IsI420(img)) {
-            if (!libyuv::NV12ToI420(src_y, src_stride_y, src_u, src_stride_u, dst_y, dst_stride_y,
-                                    dst_u, dst_stride_u, dst_v, dst_stride_v, view.width(),
-                                    view.height())) {
+    const uint8_t* src_y = view.data()[0];
+    const uint8_t* src_u = view.data()[1];
+    const uint8_t* src_v = view.data()[2];
+    int32_t src_stride_y = view.layout().planes[0].rowInc;
+    int32_t src_stride_u = view.layout().planes[1].rowInc;
+    int32_t src_stride_v = view.layout().planes[2].rowInc;
+    uint8_t* dst_y = imgBase + img->mPlane[0].mOffset;
+    uint8_t* dst_u = imgBase + img->mPlane[1].mOffset;
+    uint8_t* dst_v = imgBase + img->mPlane[2].mOffset;
+    int32_t dst_stride_y = img->mPlane[0].mRowInc;
+    int32_t dst_stride_u = img->mPlane[1].mRowInc;
+    int32_t dst_stride_v = img->mPlane[2].mRowInc;
+    int width = view.crop().width;
+    int height = view.crop().height;
+
+    if (IsNV12(view)) {
+        if (IsNV12(img)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV12->NV12");
+            libyuv::CopyPlane(src_y, src_stride_y, dst_y, dst_stride_y, width, height);
+            libyuv::CopyPlane(src_u, src_stride_u, dst_u, dst_stride_u, width, height / 2);
+            return OK;
+        } else if (IsNV21(img)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV12->NV21");
+            if (!libyuv::NV21ToNV12(src_y, src_stride_y, src_u, src_stride_u,
+                                    dst_y, dst_stride_y, dst_v, dst_stride_v, width, height)) {
                 return OK;
             }
-        } else {
-            if (!libyuv::I420ToNV12(src_y, src_stride_y, src_u, src_stride_u, src_v, src_stride_v,
-                                    dst_y, dst_stride_y, dst_u, dst_stride_u, view.width(),
-                                    view.height())) {
+        } else if (IsI420(img)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV12->I420");
+            if (!libyuv::NV12ToI420(src_y, src_stride_y, src_u, src_stride_u, dst_y, dst_stride_y,
+                                    dst_u, dst_stride_u, dst_v, dst_stride_v, width, height)) {
                 return OK;
             }
         }
+    } else if (IsNV21(view)) {
+        if (IsNV12(img)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV21->NV12");
+            if (!libyuv::NV21ToNV12(src_y, src_stride_y, src_v, src_stride_v,
+                                    dst_y, dst_stride_y, dst_u, dst_stride_u, width, height)) {
+                return OK;
+            }
+        } else if (IsNV21(img)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV21->NV21");
+            libyuv::CopyPlane(src_y, src_stride_y, dst_y, dst_stride_y, width, height);
+            libyuv::CopyPlane(src_v, src_stride_v, dst_v, dst_stride_v, width, height / 2);
+            return OK;
+        } else if (IsI420(img)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV21->I420");
+            if (!libyuv::NV21ToI420(src_y, src_stride_y, src_v, src_stride_v, dst_y, dst_stride_y,
+                                    dst_u, dst_stride_u, dst_v, dst_stride_v, width, height)) {
+                return OK;
+            }
+        }
+    } else if (IsI420(view)) {
+        if (IsNV12(img)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: I420->NV12");
+            if (!libyuv::I420ToNV12(src_y, src_stride_y, src_u, src_stride_u, src_v, src_stride_v,
+                                    dst_y, dst_stride_y, dst_u, dst_stride_u, width, height)) {
+                return OK;
+            }
+        } else if (IsNV21(img)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: I420->NV21");
+            if (!libyuv::I420ToNV21(src_y, src_stride_y, src_u, src_stride_u, src_v, src_stride_v,
+                                    dst_y, dst_stride_y, dst_v, dst_stride_v, width, height)) {
+                return OK;
+            }
+        } else if (IsI420(img)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: I420->I420");
+            libyuv::CopyPlane(src_y, src_stride_y, dst_y, dst_stride_y, width, height);
+            libyuv::CopyPlane(src_u, src_stride_u, dst_u, dst_stride_u, width / 2, height / 2);
+            libyuv::CopyPlane(src_v, src_stride_v, dst_v, dst_stride_v, width / 2, height / 2);
+            return OK;
+        }
     }
+    ScopedTrace trace(ATRACE_TAG, "ImageCopy: generic");
     return _ImageCopy<true>(view, img, imgBase);
 }
 
 status_t ImageCopy(C2GraphicView &view, const uint8_t *imgBase, const MediaImage2 *img) {
-    if (view.width() != img->mWidth || view.height() != img->mHeight) {
+    if (img == nullptr
+        || imgBase == nullptr
+        || view.crop().width != img->mWidth
+        || view.crop().height != img->mHeight) {
         return BAD_VALUE;
     }
-    if ((IsNV12(img) && IsI420(view)) || (IsI420(img) && IsNV12(view))) {
-        // Take shortcuts to use libyuv functions between NV12 and I420 conversion.
-        const uint8_t* src_y = imgBase + img->mPlane[0].mOffset;
-        const uint8_t* src_u = imgBase + img->mPlane[1].mOffset;
-        const uint8_t* src_v = imgBase + img->mPlane[2].mOffset;
-        int32_t src_stride_y = img->mPlane[0].mRowInc;
-        int32_t src_stride_u = img->mPlane[1].mRowInc;
-        int32_t src_stride_v = img->mPlane[2].mRowInc;
-        uint8_t* dst_y = view.data()[0];
-        uint8_t* dst_u = view.data()[1];
-        uint8_t* dst_v = view.data()[2];
-        int32_t dst_stride_y = view.layout().planes[0].rowInc;
-        int32_t dst_stride_u = view.layout().planes[1].rowInc;
-        int32_t dst_stride_v = view.layout().planes[2].rowInc;
-        if (IsNV12(img) && IsI420(view)) {
-            if (!libyuv::NV12ToI420(src_y, src_stride_y, src_u, src_stride_u, dst_y, dst_stride_y,
-                                    dst_u, dst_stride_u, dst_v, dst_stride_v, view.width(),
-                                    view.height())) {
+    const uint8_t* src_y = imgBase + img->mPlane[0].mOffset;
+    const uint8_t* src_u = imgBase + img->mPlane[1].mOffset;
+    const uint8_t* src_v = imgBase + img->mPlane[2].mOffset;
+    int32_t src_stride_y = img->mPlane[0].mRowInc;
+    int32_t src_stride_u = img->mPlane[1].mRowInc;
+    int32_t src_stride_v = img->mPlane[2].mRowInc;
+    uint8_t* dst_y = view.data()[0];
+    uint8_t* dst_u = view.data()[1];
+    uint8_t* dst_v = view.data()[2];
+    int32_t dst_stride_y = view.layout().planes[0].rowInc;
+    int32_t dst_stride_u = view.layout().planes[1].rowInc;
+    int32_t dst_stride_v = view.layout().planes[2].rowInc;
+    int width = view.crop().width;
+    int height = view.crop().height;
+    if (IsNV12(img)) {
+        if (IsNV12(view)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV12->NV12");
+            libyuv::CopyPlane(src_y, src_stride_y, dst_y, dst_stride_y, width, height);
+            libyuv::CopyPlane(src_u, src_stride_u, dst_u, dst_stride_u, width, height / 2);
+            return OK;
+        } else if (IsNV21(view)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV12->NV21");
+            if (!libyuv::NV21ToNV12(src_y, src_stride_y, src_u, src_stride_u,
+                                    dst_y, dst_stride_y, dst_v, dst_stride_v, width, height)) {
                 return OK;
             }
-        } else {
-            if (!libyuv::I420ToNV12(src_y, src_stride_y, src_u, src_stride_u, src_v, src_stride_v,
-                                    dst_y, dst_stride_y, dst_u, dst_stride_u, view.width(),
-                                    view.height())) {
+        } else if (IsI420(view)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV12->I420");
+            if (!libyuv::NV12ToI420(src_y, src_stride_y, src_u, src_stride_u, dst_y, dst_stride_y,
+                                    dst_u, dst_stride_u, dst_v, dst_stride_v, width, height)) {
                 return OK;
             }
         }
+    } else if (IsNV21(img)) {
+        if (IsNV12(view)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV21->NV12");
+            if (!libyuv::NV21ToNV12(src_y, src_stride_y, src_v, src_stride_v,
+                                    dst_y, dst_stride_y, dst_u, dst_stride_u, width, height)) {
+                return OK;
+            }
+        } else if (IsNV21(view)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV21->NV21");
+            libyuv::CopyPlane(src_y, src_stride_y, dst_y, dst_stride_y, width, height);
+            libyuv::CopyPlane(src_v, src_stride_v, dst_v, dst_stride_v, width, height / 2);
+            return OK;
+        } else if (IsI420(view)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: NV21->I420");
+            if (!libyuv::NV21ToI420(src_y, src_stride_y, src_v, src_stride_v, dst_y, dst_stride_y,
+                                    dst_u, dst_stride_u, dst_v, dst_stride_v, width, height)) {
+                return OK;
+            }
+        }
+    } else if (IsI420(img)) {
+        if (IsNV12(view)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: I420->NV12");
+            if (!libyuv::I420ToNV12(src_y, src_stride_y, src_u, src_stride_u, src_v, src_stride_v,
+                                    dst_y, dst_stride_y, dst_u, dst_stride_u, width, height)) {
+                return OK;
+            }
+        } else if (IsNV21(view)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: I420->NV21");
+            if (!libyuv::I420ToNV21(src_y, src_stride_y, src_u, src_stride_u, src_v, src_stride_v,
+                                    dst_y, dst_stride_y, dst_v, dst_stride_v, width, height)) {
+                return OK;
+            }
+        } else if (IsI420(view)) {
+            ScopedTrace trace(ATRACE_TAG, "ImageCopy: I420->I420");
+            libyuv::CopyPlane(src_y, src_stride_y, dst_y, dst_stride_y, width, height);
+            libyuv::CopyPlane(src_u, src_stride_u, dst_u, dst_stride_u, width / 2, height / 2);
+            libyuv::CopyPlane(src_v, src_stride_v, dst_v, dst_stride_v, width / 2, height / 2);
+            return OK;
+        }
     }
+    ScopedTrace trace(ATRACE_TAG, "ImageCopy: generic");
     return _ImageCopy<false>(view, img, imgBase);
 }
 
@@ -225,6 +327,20 @@ bool IsNV12(const C2GraphicView &view) {
             && layout.planes[layout.PLANE_V].offset == 1);
 }
 
+bool IsNV21(const C2GraphicView &view) {
+    if (!IsYUV420(view)) {
+        return false;
+    }
+    const C2PlanarLayout &layout = view.layout();
+    return (layout.rootPlanes == 2
+            && layout.planes[layout.PLANE_U].colInc == 2
+            && layout.planes[layout.PLANE_U].rootIx == layout.PLANE_V
+            && layout.planes[layout.PLANE_U].offset == 1
+            && layout.planes[layout.PLANE_V].colInc == 2
+            && layout.planes[layout.PLANE_V].rootIx == layout.PLANE_V
+            && layout.planes[layout.PLANE_V].offset == 0);
+}
+
 bool IsI420(const C2GraphicView &view) {
     if (!IsYUV420(view)) {
         return false;
@@ -258,7 +374,16 @@ bool IsNV12(const MediaImage2 *img) {
     }
     return (img->mPlane[1].mColInc == 2
             && img->mPlane[2].mColInc == 2
-            && (img->mPlane[2].mOffset - img->mPlane[1].mOffset == 1));
+            && (img->mPlane[2].mOffset == img->mPlane[1].mOffset + 1));
+}
+
+bool IsNV21(const MediaImage2 *img) {
+    if (!IsYUV420(img)) {
+        return false;
+    }
+    return (img->mPlane[1].mColInc == 2
+            && img->mPlane[2].mColInc == 2
+            && (img->mPlane[1].mOffset == img->mPlane[2].mOffset + 1));
 }
 
 bool IsI420(const MediaImage2 *img) {
@@ -268,6 +393,76 @@ bool IsI420(const MediaImage2 *img) {
     return (img->mPlane[1].mColInc == 1
             && img->mPlane[2].mColInc == 1
             && img->mPlane[2].mOffset > img->mPlane[1].mOffset);
+}
+
+FlexLayout GetYuv420FlexibleLayout() {
+    static FlexLayout sLayout = []{
+        AHardwareBuffer_Desc desc = {
+            16,  // width
+            16,  // height
+            1,   // layers
+            AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420,
+            AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
+            0,   // stride
+            0,   // rfu0
+            0,   // rfu1
+        };
+        AHardwareBuffer *buffer = nullptr;
+        int ret = AHardwareBuffer_allocate(&desc, &buffer);
+        if (ret != 0) {
+            return FLEX_LAYOUT_UNKNOWN;
+        }
+        class AutoCloser {
+        public:
+            AutoCloser(AHardwareBuffer *buffer) : mBuffer(buffer), mLocked(false) {}
+            ~AutoCloser() {
+                if (mLocked) {
+                    AHardwareBuffer_unlock(mBuffer, nullptr);
+                }
+                AHardwareBuffer_release(mBuffer);
+            }
+
+            void setLocked() { mLocked = true; }
+
+        private:
+            AHardwareBuffer *mBuffer;
+            bool mLocked;
+        } autoCloser(buffer);
+        AHardwareBuffer_Planes planes;
+        ret = AHardwareBuffer_lockPlanes(
+                buffer,
+                AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN,
+                -1,       // fence
+                nullptr,  // rect
+                &planes);
+        if (ret != 0) {
+            AHardwareBuffer_release(buffer);
+            return FLEX_LAYOUT_UNKNOWN;
+        }
+        autoCloser.setLocked();
+        if (planes.planeCount != 3) {
+            return FLEX_LAYOUT_UNKNOWN;
+        }
+        if (planes.planes[0].pixelStride != 1) {
+            return FLEX_LAYOUT_UNKNOWN;
+        }
+        if (planes.planes[1].pixelStride == 1 && planes.planes[2].pixelStride == 1) {
+            return FLEX_LAYOUT_PLANAR;
+        }
+        if (planes.planes[1].pixelStride == 2 && planes.planes[2].pixelStride == 2) {
+            ssize_t uvDist =
+                static_cast<uint8_t *>(planes.planes[2].data) -
+                static_cast<uint8_t *>(planes.planes[1].data);
+            if (uvDist == 1) {
+                return FLEX_LAYOUT_SEMIPLANAR_UV;
+            } else if (uvDist == -1) {
+                return FLEX_LAYOUT_SEMIPLANAR_VU;
+            }
+            return FLEX_LAYOUT_UNKNOWN;
+        }
+        return FLEX_LAYOUT_UNKNOWN;
+    }();
+    return sLayout;
 }
 
 MediaImage2 CreateYUV420PlanarMediaImage2(
@@ -340,9 +535,23 @@ MediaImage2 CreateYUV420SemiPlanarMediaImage2(
     };
 }
 
+// Matrix coefficient to convert RGB to Planar YUV data.
+// Each sub-array represents the 3X3 coeff used with R, G and B
+static const int16_t bt601Matrix[2][3][3] = {
+    { { 77, 150, 29 }, { -43, -85, 128 }, { 128, -107, -21 } }, /* RANGE_FULL */
+    { { 66, 129, 25 }, { -38, -74, 112 }, { 112, -94, -18 } },  /* RANGE_LIMITED */
+};
+
+static const int16_t bt709Matrix[2][3][3] = {
+    // TRICKY: 18 is adjusted to 19 so that sum of row 1 is 256
+    { { 54, 183, 19 }, { -29, -99, 128 }, { 128, -116, -12 } }, /* RANGE_FULL */
+    // TRICKY: -87 is adjusted to -86 so that sum of row 2 is 0
+    { { 47, 157, 16 }, { -26, -86, 112 }, { 112, -102, -10 } }, /* RANGE_LIMITED */
+};
+
 status_t ConvertRGBToPlanarYUV(
         uint8_t *dstY, size_t dstStride, size_t dstVStride, size_t bufferSize,
-        const C2GraphicView &src) {
+        const C2GraphicView &src, C2Color::matrix_t colorMatrix, C2Color::range_t colorRange) {
     CHECK(dstY != nullptr);
     CHECK((src.width() & 1) == 0);
     CHECK((src.height() & 1) == 0);
@@ -360,28 +569,38 @@ status_t ConvertRGBToPlanarYUV(
     const uint8_t *pGreen = src.data()[C2PlanarLayout::PLANE_G];
     const uint8_t *pBlue  = src.data()[C2PlanarLayout::PLANE_B];
 
-#define CLIP3(x,y,z) (((z) < (x)) ? (x) : (((z) > (y)) ? (y) : (z)))
+    // set default range as limited
+    if (colorRange != C2Color::RANGE_FULL && colorRange != C2Color::RANGE_LIMITED) {
+        colorRange = C2Color::RANGE_LIMITED;
+    }
+    const int16_t (*weights)[3] =
+        (colorMatrix == C2Color::MATRIX_BT709) ?
+            bt709Matrix[colorRange - 1] : bt601Matrix[colorRange - 1];
+    uint8_t zeroLvl =  colorRange == C2Color::RANGE_FULL ? 0 : 16;
+    uint8_t maxLvlLuma =  colorRange == C2Color::RANGE_FULL ? 255 : 235;
+    uint8_t maxLvlChroma =  colorRange == C2Color::RANGE_FULL ? 255 : 240;
+
+#define CLIP3(min,v,max) (((v) < (min)) ? (min) : (((max) > (v)) ? (v) : (max)))
     for (size_t y = 0; y < src.height(); ++y) {
         for (size_t x = 0; x < src.width(); ++x) {
-            uint8_t red = *pRed;
-            uint8_t green = *pGreen;
-            uint8_t blue = *pBlue;
+            uint8_t r = *pRed;
+            uint8_t g = *pGreen;
+            uint8_t b = *pBlue;
 
-            // using ITU-R BT.601 conversion matrix
-            unsigned luma =
-                CLIP3(0, (((red * 66 + green * 129 + blue * 25) >> 8) + 16), 255);
+            unsigned luma = ((r * weights[0][0] + g * weights[0][1] + b * weights[0][2]) >> 8) +
+                             zeroLvl;
 
-            dstY[x] = luma;
+            dstY[x] = CLIP3(zeroLvl, luma, maxLvlLuma);
 
             if ((x & 1) == 0 && (y & 1) == 0) {
-                unsigned U =
-                    CLIP3(0, (((-red * 38 - green * 74 + blue * 112) >> 8) + 128), 255);
+                unsigned U = ((r * weights[1][0] + g * weights[1][1] + b * weights[1][2]) >> 8) +
+                              128;
 
-                unsigned V =
-                    CLIP3(0, (((red * 112 - green * 94 - blue * 18) >> 8) + 128), 255);
+                unsigned V = ((r * weights[2][0] + g * weights[2][1] + b * weights[2][2]) >> 8) +
+                              128;
 
-                dstU[x >> 1] = U;
-                dstV[x >> 1] = V;
+                dstU[x >> 1] = CLIP3(zeroLvl, U, maxLvlChroma);
+                dstV[x >> 1] = CLIP3(zeroLvl, V, maxLvlChroma);
             }
             pRed   += layout.planes[C2PlanarLayout::PLANE_R].colInc;
             pGreen += layout.planes[C2PlanarLayout::PLANE_G].colInc;

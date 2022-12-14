@@ -1,15 +1,34 @@
-cc_library_shared {
+package {
+    default_applicable_licenses: ["frameworks_av_media_extractors_wav_license"],
+}
+
+// Added automatically by a large-scale-change
+// See: http://go/android-license-faq
+license {
+    name: "frameworks_av_media_extractors_wav_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+    ],
+    license_text: [
+        "NOTICE",
+    ],
+}
+
+cc_library {
+    name: "libwavextractor",
+
+    defaults: ["extractor-defaults"],
 
     srcs: ["WAVExtractor.cpp"],
 
-    include_dirs: [
-        "frameworks/av/media/libstagefright/include",
+    export_include_dirs: [
+        "include",
     ],
 
     shared_libs: [
+        "libbase",
         "libbinder_ndk",
-        "liblog",
-        "libmediandk",
     ],
 
     static_libs: [
@@ -18,24 +37,10 @@ cc_library_shared {
         "libstagefright_foundation",
     ],
 
-    name: "libwavextractor",
-    relative_install_path: "extractors",
-
-    compile_multilib: "first",
-
-    cflags: [
-        "-Werror",
-        "-Wall",
-        "-fvisibility=hidden",
-    ],
-    version_script: "exports.lds",
-
-    sanitize: {
-        cfi: true,
-        misc_undefined: [
-            "unsigned-integer-overflow",
-            "signed-integer-overflow",
-        ],
+    host_supported: true,
+    target: {
+        darwin: {
+            enabled: false,
+        },
     },
-
 }

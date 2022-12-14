@@ -133,6 +133,14 @@ status_t MediaTrackCUnwrapper::read(MediaBufferBase **buffer, const ReadOptions 
         if (format->mFormat->findInt64("target-time", &val64)) {
             meta.setInt64(kKeyTargetTime, val64);
         }
+        if (format->mFormat->findInt64("sample-file-offset", &val64)) {
+            meta.setInt64(kKeySampleFileOffset, val64);
+        }
+        if (format->mFormat->findInt64(
+                    "last-sample-index-in-chunk" /*AMEDIAFORMAT_KEY_LAST_SAMPLE_INDEX_IN_CHUNK*/,
+                    &val64)) {
+            meta.setInt64(kKeyLastSampleIndexInChunk, val64);
+        }
         int32_t val32;
         if (format->mFormat->findInt32("is-sync-frame", &val32)) {
             meta.setInt32(kKeyIsSyncFrame, val32);
@@ -183,6 +191,11 @@ status_t MediaTrackCUnwrapper::read(MediaBufferBase **buffer, const ReadOptions 
             meta.setData(kKeyAudioPresentationInfo,
                     MetaDataBase::Type::TYPE_NONE, valbuf->data(), valbuf->size());
         }
+        if (format->mFormat->findBuffer("csd-0", &valbuf)) {
+            meta.setData(kKeyOpaqueCSD0,
+                    MetaDataBase::Type::TYPE_NONE, valbuf->data(), valbuf->size());
+        }
+
     } else {
         *buffer = nullptr;
     }

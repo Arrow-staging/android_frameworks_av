@@ -17,17 +17,19 @@
 #define LOG_TAG "APM::AudioCollections"
 //#define LOG_NDEBUG 0
 
+#include <android-base/stringprintf.h>
+
 #include "AudioCollections.h"
-#include "AudioPort.h"
 #include "AudioRoute.h"
 #include "HwModule.h"
-#include "AudioGain.h"
+#include "PolicyAudioPort.h"
 
 namespace android {
 
-sp<AudioPort> AudioPortVector::findByTagName(const String8 &tagName) const
+sp<PolicyAudioPort> findByTagName(const PolicyAudioPortVector& policyAudioPortVector,
+                                  const std::string &tagName)
 {
-    for (const auto& port : *this) {
+    for (const auto& port : policyAudioPortVector) {
         if (port->getTagName() == tagName) {
             return port;
         }
@@ -35,15 +37,16 @@ sp<AudioPort> AudioPortVector::findByTagName(const String8 &tagName) const
     return nullptr;
 }
 
-void AudioRouteVector::dump(String8 *dst, int spaces) const
+void dumpAudioRouteVector(const AudioRouteVector& audioRouteVector, String8 *dst, int spaces)
 {
-    if (isEmpty()) {
+    if (audioRouteVector.isEmpty()) {
         return;
     }
-    dst->appendFormat("\n%*sAudio Routes (%zu):\n", spaces, "", size());
-    for (size_t i = 0; i < size(); i++) {
-        dst->appendFormat("%*s- Route %zu:\n", spaces, "", i + 1);
-        itemAt(i)->dump(dst, 4);
+    dst->appendFormat("%*s- Audio Routes (%zu):\n", spaces - 2, "", audioRouteVector.size());
+    for (size_t i = 0; i < audioRouteVector.size(); i++) {
+        const std::string prefix = base::StringPrintf("%*s %zu. ", spaces, "", i + 1);
+        dst->append(prefix.c_str());
+        audioRouteVector.itemAt(i)->dump(dst, prefix.size());
     }
 }
 

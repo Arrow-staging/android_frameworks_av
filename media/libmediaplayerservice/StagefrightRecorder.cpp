@@ -16,10 +16,16 @@
 
 //#define LOG_NDEBUG 0
 #define LOG_TAG "StagefrightRecorder"
+#define ATRACE_TAG ATRACE_TAG_VIDEO
+#include <utils/Trace.h>
 #include <inttypes.h>
+// TODO/workaround: including base logging now as it conflicts with ADebug.h
+// and it must be included first.
+#include <android-base/logging.h>
 #include <utils/Log.h>
 
-#include "WebmWriter.h"
+#include <webm/WebmWriter.h>
+
 #include "StagefrightRecorder.h"
 
 #include <algorithm>
@@ -30,8 +36,9 @@
 #include <binder/IPCThreadState.h>
 #include <binder/IServiceManager.h>
 
+#include <media/AidlConversion.h>
 #include <media/IMediaPlayerService.h>
-#include <media/MediaAnalyticsItem.h>
+#include <media/MediaMetricsItem.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/AMessage.h>
@@ -44,6 +51,7 @@
 #include <media/stagefright/CameraSourceTimeLapse.h>
 #include <media/stagefright/MPEG2TSWriter.h>
 #include <media/stagefright/MPEG4Writer.h>
+#include <media/stagefright/MediaCodecConstants.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MetaData.h>
 #include <media/stagefright/MediaCodecSource.h>
@@ -59,7 +67,7 @@
 
 #include <system/audio.h>
 
-#include "ARTPWriter.h"
+#include <media/stagefright/rtsp/ARTPWriter.h>
 
 namespace android {
 
@@ -74,6 +82,7 @@ static const char *kKeyRecorder = "recorder";
 // NB: these are matched with public Java API constants defined
 // in frameworks/base/media/java/android/media/MediaRecorder.java
 // These must be kept synchronized with the constants there.
+static const char *kRecorderLogSessionId = "android.media.mediarecorder.log-session-id";
 static const char *kRecorderAudioBitrate = "android.media.mediarecorder.audio-bitrate";
 static const char *kRecorderAudioChannels = "android.media.mediarecorder.audio-channels";
 static const char *kRecorderAudioSampleRate = "android.media.mediarecorder.audio-samplerate";
@@ -110,18 +119,27 @@ static void addBatteryData(uint32_t params) {
 }
 
 
-StagefrightRecorder::StagefrightRecorder(const String16 &opPackageName)
-    : MediaRecorderBase(opPackageName),
+StagefrightRecorder::StagefrightRecorder(const AttributionSourceState& client)
+    : MediaRecorderBase(client),
       mWriter(NULL),
       mOutputFd(-1),
       mAudioSource((audio_source_t)AUDIO_SOURCE_CNT), // initialize with invalid value
+      mPrivacySensitive(PRIVACY_SENSITIVE_DEFAULT),
       mVideoSource(VIDEO_SOURCE_LIST_END),
+      mRTPCVOExtMap(-1),
+      mRTPCVODegrees(0),
+      mRTPSockDscp(0),
+      mRTPSockNetwork(0),
+      mLastSeqNo(0),
       mStarted(false),
       mSelectedDeviceId(AUDIO_PORT_HANDLE_NONE),
-      mDeviceCallbackEnabled(false) {
+      mDeviceCallbackEnabled(false),
+      mSelectedMicDirection(MIC_DIRECTION_UNSPECIFIED),
+      mSelectedMicFieldDimension(MIC_FIELD_DIMENSION_NORMAL) {
 
     ALOGV("Constructor");
 
+    mMetricsItem = NULL;
     mAnalyticsDirty = false;
     reset();
 }
@@ -135,7 +153,7 @@ StagefrightRecorder::~StagefrightRecorder() {
     }
 
     // log the current record, provided it has some information worth recording
-    // NB: this also reclaims & clears mAnalyticsItem.
+    // NB: this also reclaims & clears mMetricsItem.
     flushAndResetMetrics(false);
 }
 
@@ -144,66 +162,73 @@ void StagefrightRecorder::updateMetrics() {
 
     // we run as part of the media player service; what we really want to
     // know is the app which requested the recording.
-    mAnalyticsItem->setUid(mClientUid);
+    mMetricsItem->setUid(VALUE_OR_FATAL(aidl2legacy_int32_t_uid_t(mAttributionSource.uid)));
+
+    mMetricsItem->setCString(kRecorderLogSessionId, mLogSessionId.c_str());
 
     // populate the values from the raw fields.
 
     // TBD mOutputFormat  = OUTPUT_FORMAT_THREE_GPP;
     // TBD mAudioEncoder  = AUDIO_ENCODER_AMR_NB;
     // TBD mVideoEncoder  = VIDEO_ENCODER_DEFAULT;
-    mAnalyticsItem->setInt32(kRecorderHeight, mVideoHeight);
-    mAnalyticsItem->setInt32(kRecorderWidth, mVideoWidth);
-    mAnalyticsItem->setInt32(kRecorderFrameRate, mFrameRate);
-    mAnalyticsItem->setInt32(kRecorderVideoBitrate, mVideoBitRate);
-    mAnalyticsItem->setInt32(kRecorderAudioSampleRate, mSampleRate);
-    mAnalyticsItem->setInt32(kRecorderAudioChannels, mAudioChannels);
-    mAnalyticsItem->setInt32(kRecorderAudioBitrate, mAudioBitRate);
+    mMetricsItem->setInt32(kRecorderHeight, mVideoHeight);
+    mMetricsItem->setInt32(kRecorderWidth, mVideoWidth);
+    mMetricsItem->setInt32(kRecorderFrameRate, mFrameRate);
+    mMetricsItem->setInt32(kRecorderVideoBitrate, mVideoBitRate);
+    mMetricsItem->setInt32(kRecorderAudioSampleRate, mSampleRate);
+    mMetricsItem->setInt32(kRecorderAudioChannels, mAudioChannels);
+    mMetricsItem->setInt32(kRecorderAudioBitrate, mAudioBitRate);
     // TBD mInterleaveDurationUs = 0;
-    mAnalyticsItem->setInt32(kRecorderVideoIframeInterval, mIFramesIntervalSec);
+    mMetricsItem->setInt32(kRecorderVideoIframeInterval, mIFramesIntervalSec);
     // TBD mAudioSourceNode = 0;
     // TBD mUse64BitFileOffset = false;
-    mAnalyticsItem->setInt32(kRecorderMovieTimescale, mMovieTimeScale);
-    mAnalyticsItem->setInt32(kRecorderAudioTimescale, mAudioTimeScale);
-    mAnalyticsItem->setInt32(kRecorderVideoTimescale, mVideoTimeScale);
+    if (mMovieTimeScale != -1)
+        mMetricsItem->setInt32(kRecorderMovieTimescale, mMovieTimeScale);
+    if (mAudioTimeScale != -1)
+        mMetricsItem->setInt32(kRecorderAudioTimescale, mAudioTimeScale);
+    if (mVideoTimeScale != -1)
+        mMetricsItem->setInt32(kRecorderVideoTimescale, mVideoTimeScale);
     // TBD mCameraId        = 0;
     // TBD mStartTimeOffsetMs = -1;
-    mAnalyticsItem->setInt32(kRecorderVideoProfile, mVideoEncoderProfile);
-    mAnalyticsItem->setInt32(kRecorderVideoLevel, mVideoEncoderLevel);
+    mMetricsItem->setInt32(kRecorderVideoProfile, mVideoEncoderProfile);
+    mMetricsItem->setInt32(kRecorderVideoLevel, mVideoEncoderLevel);
     // TBD mMaxFileDurationUs = 0;
     // TBD mMaxFileSizeBytes = 0;
     // TBD mTrackEveryTimeDurationUs = 0;
-    mAnalyticsItem->setInt32(kRecorderCaptureFpsEnable, mCaptureFpsEnable);
-    mAnalyticsItem->setDouble(kRecorderCaptureFps, mCaptureFps);
+    mMetricsItem->setInt32(kRecorderCaptureFpsEnable, mCaptureFpsEnable);
+    mMetricsItem->setDouble(kRecorderCaptureFps, mCaptureFps);
     // TBD mCameraSourceTimeLapse = NULL;
     // TBD mMetaDataStoredInVideoBuffers = kMetadataBufferTypeInvalid;
     // TBD mEncoderProfiles = MediaProfiles::getInstance();
-    mAnalyticsItem->setInt32(kRecorderRotation, mRotationDegrees);
+    mMetricsItem->setInt32(kRecorderRotation, mRotationDegrees);
     // PII mLatitudex10000 = -3600000;
     // PII mLongitudex10000 = -3600000;
     // TBD mTotalBitRate = 0;
 
     // duration information (recorded, paused, # of pauses)
-    mAnalyticsItem->setInt64(kRecorderDurationMs, (mDurationRecordedUs+500)/1000 );
+    mMetricsItem->setInt64(kRecorderDurationMs, (mDurationRecordedUs+500)/1000 );
     if (mNPauses != 0) {
-        mAnalyticsItem->setInt64(kRecorderPaused, (mDurationPausedUs+500)/1000 );
-        mAnalyticsItem->setInt32(kRecorderNumPauses, mNPauses);
+        mMetricsItem->setInt64(kRecorderPaused, (mDurationPausedUs+500)/1000 );
+        mMetricsItem->setInt32(kRecorderNumPauses, mNPauses);
     }
 }
 
 void StagefrightRecorder::flushAndResetMetrics(bool reinitialize) {
     ALOGV("flushAndResetMetrics");
     // flush anything we have, maybe setup a new record
-    if (mAnalyticsDirty && mAnalyticsItem != NULL) {
-        updateMetrics();
-        if (mAnalyticsItem->count() > 0) {
-            mAnalyticsItem->selfrecord();
+    if (mMetricsItem != NULL) {
+        if (mAnalyticsDirty) {
+            updateMetrics();
+            if (mMetricsItem->count() > 0) {
+                mMetricsItem->selfrecord();
+            }
         }
-        delete mAnalyticsItem;
-        mAnalyticsItem = NULL;
+        delete mMetricsItem;
+        mMetricsItem = NULL;
     }
     mAnalyticsDirty = false;
     if (reinitialize) {
-        mAnalyticsItem = MediaAnalyticsItem::create(kKeyRecorder);
+        mMetricsItem = mediametrics::Item::create(kKeyRecorder);
     }
 }
 
@@ -227,18 +252,37 @@ sp<IGraphicBufferProducer> StagefrightRecorder::querySurfaceMediaSource() const 
 
 status_t StagefrightRecorder::setAudioSource(audio_source_t as) {
     ALOGV("setAudioSource: %d", as);
-    if (as < AUDIO_SOURCE_DEFAULT ||
-        (as >= AUDIO_SOURCE_CNT && as != AUDIO_SOURCE_FM_TUNER)) {
-        ALOGE("Invalid audio source: %d", as);
-        return BAD_VALUE;
-    }
 
     if (as == AUDIO_SOURCE_DEFAULT) {
         mAudioSource = AUDIO_SOURCE_MIC;
     } else {
         mAudioSource = as;
     }
+    // Reset privacy sensitive in case this is the second time audio source is set
+    mPrivacySensitive = PRIVACY_SENSITIVE_DEFAULT;
+    return OK;
+}
 
+status_t StagefrightRecorder::setPrivacySensitive(bool privacySensitive) {
+    // privacy sensitive cannot be set before audio source is set
+    if (mAudioSource == AUDIO_SOURCE_CNT) {
+        return INVALID_OPERATION;
+    }
+    mPrivacySensitive = privacySensitive ? PRIVACY_SENSITIVE_ENABLED : PRIVACY_SENSITIVE_DISABLED;
+    return OK;
+}
+
+status_t StagefrightRecorder::isPrivacySensitive(bool *privacySensitive) const {
+    *privacySensitive = false;
+    if (mAudioSource == AUDIO_SOURCE_CNT) {
+        return INVALID_OPERATION;
+    }
+    if (mPrivacySensitive == PRIVACY_SENSITIVE_DEFAULT) {
+         *privacySensitive = mAudioSource == AUDIO_SOURCE_VOICE_COMMUNICATION
+                || mAudioSource == AUDIO_SOURCE_CAMCORDER;
+    } else {
+        *privacySensitive = mPrivacySensitive == PRIVACY_SENSITIVE_ENABLED;
+    }
     return OK;
 }
 
@@ -398,14 +442,15 @@ status_t StagefrightRecorder::setNextOutputFile(int fd) {
         return -EBADF;
     }
 
-    // start with a clean, empty file
-    ftruncate(fd, 0);
-    int nextFd = dup(fd);
-    if (mWriter == NULL) {
+    if (mWriter == nullptr) {
         ALOGE("setNextOutputFile failed. Writer has been freed");
         return INVALID_OPERATION;
     }
-    return mWriter->setNextFd(nextFd);
+
+    // start with a clean, empty file
+    ftruncate(fd, 0);
+
+    return mWriter->setNextFd(fd);
 }
 
 // Attempt to parse an float literal optionally surrounded by whitespace,
@@ -541,6 +586,32 @@ status_t StagefrightRecorder::setParamVideoEncodingBitRate(int32_t bitRate) {
     // range that a specific encoder supports. The mismatch between the
     // the target and requested bit rate will NOT be treated as an error.
     mVideoBitRate = bitRate;
+
+    // A new bitrate(TMMBR) should be applied on runtime as well if OutputFormat is RTP_AVP
+    if (mOutputFormat == OUTPUT_FORMAT_RTP_AVP) {
+        // Regular I frames may overload the network so we reduce the bitrate to allow
+        // margins for the I frame overruns.
+        // Still send requested bitrate (TMMBR) in the reply (TMMBN).
+        const float coefficient = 0.8f;
+        mVideoBitRate = (bitRate * coefficient) / 1000 * 1000;
+    }
+    if (mOutputFormat == OUTPUT_FORMAT_RTP_AVP && mStarted && mPauseStartTimeUs == 0) {
+        mVideoEncoderSource->setEncodingBitrate(mVideoBitRate);
+        ARTPWriter* rtpWriter  = static_cast<ARTPWriter*>(mWriter.get());
+        rtpWriter->setTMMBNInfo(mOpponentID, bitRate);
+    }
+
+    return OK;
+}
+
+status_t StagefrightRecorder::setParamVideoBitRateMode(int32_t bitRateMode) {
+    ALOGV("setParamVideoBitRateMode: %d", bitRateMode);
+    // TODO: clarify what bitrate mode of -1 is as these start from 0
+    if (bitRateMode < -1) {
+        ALOGE("Unsupported video bitrate mode: %d", bitRateMode);
+        return BAD_VALUE;
+    }
+    mVideoBitRateMode = bitRateMode;
     return OK;
 }
 
@@ -750,6 +821,113 @@ status_t StagefrightRecorder::setParamGeoDataLatitude(
     return OK;
 }
 
+status_t StagefrightRecorder::setParamRtpLocalIp(const String8 &localIp) {
+    ALOGV("setParamVideoLocalIp: %s", localIp.string());
+
+    mLocalIp.setTo(localIp.string());
+    return OK;
+}
+
+status_t StagefrightRecorder::setParamRtpLocalPort(int32_t localPort) {
+    ALOGV("setParamVideoLocalPort: %d", localPort);
+
+    mLocalPort = localPort;
+    return OK;
+}
+
+status_t StagefrightRecorder::setParamRtpRemoteIp(const String8 &remoteIp) {
+    ALOGV("setParamVideoRemoteIp: %s", remoteIp.string());
+
+    mRemoteIp.setTo(remoteIp.string());
+    return OK;
+}
+
+status_t StagefrightRecorder::setParamRtpRemotePort(int32_t remotePort) {
+    ALOGV("setParamVideoRemotePort: %d", remotePort);
+
+    mRemotePort = remotePort;
+    return OK;
+}
+
+status_t StagefrightRecorder::setParamSelfID(int32_t selfID) {
+    ALOGV("setParamSelfID: %x", selfID);
+
+    mSelfID = selfID;
+    return OK;
+}
+
+status_t StagefrightRecorder::setParamVideoOpponentID(int32_t opponentID) {
+    mOpponentID = opponentID;
+    return OK;
+}
+
+status_t StagefrightRecorder::setParamPayloadType(int32_t payloadType) {
+    ALOGV("setParamPayloadType: %d", payloadType);
+
+    mPayloadType = payloadType;
+
+    if (mStarted && mOutputFormat == OUTPUT_FORMAT_RTP_AVP) {
+        mWriter->updatePayloadType(mPayloadType);
+    }
+
+    return OK;
+}
+
+status_t StagefrightRecorder::setRTPCVOExtMap(int32_t extmap) {
+    ALOGV("setRtpCvoExtMap: %d", extmap);
+
+    mRTPCVOExtMap = extmap;
+    return OK;
+}
+
+status_t StagefrightRecorder::setRTPCVODegrees(int32_t cvoDegrees) {
+    Mutex::Autolock autolock(mLock);
+    ALOGV("setRtpCvoDegrees: %d", cvoDegrees);
+
+    mRTPCVODegrees = cvoDegrees;
+
+    if (mStarted && mOutputFormat == OUTPUT_FORMAT_RTP_AVP) {
+        mWriter->updateCVODegrees(mRTPCVODegrees);
+    }
+
+    return OK;
+}
+
+status_t StagefrightRecorder::setParamRtpDscp(int32_t dscp) {
+    ALOGV("setParamRtpDscp: %d", dscp);
+
+    mRTPSockDscp = dscp;
+    return OK;
+}
+
+status_t StagefrightRecorder::setSocketNetwork(int64_t networkHandle) {
+    ALOGV("setSocketNetwork: %llu", (unsigned long long) networkHandle);
+
+    mRTPSockNetwork = networkHandle;
+    if (mStarted && mOutputFormat == OUTPUT_FORMAT_RTP_AVP) {
+        mWriter->updateSocketNetwork(mRTPSockNetwork);
+    }
+    return OK;
+}
+
+status_t StagefrightRecorder::requestIDRFrame() {
+    status_t ret = BAD_VALUE;
+    if (mVideoEncoderSource != NULL) {
+        ret = mVideoEncoderSource->requestIDRFrame();
+    } else {
+        ALOGV("requestIDRFrame: Encoder not ready");
+    }
+    return ret;
+}
+
+status_t StagefrightRecorder::setLogSessionId(const String8 &log_session_id) {
+    ALOGV("setLogSessionId: %s", log_session_id.string());
+
+    // TODO: validity check that log_session_id is a 32-byte hex digit.
+    mLogSessionId.setTo(log_session_id.string());
+    return OK;
+}
+
 status_t StagefrightRecorder::setParameter(
         const String8 &key, const String8 &value) {
     ALOGV("setParameter: key (%s) => value (%s)", key.string(), value.string());
@@ -818,6 +996,11 @@ status_t StagefrightRecorder::setParameter(
         if (safe_strtoi32(value.string(), &video_bitrate)) {
             return setParamVideoEncodingBitRate(video_bitrate);
         }
+    } else if (key == "video-param-bitrate-mode") {
+        int32_t video_bitrate_mode;
+        if (safe_strtoi32(value.string(), &video_bitrate_mode)) {
+            return setParamVideoBitRateMode(video_bitrate_mode);
+        }
     } else if (key == "video-param-rotation-angle-degrees") {
         int32_t degrees;
         if (safe_strtoi32(value.string(), &degrees)) {
@@ -858,6 +1041,63 @@ status_t StagefrightRecorder::setParameter(
         if (safe_strtod(value.string(), &fps)) {
             return setParamCaptureFps(fps);
         }
+    } else if (key == "rtp-param-local-ip") {
+        return setParamRtpLocalIp(value);
+    } else if (key == "rtp-param-local-port") {
+        int32_t localPort;
+        if (safe_strtoi32(value.string(), &localPort)) {
+            return setParamRtpLocalPort(localPort);
+        }
+    } else if (key == "rtp-param-remote-ip") {
+        return setParamRtpRemoteIp(value);
+    } else if (key == "rtp-param-remote-port") {
+        int32_t remotePort;
+        if (safe_strtoi32(value.string(), &remotePort)) {
+            return setParamRtpRemotePort(remotePort);
+        }
+    } else if (key == "rtp-param-self-id") {
+        int32_t selfID;
+        int64_t temp;
+        if (safe_strtoi64(value.string(), &temp)) {
+            selfID = static_cast<int32_t>(temp);
+            return setParamSelfID(selfID);
+        }
+    } else if (key == "rtp-param-opponent-id") {
+        int32_t opnId;
+        int64_t temp;
+        if (safe_strtoi64(value.string(), &temp)) {
+            opnId = static_cast<int32_t>(temp);
+            return setParamVideoOpponentID(opnId);
+        }
+    } else if (key == "rtp-param-payload-type") {
+        int32_t payloadType;
+        if (safe_strtoi32(value.string(), &payloadType)) {
+            return setParamPayloadType(payloadType);
+        }
+    } else if (key == "rtp-param-ext-cvo-extmap") {
+        int32_t extmap;
+        if (safe_strtoi32(value.string(), &extmap)) {
+            return setRTPCVOExtMap(extmap);
+        }
+    } else if (key == "rtp-param-ext-cvo-degrees") {
+        int32_t degrees;
+        if (safe_strtoi32(value.string(), &degrees)) {
+            return setRTPCVODegrees(degrees);
+        }
+    } else if (key == "video-param-request-i-frame") {
+        return requestIDRFrame();
+    } else if (key == "rtp-param-set-socket-dscp") {
+        int32_t dscp;
+        if (safe_strtoi32(value.string(), &dscp)) {
+            return setParamRtpDscp(dscp);
+        }
+    } else if (key == "rtp-param-set-socket-network") {
+        int64_t networkHandle;
+        if (safe_strtoi64(value.string(), &networkHandle)) {
+            return setSocketNetwork(networkHandle);
+        }
+    } else if (key == "log-session-id") {
+        return setLogSessionId(value);
     } else {
         ALOGE("setParameter: failed to find key %s", key.string());
     }
@@ -906,7 +1146,9 @@ status_t StagefrightRecorder::setListener(const sp<IMediaRecorderClient> &listen
 }
 
 status_t StagefrightRecorder::setClientName(const String16& clientName) {
-    mClientName = clientName;
+
+    mAttributionSource.packageName = VALUE_OR_RETURN_STATUS(
+            legacy2aidl_String16_string(clientName));
 
     return OK;
 }
@@ -917,10 +1159,6 @@ status_t StagefrightRecorder::prepareInternal() {
         ALOGE("Output file descriptor is invalid");
         return INVALID_OPERATION;
     }
-
-    // Get UID and PID here for permission checking
-    mClientUid = IPCThreadState::self()->getCallingUid();
-    mClientPid = IPCThreadState::self()->getCallingPid();
 
     status_t status = OK;
 
@@ -1024,6 +1262,17 @@ status_t StagefrightRecorder::start() {
             sp<MetaData> meta = new MetaData;
             int64_t startTimeUs = systemTime() / 1000;
             meta->setInt64(kKeyTime, startTimeUs);
+            meta->setInt32(kKeySelfID, mSelfID);
+            meta->setInt32(kKeyPayloadType, mPayloadType);
+            meta->setInt64(kKeySocketNetwork, mRTPSockNetwork);
+            if (mRTPCVOExtMap > 0) {
+                meta->setInt32(kKeyRtpExtMap, mRTPCVOExtMap);
+                meta->setInt32(kKeyRtpCvoDegrees, mRTPCVODegrees);
+            }
+            if (mRTPSockDscp > 0) {
+                meta->setInt32(kKeyRtpDscp, mRTPSockDscp);
+            }
+
             status = mWriter->start(meta.get());
             break;
         }
@@ -1081,16 +1330,42 @@ sp<MediaCodecSource> StagefrightRecorder::createAudioSource() {
         }
     }
 
+    audio_attributes_t attr = AUDIO_ATTRIBUTES_INITIALIZER;
+    attr.source = mAudioSource;
+    // attr.flags AUDIO_FLAG_CAPTURE_PRIVATE is cleared by default
+    if (mPrivacySensitive == PRIVACY_SENSITIVE_DEFAULT) {
+        if (attr.source == AUDIO_SOURCE_VOICE_COMMUNICATION
+                || attr.source == AUDIO_SOURCE_CAMCORDER) {
+            attr.flags = static_cast<audio_flags_mask_t>(attr.flags | AUDIO_FLAG_CAPTURE_PRIVATE);
+            mPrivacySensitive = PRIVACY_SENSITIVE_ENABLED;
+        } else {
+            mPrivacySensitive = PRIVACY_SENSITIVE_DISABLED;
+        }
+    } else {
+        if (mAudioSource == AUDIO_SOURCE_REMOTE_SUBMIX
+                || mAudioSource == AUDIO_SOURCE_FM_TUNER
+                || mAudioSource == AUDIO_SOURCE_VOICE_DOWNLINK
+                || mAudioSource == AUDIO_SOURCE_VOICE_UPLINK
+                || mAudioSource == AUDIO_SOURCE_VOICE_CALL
+                || mAudioSource == AUDIO_SOURCE_ECHO_REFERENCE) {
+            ALOGE("Cannot request private capture with source: %d", mAudioSource);
+            return NULL;
+        }
+        if (mPrivacySensitive == PRIVACY_SENSITIVE_ENABLED) {
+            attr.flags = static_cast<audio_flags_mask_t>(attr.flags | AUDIO_FLAG_CAPTURE_PRIVATE);
+        }
+    }
+
     sp<AudioSource> audioSource =
         new AudioSource(
-                mAudioSource,
-                mOpPackageName,
+                &attr,
+                mAttributionSource,
                 sourceSampleRate,
                 mAudioChannels,
                 mSampleRate,
-                mClientUid,
-                mClientPid,
-                mSelectedDeviceId);
+                mSelectedDeviceId,
+                mSelectedMicDirection,
+                mSelectedMicFieldDimension);
 
     status_t err = audioSource->initCheck();
 
@@ -1130,10 +1405,10 @@ sp<MediaCodecSource> StagefrightRecorder::createAudioSource() {
     }
 
     // log audio mime type for media metrics
-    if (mAnalyticsItem != NULL) {
+    if (mMetricsItem != NULL) {
         AString audiomime;
         if (format->findString("mime", &audiomime)) {
-            mAnalyticsItem->setCString(kRecorderAudioMime, audiomime.c_str());
+            mMetricsItem->setCString(kRecorderAudioMime, audiomime.c_str());
         }
     }
 
@@ -1276,7 +1551,7 @@ status_t StagefrightRecorder::setupRTPRecording() {
         mVideoEncoderSource = source;
     }
 
-    mWriter = new ARTPWriter(mOutputFd);
+    mWriter = new ARTPWriter(mOutputFd, mLocalIp, mLocalPort, mRemoteIp, mRemotePort, mLastSeqNo);
     mWriter->addSource(source);
     mWriter->setListener(mListener);
 
@@ -1584,6 +1859,7 @@ void StagefrightRecorder::clipVideoFrameHeight() {
 // Set up the appropriate MediaSource depending on the chosen option
 status_t StagefrightRecorder::setupMediaSource(
                       sp<MediaSource> *mediaSource) {
+    ATRACE_CALL();
     if (mVideoSource == VIDEO_SOURCE_DEFAULT
             || mVideoSource == VIDEO_SOURCE_CAMERA) {
         sp<CameraSource> cameraSource;
@@ -1609,6 +1885,10 @@ status_t StagefrightRecorder::setupCameraSource(
     Size videoSize;
     videoSize.width = mVideoWidth;
     videoSize.height = mVideoHeight;
+    uid_t uid = VALUE_OR_RETURN_STATUS(aidl2legacy_int32_t_uid_t(mAttributionSource.uid));
+    pid_t pid = VALUE_OR_RETURN_STATUS(aidl2legacy_int32_t_pid_t(mAttributionSource.pid));
+    String16 clientName = VALUE_OR_RETURN_STATUS(
+        aidl2legacy_string_view_String16(mAttributionSource.packageName.value_or("")));
     if (mCaptureFpsEnable) {
         if (!(mCaptureFps > 0.)) {
             ALOGE("Invalid mCaptureFps value: %lf", mCaptureFps);
@@ -1616,13 +1896,13 @@ status_t StagefrightRecorder::setupCameraSource(
         }
 
         mCameraSourceTimeLapse = CameraSourceTimeLapse::CreateFromCamera(
-                mCamera, mCameraProxy, mCameraId, mClientName, mClientUid, mClientPid,
+                mCamera, mCameraProxy, mCameraId, clientName, uid, pid,
                 videoSize, mFrameRate, mPreviewSurface,
                 std::llround(1e6 / mCaptureFps));
         *cameraSource = mCameraSourceTimeLapse;
     } else {
         *cameraSource = CameraSource::CreateFromCamera(
-                mCamera, mCameraProxy, mCameraId, mClientName, mClientUid, mClientPid,
+                mCamera, mCameraProxy, mCameraId, clientName, uid, pid,
                 videoSize, mFrameRate,
                 mPreviewSurface);
     }
@@ -1660,6 +1940,7 @@ status_t StagefrightRecorder::setupCameraSource(
 status_t StagefrightRecorder::setupVideoEncoder(
         const sp<MediaSource> &cameraSource,
         sp<MediaCodecSource> *source) {
+    ATRACE_CALL();
     source->clear();
 
     sp<AMessage> format = new AMessage();
@@ -1685,16 +1966,20 @@ status_t StagefrightRecorder::setupVideoEncoder(
             format->setString("mime", MEDIA_MIMETYPE_VIDEO_HEVC);
             break;
 
+        case VIDEO_ENCODER_DOLBY_VISION:
+            format->setString("mime", MEDIA_MIMETYPE_VIDEO_DOLBY_VISION);
+            break;
+
         default:
             CHECK(!"Should not be here, unsupported video encoding.");
             break;
     }
 
     // log video mime type for media metrics
-    if (mAnalyticsItem != NULL) {
+    if (mMetricsItem != NULL) {
         AString videomime;
         if (format->findString("mime", &videomime)) {
-            mAnalyticsItem->setCString(kRecorderVideoMime, videomime.c_str());
+            mMetricsItem->setCString(kRecorderVideoMime, videomime.c_str());
         }
     }
 
@@ -1730,7 +2015,13 @@ status_t StagefrightRecorder::setupVideoEncoder(
         }
     }
 
+    if (mOutputFormat == OUTPUT_FORMAT_RTP_AVP) {
+        // This indicates that a raw image provided to encoder needs to be rotated.
+        format->setInt32("rotation-degrees", mRotationDegrees);
+    }
+
     format->setInt32("bitrate", mVideoBitRate);
+    format->setInt32("bitrate-mode", mVideoBitRateMode);
     format->setInt32("frame-rate", mFrameRate);
     format->setInt32("i-frame-interval", mIFramesIntervalSec);
 
@@ -1832,6 +2123,7 @@ status_t StagefrightRecorder::setupVideoEncoder(
 }
 
 status_t StagefrightRecorder::setupAudioEncoder(const sp<MediaWriter>& writer) {
+    ATRACE_CALL();
     status_t status = BAD_VALUE;
     if (OK != (status = checkAudioEncoderCapabilities())) {
         return status;
@@ -1948,13 +2240,16 @@ void StagefrightRecorder::setupMPEG4orWEBMMetaData(sp<MetaData> *meta) {
         (*meta)->setInt32(kKeyTimeScale, mMovieTimeScale);
     }
     if (mOutputFormat != OUTPUT_FORMAT_WEBM) {
-        (*meta)->setInt32(kKey64BitFileOffset, mUse64BitFileOffset);
         if (mTrackEveryTimeDurationUs > 0) {
             (*meta)->setInt64(kKeyTrackTimeStatus, mTrackEveryTimeDurationUs);
         }
         if (mRotationDegrees != 0) {
             (*meta)->setInt32(kKeyRotation, mRotationDegrees);
         }
+    }
+    if (mOutputFormat == OUTPUT_FORMAT_MPEG_4 || mOutputFormat == OUTPUT_FORMAT_THREE_GPP) {
+        (*meta)->setInt32(kKeyEmptyTrackMalFormed, true);
+        (*meta)->setInt32(kKey4BitTrackIds, true);
     }
 }
 
@@ -2073,6 +2368,7 @@ status_t StagefrightRecorder::stop() {
 
     if (mWriter != NULL) {
         err = mWriter->stop();
+        mLastSeqNo = mWriter->getSequenceNum();
         mWriter.clear();
     }
 
@@ -2149,6 +2445,8 @@ status_t StagefrightRecorder::reset() {
     mVideoHeight   = 144;
     mFrameRate     = -1;
     mVideoBitRate  = 192000;
+    // Following MediaCodec's default
+    mVideoBitRateMode = BITRATE_MODE_VBR;
     mSampleRate    = 8000;
     mAudioChannels = 1;
     mAudioBitRate  = 12200;
@@ -2205,19 +2503,19 @@ status_t StagefrightRecorder::getMaxAmplitude(int *max) {
 }
 
 status_t StagefrightRecorder::getMetrics(Parcel *reply) {
-    ALOGD("StagefrightRecorder::getMetrics");
+    ALOGV("StagefrightRecorder::getMetrics");
 
     if (reply == NULL) {
         ALOGE("Null pointer argument");
         return BAD_VALUE;
     }
 
-    if (mAnalyticsItem == NULL) {
+    if (mMetricsItem == NULL) {
         return UNKNOWN_ERROR;
     }
 
     updateMetrics();
-    mAnalyticsItem->writeToParcel(reply);
+    mMetricsItem->writeToParcel(reply);
     return OK;
 }
 
@@ -2269,9 +2567,35 @@ status_t StagefrightRecorder::getActiveMicrophones(
     return NO_INIT;
 }
 
+status_t StagefrightRecorder::setPreferredMicrophoneDirection(audio_microphone_direction_t direction) {
+    ALOGV("setPreferredMicrophoneDirection(%d)", direction);
+    mSelectedMicDirection = direction;
+    if (mAudioSourceNode != 0) {
+        return mAudioSourceNode->setPreferredMicrophoneDirection(direction);
+    }
+    return NO_INIT;
+}
+
+status_t StagefrightRecorder::setPreferredMicrophoneFieldDimension(float zoom) {
+    ALOGV("setPreferredMicrophoneFieldDimension(%f)", zoom);
+    mSelectedMicFieldDimension = zoom;
+    if (mAudioSourceNode != 0) {
+        return mAudioSourceNode->setPreferredMicrophoneFieldDimension(zoom);
+    }
+    return NO_INIT;
+}
+
 status_t StagefrightRecorder::getPortId(audio_port_handle_t *portId) const {
     if (mAudioSourceNode != 0) {
         return mAudioSourceNode->getPortId(portId);
+    }
+    return NO_INIT;
+}
+
+status_t StagefrightRecorder::getRtpDataUsage(uint64_t *bytes) {
+    if (mWriter != 0) {
+        *bytes = mWriter->getAccumulativeBytes();
+        return OK;
     }
     return NO_INIT;
 }

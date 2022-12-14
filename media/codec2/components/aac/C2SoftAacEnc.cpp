@@ -29,33 +29,32 @@
 
 namespace android {
 
-class C2SoftAacEnc::IntfImpl : public C2InterfaceHelper {
+namespace {
+
+constexpr char COMPONENT_NAME[] = "c2.android.aac.encoder";
+
+}  // namespace
+
+class C2SoftAacEnc::IntfImpl : public SimpleInterface<void>::BaseParams {
 public:
     explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
-        : C2InterfaceHelper(helper) {
-
+        : SimpleInterface<void>::BaseParams(
+                helper,
+                COMPONENT_NAME,
+                C2Component::KIND_ENCODER,
+                C2Component::DOMAIN_AUDIO,
+                MEDIA_MIMETYPE_AUDIO_AAC) {
+        noPrivateBuffers();
+        noInputReferences();
+        noOutputReferences();
+        noInputLatency();
+        noTimeStretch();
         setDerivedInstance(this);
 
         addParameter(
-                DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::input(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mInputMediaType, C2_PARAMKEY_INPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::input>(
-                        MEDIA_MIMETYPE_AUDIO_RAW))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputMediaType, C2_PARAMKEY_OUTPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::output>(
-                        MEDIA_MIMETYPE_AUDIO_AAC))
+                DefineParam(mAttrib, C2_PARAMKEY_COMPONENT_ATTRIBUTES)
+                .withConstValue(new C2ComponentAttributesSetting(
+                    C2Component::ATTRIB_IS_TEMPORAL))
                 .build());
 
         addParameter(
@@ -104,11 +103,24 @@ public:
                 })
                 .withSetter(ProfileLevelSetter)
                 .build());
+
+       addParameter(
+                DefineParam(mSBRMode, C2_PARAMKEY_AAC_SBR_MODE)
+                .withDefault(new C2StreamAacSbrModeTuning::input(0u, AAC_SBR_AUTO))
+                .withFields({C2F(mSBRMode, value).oneOf({
+                            C2Config::AAC_SBR_OFF,
+                            C2Config::AAC_SBR_SINGLE_RATE,
+                            C2Config::AAC_SBR_DUAL_RATE,
+                            C2Config::AAC_SBR_AUTO })})
+                .withSetter(Setter<decltype(*mSBRMode)>::NonStrictValueWithNoDeps)
+                .build());
     }
 
     uint32_t getSampleRate() const { return mSampleRate->value; }
     uint32_t getChannelCount() const { return mChannelCount->value; }
     uint32_t getBitrate() const { return mBitrate->value; }
+    uint32_t getSBRMode() const { return mSBRMode->value; }
+    uint32_t getProfile() const { return mProfileLevel->profile; }
     static C2R ProfileLevelSetter(bool mayBlock, C2P<C2StreamProfileLevelInfo::output> &me) {
         (void)mayBlock;
         (void)me;  // TODO: validate
@@ -125,18 +137,13 @@ public:
     }
 
 private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
     std::shared_ptr<C2StreamSampleRateInfo::input> mSampleRate;
     std::shared_ptr<C2StreamChannelCountInfo::input> mChannelCount;
     std::shared_ptr<C2StreamBitrateInfo::output> mBitrate;
     std::shared_ptr<C2StreamMaxBufferSizeInfo::input> mInputMaxBufSize;
     std::shared_ptr<C2StreamProfileLevelInfo::output> mProfileLevel;
+    std::shared_ptr<C2StreamAacSbrModeTuning::input> mSBRMode;
 };
-
-constexpr char COMPONENT_NAME[] = "c2.android.aac.encoder";
 
 C2SoftAacEnc::C2SoftAacEnc(
         const char *name,
@@ -145,17 +152,13 @@ C2SoftAacEnc::C2SoftAacEnc(
     : SimpleC2Component(std::make_shared<SimpleInterface<IntfImpl>>(name, id, intfImpl)),
       mIntf(intfImpl),
       mAACEncoder(nullptr),
-      mSBRMode(-1),
-      mSBRRatio(0),
-      mAACProfile(AOT_AAC_LC),
       mNumBytesPerInputFrame(0u),
       mOutBufferSize(0u),
       mSentCodecSpecificData(false),
-      mInputTimeSet(false),
       mInputSize(0),
-      mInputTimeUs(-1ll),
       mSignalledError(false),
-      mOutIndex(0u) {
+      mOutIndex(0u),
+      mRemainderLen(0u) {
 }
 
 C2SoftAacEnc::~C2SoftAacEnc() {
@@ -177,10 +180,11 @@ status_t C2SoftAacEnc::initEncoder() {
 
 c2_status_t C2SoftAacEnc::onStop() {
     mSentCodecSpecificData = false;
-    mInputTimeSet = false;
     mInputSize = 0u;
-    mInputTimeUs = -1ll;
+    mNextFrameTimestampUs.reset();
+    mLastFrameEndTimestampUs.reset();
     mSignalledError = false;
+    mRemainderLen = 0;
     return C2_OK;
 }
 
@@ -195,8 +199,9 @@ void C2SoftAacEnc::onRelease() {
 
 c2_status_t C2SoftAacEnc::onFlush_sm() {
     mSentCodecSpecificData = false;
-    mInputTimeSet = false;
     mInputSize = 0u;
+    mNextFrameTimestampUs.reset();
+    mLastFrameEndTimestampUs.reset();
     return C2_OK;
 }
 
@@ -214,31 +219,37 @@ static CHANNEL_MODE getChannelMode(uint32_t nChannels) {
     return chMode;
 }
 
-//static AUDIO_OBJECT_TYPE getAOTFromProfile(OMX_U32 profile) {
-//    if (profile == OMX_AUDIO_AACObjectLC) {
-//        return AOT_AAC_LC;
-//    } else if (profile == OMX_AUDIO_AACObjectHE) {
-//        return AOT_SBR;
-//    } else if (profile == OMX_AUDIO_AACObjectHE_PS) {
-//        return AOT_PS;
-//    } else if (profile == OMX_AUDIO_AACObjectLD) {
-//        return AOT_ER_AAC_LD;
-//    } else if (profile == OMX_AUDIO_AACObjectELD) {
-//        return AOT_ER_AAC_ELD;
-//    } else {
-//        ALOGW("Unsupported AAC profile - defaulting to AAC-LC");
-//        return AOT_AAC_LC;
-//    }
-//}
+static AUDIO_OBJECT_TYPE getAOTFromProfile(uint32_t profile) {
+   if (profile == C2Config::PROFILE_AAC_LC) {
+       return AOT_AAC_LC;
+   } else if (profile == C2Config::PROFILE_AAC_HE) {
+       return AOT_SBR;
+   } else if (profile == C2Config::PROFILE_AAC_HE_PS) {
+       return AOT_PS;
+   } else if (profile == C2Config::PROFILE_AAC_LD) {
+       return AOT_ER_AAC_LD;
+   } else if (profile == C2Config::PROFILE_AAC_ELD) {
+       return AOT_ER_AAC_ELD;
+   } else {
+       ALOGW("Unsupported AAC profile - defaulting to AAC-LC");
+       return AOT_AAC_LC;
+   }
+}
 
 status_t C2SoftAacEnc::setAudioParams() {
     // We call this whenever sample rate, number of channels, bitrate or SBR mode change
     // in reponse to setParameter calls.
+    int32_t sbrRatio = 0;
+    uint32_t sbrMode = mIntf->getSBRMode();
+    if (sbrMode == AAC_SBR_SINGLE_RATE) sbrRatio = 1;
+    else if (sbrMode == AAC_SBR_DUAL_RATE) sbrRatio = 2;
 
     ALOGV("setAudioParams: %u Hz, %u channels, %u bps, %i sbr mode, %i sbr ratio",
-         mIntf->getSampleRate(), mIntf->getChannelCount(), mIntf->getBitrate(), mSBRMode, mSBRRatio);
+         mIntf->getSampleRate(), mIntf->getChannelCount(), mIntf->getBitrate(),
+         sbrMode, sbrRatio);
 
-    if (AACENC_OK != aacEncoder_SetParam(mAACEncoder, AACENC_AOT, mAACProfile)) {
+    uint32_t aacProfile = mIntf->getProfile();
+    if (AACENC_OK != aacEncoder_SetParam(mAACEncoder, AACENC_AOT, getAOTFromProfile(aacProfile))) {
         ALOGE("Failed to set AAC encoder parameters");
         return UNKNOWN_ERROR;
     }
@@ -261,8 +272,9 @@ status_t C2SoftAacEnc::setAudioParams() {
         return UNKNOWN_ERROR;
     }
 
-    if (mSBRMode != -1 && mAACProfile == AOT_ER_AAC_ELD) {
-        if (AACENC_OK != aacEncoder_SetParam(mAACEncoder, AACENC_SBR_MODE, mSBRMode)) {
+    if (sbrMode != C2Config::AAC_SBR_AUTO && aacProfile == C2Config::PROFILE_AAC_ELD) {
+        int aacSbrMode = sbrMode != C2Config::AAC_SBR_OFF;
+        if (AACENC_OK != aacEncoder_SetParam(mAACEncoder, AACENC_SBR_MODE, aacSbrMode)) {
             ALOGE("Failed to set AAC encoder parameters");
             return UNKNOWN_ERROR;
         }
@@ -274,12 +286,36 @@ status_t C2SoftAacEnc::setAudioParams() {
        1: Downsampled SBR (default for ELD)
        2: Dualrate SBR (default for HE-AAC)
      */
-    if (AACENC_OK != aacEncoder_SetParam(mAACEncoder, AACENC_SBR_RATIO, mSBRRatio)) {
+    if (AACENC_OK != aacEncoder_SetParam(mAACEncoder, AACENC_SBR_RATIO, sbrRatio)) {
         ALOGE("Failed to set AAC encoder parameters");
         return UNKNOWN_ERROR;
     }
 
     return OK;
+}
+
+static void MaybeLogTimestampWarning(
+        long long lastFrameEndTimestampUs, long long inputTimestampUs) {
+    using Clock = std::chrono::steady_clock;
+    thread_local Clock::time_point sLastLogTimestamp{};
+    thread_local int32_t sOverlapCount = -1;
+    if (Clock::now() - sLastLogTimestamp > std::chrono::minutes(1) || sOverlapCount < 0) {
+        AString countMessage = "";
+        if (sOverlapCount > 0) {
+            countMessage = AStringPrintf(
+                    "(%d overlapping timestamp detected since last log)", sOverlapCount);
+        }
+        ALOGI("Correcting overlapping timestamp: last frame ended at %lldus but "
+                "current frame is starting at %lldus. Using the last frame's end timestamp %s",
+                lastFrameEndTimestampUs, inputTimestampUs, countMessage.c_str());
+        sLastLogTimestamp = Clock::now();
+        sOverlapCount = 0;
+    } else {
+        ALOGV("Correcting overlapping timestamp: last frame ended at %lldus but "
+                "current frame is starting at %lldus. Using the last frame's end timestamp",
+                lastFrameEndTimestampUs, inputTimestampUs);
+        ++sOverlapCount;
+    }
 }
 
 void C2SoftAacEnc::process(
@@ -353,22 +389,33 @@ void C2SoftAacEnc::process(
         data = view.data();
         capacity = view.capacity();
     }
-    if (!mInputTimeSet && capacity > 0) {
-        mInputTimeUs = work->input.ordinal.timestamp;
-        mInputTimeSet = true;
+    c2_cntr64_t inputTimestampUs = work->input.ordinal.timestamp;
+    if (inputTimestampUs < mLastFrameEndTimestampUs.value_or(inputTimestampUs)) {
+        MaybeLogTimestampWarning(mLastFrameEndTimestampUs->peekll(), inputTimestampUs.peekll());
+        inputTimestampUs = *mLastFrameEndTimestampUs;
+    }
+    if (capacity > 0) {
+        if (!mNextFrameTimestampUs) {
+            mNextFrameTimestampUs = work->input.ordinal.timestamp;
+        }
+        mLastFrameEndTimestampUs = inputTimestampUs
+                + (capacity / sizeof(int16_t) * 1000000ll / channelCount / sampleRate);
     }
 
-    size_t numFrames = (capacity + mInputSize + (eos ? mNumBytesPerInputFrame - 1 : 0))
-            / mNumBytesPerInputFrame;
-    ALOGV("capacity = %zu; mInputSize = %zu; numFrames = %zu mNumBytesPerInputFrame = %u",
-          capacity, mInputSize, numFrames, mNumBytesPerInputFrame);
+    size_t numFrames =
+        (mRemainderLen + capacity + mInputSize + (eos ? mNumBytesPerInputFrame - 1 : 0))
+        / mNumBytesPerInputFrame;
+    ALOGV("capacity = %zu; mInputSize = %zu; numFrames = %zu "
+          "mNumBytesPerInputFrame = %u inputTS = %lld remaining = %zu",
+          capacity, mInputSize, numFrames, mNumBytesPerInputFrame, inputTimestampUs.peekll(),
+          mRemainderLen);
 
     std::shared_ptr<C2LinearBlock> block;
-    std::shared_ptr<C2Buffer> buffer;
     std::unique_ptr<C2WriteView> wView;
     uint8_t *outPtr = temp;
     size_t outAvailable = 0u;
     uint64_t inputIndex = work->input.ordinal.frameIndex.peeku();
+    size_t bytesPerSample = channelCount * sizeof(int16_t);
 
     AACENC_InArgs inargs;
     AACENC_OutArgs outargs;
@@ -431,9 +478,31 @@ void C2SoftAacEnc::process(
         const std::shared_ptr<C2Buffer> mBuffer;
     };
 
-    C2WorkOrdinalStruct outOrdinal = work->input.ordinal;
+    struct OutputBuffer {
+        std::shared_ptr<C2Buffer> buffer;
+        c2_cntr64_t timestampUs;
+    };
+    std::list<OutputBuffer> outputBuffers;
 
-    while (encoderErr == AACENC_OK && inargs.numInSamples > 0) {
+    if (mRemainderLen > 0) {
+        size_t offset = 0;
+        for (; mRemainderLen < bytesPerSample && offset < capacity; ++offset) {
+            mRemainder[mRemainderLen++] = data[offset];
+        }
+        data += offset;
+        capacity -= offset;
+        if (mRemainderLen == bytesPerSample) {
+            inBuffer[0] = mRemainder;
+            inBufferSize[0] = bytesPerSample;
+            inargs.numInSamples = channelCount;
+            mRemainderLen = 0;
+            ALOGV("Processing remainder");
+        } else {
+            // We have exhausted the input already
+            inargs.numInSamples = 0;
+        }
+    }
+    while (encoderErr == AACENC_OK && inargs.numInSamples >= channelCount) {
         if (numFrames && !block) {
             C2MemoryUsage usage = { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE };
             // TODO: error handling, proper usage, etc.
@@ -462,43 +531,42 @@ void C2SoftAacEnc::process(
                                   &outargs);
 
         if (encoderErr == AACENC_OK) {
-            if (buffer) {
-                outOrdinal.frameIndex = mOutIndex++;
-                outOrdinal.timestamp = mInputTimeUs;
-                cloneAndSend(
-                        inputIndex,
-                        work,
-                        FillWork(C2FrameData::FLAG_INCOMPLETE, outOrdinal, buffer));
-                buffer.reset();
-            }
-
             if (outargs.numOutBytes > 0) {
                 mInputSize = 0;
                 int consumed = (capacity / sizeof(int16_t)) - inargs.numInSamples
                         + outargs.numInSamples;
-                mInputTimeUs = work->input.ordinal.timestamp
+                ALOGV("consumed = %d, capacity = %zu, inSamples = %d, outSamples = %d",
+                      consumed, capacity, inargs.numInSamples, outargs.numInSamples);
+                c2_cntr64_t currentFrameTimestampUs = *mNextFrameTimestampUs;
+                mNextFrameTimestampUs = inputTimestampUs
                         + (consumed * 1000000ll / channelCount / sampleRate);
-                buffer = createLinearBuffer(block, 0, outargs.numOutBytes);
-#if defined(LOG_NDEBUG) && !LOG_NDEBUG
+                std::shared_ptr<C2Buffer> buffer = createLinearBuffer(block, 0, outargs.numOutBytes);
+#if 0
                 hexdump(outPtr, std::min(outargs.numOutBytes, 256));
 #endif
                 outPtr = temp;
                 outAvailable = 0;
                 block.reset();
+
+                outputBuffers.push_back({buffer, currentFrameTimestampUs});
             } else {
                 mInputSize += outargs.numInSamples * sizeof(int16_t);
             }
 
-            if (outargs.numInSamples > 0) {
+            if (inBuffer[0] == mRemainder) {
+                inBuffer[0] = const_cast<uint8_t *>(data);
+                inBufferSize[0] = capacity;
+                inargs.numInSamples = capacity / sizeof(int16_t);
+            } else if (outargs.numInSamples > 0) {
                 inBuffer[0] = (int16_t *)inBuffer[0] + outargs.numInSamples;
                 inBufferSize[0] -= outargs.numInSamples * sizeof(int16_t);
                 inargs.numInSamples -= outargs.numInSamples;
             }
         }
-        ALOGV("encoderErr = %d mInputSize = %zu inargs.numInSamples = %d, mInputTimeUs = %lld",
-              encoderErr, mInputSize, inargs.numInSamples, mInputTimeUs.peekll());
+        ALOGV("encoderErr = %d mInputSize = %zu "
+              "inargs.numInSamples = %d, mNextFrameTimestampUs = %lld",
+              encoderErr, mInputSize, inargs.numInSamples, mNextFrameTimestampUs->peekll());
     }
-
     if (eos && inBufferSize[0] > 0) {
         if (numFrames && !block) {
             C2MemoryUsage usage = { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE };
@@ -529,12 +597,37 @@ void C2SoftAacEnc::process(
                            &outBufDesc,
                            &inargs,
                            &outargs);
+        inBufferSize[0] = 0;
     }
 
-    outOrdinal.frameIndex = mOutIndex++;
-    outOrdinal.timestamp = mInputTimeUs;
+    if (inBufferSize[0] > 0) {
+        for (size_t i = 0; i < inBufferSize[0]; ++i) {
+            mRemainder[i] = static_cast<uint8_t *>(inBuffer[0])[i];
+        }
+        mRemainderLen = inBufferSize[0];
+    }
+
+    while (outputBuffers.size() > 1) {
+        const OutputBuffer& front = outputBuffers.front();
+        C2WorkOrdinalStruct ordinal = work->input.ordinal;
+        ordinal.frameIndex = mOutIndex++;
+        ordinal.timestamp = front.timestampUs;
+        cloneAndSend(
+                inputIndex,
+                work,
+                FillWork(C2FrameData::FLAG_INCOMPLETE, ordinal, front.buffer));
+        outputBuffers.pop_front();
+    }
+    std::shared_ptr<C2Buffer> buffer;
+    C2WorkOrdinalStruct ordinal = work->input.ordinal;
+    ordinal.frameIndex = mOutIndex++;
+    if (!outputBuffers.empty()) {
+        ordinal.timestamp = outputBuffers.front().timestampUs;
+        buffer = outputBuffers.front().buffer;
+    }
+    // Mark the end of frame
     FillWork((C2FrameData::flags_t)(eos ? C2FrameData::FLAG_END_OF_STREAM : 0),
-             outOrdinal, buffer)(work);
+             ordinal, buffer)(work);
 }
 
 c2_status_t C2SoftAacEnc::drain(
@@ -556,8 +649,9 @@ c2_status_t C2SoftAacEnc::drain(
 
     (void)pool;
     mSentCodecSpecificData = false;
-    mInputTimeSet = false;
     mInputSize = 0u;
+    mNextFrameTimestampUs.reset();
+    mLastFrameEndTimestampUs.reset();
 
     // TODO: we don't have any pending work at this time to drain.
     return C2_OK;
@@ -599,11 +693,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftAacEncFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

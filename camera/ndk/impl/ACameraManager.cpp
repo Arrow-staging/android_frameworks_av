@@ -24,6 +24,7 @@
 #include <utils/Vector.h>
 #include <cutils/properties.h>
 #include <stdlib.h>
+#include <camera/CameraUtils.h>
 #include <camera/VendorTagDescriptor.h>
 
 using namespace android::acam;
@@ -32,8 +33,10 @@ namespace android {
 namespace acam {
 // Static member definitions
 const char* CameraManagerGlobal::kCameraIdKey   = "CameraId";
+const char* CameraManagerGlobal::kPhysicalCameraIdKey   = "PhysicalCameraId";
 const char* CameraManagerGlobal::kCallbackFpKey = "CallbackFp";
 const char* CameraManagerGlobal::kContextKey    = "CallbackContext";
+const nsecs_t CameraManagerGlobal::kCallbackDrainTimeout = 5000000; // 5 ms
 Mutex                CameraManagerGlobal::sLock;
 CameraManagerGlobal* CameraManagerGlobal::sInstance = nullptr;
 
@@ -68,16 +71,14 @@ CameraManagerGlobal::~CameraManagerGlobal() {
     mCameraService.clear();
 }
 
-static bool isCameraServiceDisabled() {
-    char value[PROPERTY_VALUE_MAX];
-    property_get("config.disable_cameraservice", value, "0");
-    return (strncmp(value, "0", 2) != 0 && strncasecmp(value, "false", 6) != 0);
-}
-
 sp<hardware::ICameraService> CameraManagerGlobal::getCameraService() {
     Mutex::Autolock _l(mLock);
+    return getCameraServiceLocked();
+}
+
+sp<hardware::ICameraService> CameraManagerGlobal::getCameraServiceLocked() {
     if (mCameraService.get() == nullptr) {
-        if (isCameraServiceDisabled()) {
+        if (CameraUtils::isCameraServiceDisabled()) {
             return mCameraService;
         }
 
@@ -112,7 +113,7 @@ sp<hardware::ICameraService> CameraManagerGlobal::getCameraService() {
                 return nullptr;
             }
             if (mHandler == nullptr) {
-                mHandler = new CallbackHandler();
+                mHandler = new CallbackHandler(this);
             }
             mCbLooper->registerHandler(mHandler);
         }
@@ -125,6 +126,11 @@ sp<hardware::ICameraService> CameraManagerGlobal::getCameraService() {
         mCameraService->addListener(mCameraServiceListener, &cameraStatuses);
         for (auto& c : cameraStatuses) {
             onStatusChangedLocked(c.status, c.cameraId);
+
+            for (auto& unavailablePhysicalId : c.unavailablePhysicalIds) {
+                onStatusChangedLocked(hardware::ICameraServiceListener::STATUS_NOT_PRESENT,
+                        c.cameraId, unavailablePhysicalId);
+            }
         }
 
         // setup vendor tags
@@ -183,8 +189,12 @@ void CameraManagerGlobal::DeathNotifier::binderDied(const wp<IBinder>&)
     sp<CameraManagerGlobal> cm = mCameraManager.promote();
     if (cm != nullptr) {
         AutoMutex lock(cm->mLock);
+        std::vector<String8> cameraIdList;
         for (auto& pair : cm->mDeviceStatusMap) {
-            const String8 &cameraId = pair.first;
+            cameraIdList.push_back(pair.first);
+        }
+
+        for (String8 cameraId : cameraIdList) {
             cm->onStatusChangedLocked(
                     CameraServiceListener::STATUS_NOT_PRESENT, cameraId);
         }
@@ -193,8 +203,57 @@ void CameraManagerGlobal::DeathNotifier::binderDied(const wp<IBinder>&)
     }
 }
 
+void CameraManagerGlobal::registerExtendedAvailabilityCallback(
+        const ACameraManager_ExtendedAvailabilityCallbacks *callback) {
+    return registerAvailCallback<ACameraManager_ExtendedAvailabilityCallbacks>(callback);
+}
+
+void CameraManagerGlobal::unregisterExtendedAvailabilityCallback(
+        const ACameraManager_ExtendedAvailabilityCallbacks *callback) {
+    Mutex::Autolock _l(mLock);
+
+    drainPendingCallbacksLocked();
+
+    Callback cb(callback);
+    mCallbacks.erase(cb);
+}
+
 void CameraManagerGlobal::registerAvailabilityCallback(
         const ACameraManager_AvailabilityCallbacks *callback) {
+    return registerAvailCallback<ACameraManager_AvailabilityCallbacks>(callback);
+}
+
+void CameraManagerGlobal::unregisterAvailabilityCallback(
+        const ACameraManager_AvailabilityCallbacks *callback) {
+    Mutex::Autolock _l(mLock);
+
+    drainPendingCallbacksLocked();
+
+    Callback cb(callback);
+    mCallbacks.erase(cb);
+}
+
+void CameraManagerGlobal::onCallbackCalled() {
+    Mutex::Autolock _l(mLock);
+    if (mPendingCallbackCnt > 0) {
+        mPendingCallbackCnt--;
+    }
+    mCallbacksCond.signal();
+}
+
+void CameraManagerGlobal::drainPendingCallbacksLocked() {
+    while (mPendingCallbackCnt > 0) {
+        auto res = mCallbacksCond.waitRelative(mLock, kCallbackDrainTimeout);
+        if (res != NO_ERROR) {
+            ALOGE("%s: Error waiting to drain callbacks: %s(%d)",
+                    __FUNCTION__, strerror(-res), res);
+            break;
+        }
+    }
+}
+
+template<class T>
+void CameraManagerGlobal::registerAvailCallback(const T *callback) {
     Mutex::Autolock _l(mLock);
     Callback cb(callback);
     auto pair = mCallbacks.insert(cb);
@@ -202,40 +261,67 @@ void CameraManagerGlobal::registerAvailabilityCallback(
     if (pair.second) {
         for (auto& pair : mDeviceStatusMap) {
             const String8& cameraId = pair.first;
-            int32_t status = pair.second;
+            int32_t status = pair.second.getStatus();
+            // Don't send initial callbacks for camera ids which don't support
+            // camera2
+            if (!pair.second.supportsHAL3) {
+                continue;
+            }
 
+            // Camera available/unavailable callback
             sp<AMessage> msg = new AMessage(kWhatSendSingleCallback, mHandler);
-            ACameraManager_AvailabilityCallback cb = isStatusAvailable(status) ?
-                    callback->onCameraAvailable : callback->onCameraUnavailable;
-            msg->setPointer(kCallbackFpKey, (void *) cb);
-            msg->setPointer(kContextKey, callback->context);
+            ACameraManager_AvailabilityCallback cbFunc = isStatusAvailable(status) ?
+                    cb.mAvailable : cb.mUnavailable;
+            msg->setPointer(kCallbackFpKey, (void *) cbFunc);
+            msg->setPointer(kContextKey, cb.mContext);
             msg->setString(kCameraIdKey, AString(cameraId));
+            mPendingCallbackCnt++;
             msg->post();
+
+            // Physical camera unavailable callback
+            std::set<String8> unavailablePhysicalCameras =
+                    pair.second.getUnavailablePhysicalIds();
+            for (const auto& physicalCameraId : unavailablePhysicalCameras) {
+                sp<AMessage> msg = new AMessage(kWhatSendSinglePhysicalCameraCallback, mHandler);
+                ACameraManager_PhysicalCameraAvailabilityCallback cbFunc =
+                        cb.mPhysicalCamUnavailable;
+                msg->setPointer(kCallbackFpKey, (void *) cbFunc);
+                msg->setPointer(kContextKey, cb.mContext);
+                msg->setString(kCameraIdKey, AString(cameraId));
+                msg->setString(kPhysicalCameraIdKey, AString(physicalCameraId));
+                mPendingCallbackCnt++;
+                msg->post();
+            }
         }
     }
 }
 
-void CameraManagerGlobal::unregisterAvailabilityCallback(
-        const ACameraManager_AvailabilityCallbacks *callback) {
-    Mutex::Autolock _l(mLock);
-    Callback cb(callback);
-    mCallbacks.erase(cb);
+bool CameraManagerGlobal::supportsCamera2ApiLocked(const String8 &cameraId) {
+    bool camera2Support = false;
+    auto cs = getCameraServiceLocked();
+    binder::Status serviceRet =
+        cs->supportsCameraApi(String16(cameraId),
+                hardware::ICameraService::API_VERSION_2, &camera2Support);
+    if (!serviceRet.isOk()) {
+        ALOGE("%s: supportsCameraApi2Locked() call failed for cameraId  %s",
+                __FUNCTION__, cameraId.c_str());
+        return false;
+    }
+    return camera2Support;
 }
 
 void CameraManagerGlobal::getCameraIdList(std::vector<String8>* cameraIds) {
     // Ensure that we have initialized/refreshed the list of available devices
-    auto cs = getCameraService();
     Mutex::Autolock _l(mLock);
-
+    // Needed to make sure we're connected to cameraservice
+    getCameraServiceLocked();
     for(auto& deviceStatus : mDeviceStatusMap) {
-        if (deviceStatus.second == hardware::ICameraServiceListener::STATUS_NOT_PRESENT ||
-                deviceStatus.second == hardware::ICameraServiceListener::STATUS_ENUMERATING) {
+        int32_t status = deviceStatus.second.getStatus();
+        if (status == hardware::ICameraServiceListener::STATUS_NOT_PRESENT ||
+                status == hardware::ICameraServiceListener::STATUS_ENUMERATING) {
             continue;
         }
-        bool camera2Support = false;
-        binder::Status serviceRet = cs->supportsCameraApi(String16(deviceStatus.first),
-                hardware::ICameraService::API_VERSION_2, &camera2Support);
-        if (!serviceRet.isOk() || !camera2Support) {
+        if (!deviceStatus.second.supportsHAL3) {
             continue;
         }
         cameraIds->push_back(deviceStatus.first);
@@ -264,6 +350,16 @@ bool CameraManagerGlobal::isStatusAvailable(int32_t status) {
 }
 
 void CameraManagerGlobal::CallbackHandler::onMessageReceived(
+      const sp<AMessage> &msg) {
+    onMessageReceivedInternal(msg);
+    if (msg->what() == kWhatSendSingleCallback ||
+            msg->what() == kWhatSendSingleAccessCallback ||
+            msg->what() == kWhatSendSinglePhysicalCameraCallback) {
+        notifyParent();
+    }
+}
+
+void CameraManagerGlobal::CallbackHandler::onMessageReceivedInternal(
         const sp<AMessage> &msg) {
     switch (msg->what()) {
         case kWhatSendSingleCallback:
@@ -289,10 +385,78 @@ void CameraManagerGlobal::CallbackHandler::onMessageReceived(
             (*cb)(context, cameraId.c_str());
             break;
         }
+        case kWhatSendSingleAccessCallback:
+        {
+            ACameraManager_AccessPrioritiesChangedCallback cb;
+            void* context;
+            AString cameraId;
+            bool found = msg->findPointer(kCallbackFpKey, (void**) &cb);
+            if (!found) {
+                ALOGE("%s: Cannot find camera callback fp!", __FUNCTION__);
+                return;
+            }
+            found = msg->findPointer(kContextKey, &context);
+            if (!found) {
+                ALOGE("%s: Cannot find callback context!", __FUNCTION__);
+                return;
+            }
+            (*cb)(context);
+            break;
+        }
+        case kWhatSendSinglePhysicalCameraCallback:
+        {
+            ACameraManager_PhysicalCameraAvailabilityCallback cb;
+            void* context;
+            AString cameraId;
+            AString physicalCameraId;
+            bool found = msg->findPointer(kCallbackFpKey, (void**) &cb);
+            if (!found) {
+                ALOGE("%s: Cannot find camera callback fp!", __FUNCTION__);
+                return;
+            }
+            if (cb == nullptr) {
+                // Physical camera callback is null
+                return;
+            }
+            found = msg->findPointer(kContextKey, &context);
+            if (!found) {
+                ALOGE("%s: Cannot find callback context!", __FUNCTION__);
+                return;
+            }
+            found = msg->findString(kCameraIdKey, &cameraId);
+            if (!found) {
+                ALOGE("%s: Cannot find camera ID!", __FUNCTION__);
+                return;
+            }
+            found = msg->findString(kPhysicalCameraIdKey, &physicalCameraId);
+            if (!found) {
+                ALOGE("%s: Cannot find physical camera ID!", __FUNCTION__);
+                return;
+            }
+            (*cb)(context, cameraId.c_str(), physicalCameraId.c_str());
+            break;
+        }
         default:
             ALOGE("%s: unknown message type %d", __FUNCTION__, msg->what());
             break;
     }
+}
+
+void CameraManagerGlobal::CallbackHandler::notifyParent() {
+    sp<CameraManagerGlobal> parent = mParent.promote();
+    if (parent != nullptr) {
+        parent->onCallbackCalled();
+    }
+}
+
+binder::Status CameraManagerGlobal::CameraServiceListener::onCameraAccessPrioritiesChanged() {
+    sp<CameraManagerGlobal> cm = mCameraManager.promote();
+    if (cm != nullptr) {
+        cm->onCameraAccessPrioritiesChanged();
+    } else {
+        ALOGE("Cannot deliver camera access priority callback. Global camera manager died");
+    }
+    return binder::Status::ok();
 }
 
 binder::Status CameraManagerGlobal::CameraServiceListener::onStatusChanged(
@@ -304,6 +468,31 @@ binder::Status CameraManagerGlobal::CameraServiceListener::onStatusChanged(
         ALOGE("Cannot deliver status change. Global camera manager died");
     }
     return binder::Status::ok();
+}
+
+binder::Status CameraManagerGlobal::CameraServiceListener::onPhysicalCameraStatusChanged(
+        int32_t status, const String16& cameraId, const String16& physicalCameraId) {
+    sp<CameraManagerGlobal> cm = mCameraManager.promote();
+    if (cm != nullptr) {
+        cm->onStatusChanged(status, String8(cameraId), String8(physicalCameraId));
+    } else {
+        ALOGE("Cannot deliver physical camera status change. Global camera manager died");
+    }
+    return binder::Status::ok();
+}
+
+void CameraManagerGlobal::onCameraAccessPrioritiesChanged() {
+    Mutex::Autolock _l(mLock);
+    for (auto cb : mCallbacks) {
+        sp<AMessage> msg = new AMessage(kWhatSendSingleAccessCallback, mHandler);
+        ACameraManager_AccessPrioritiesChangedCallback cbFp = cb.mAccessPriorityChanged;
+        if (cbFp != nullptr) {
+            msg->setPointer(kCallbackFpKey, (void *) cbFp);
+            msg->setPointer(kContextKey, cb.mContext);
+            mPendingCallbackCnt++;
+            msg->post();
+        }
+    }
 }
 
 void CameraManagerGlobal::onStatusChanged(
@@ -322,7 +511,7 @@ void CameraManagerGlobal::onStatusChangedLocked(
     bool firstStatus = (mDeviceStatusMap.count(cameraId) == 0);
     int32_t oldStatus = firstStatus ?
             status : // first status
-            mDeviceStatusMap[cameraId];
+            mDeviceStatusMap[cameraId].getStatus();
 
     if (!firstStatus &&
             isStatusAvailable(status) == isStatusAvailable(oldStatus)) {
@@ -330,20 +519,111 @@ void CameraManagerGlobal::onStatusChangedLocked(
         return;
     }
 
+    bool supportsHAL3 = supportsCamera2ApiLocked(cameraId);
+    if (firstStatus) {
+        mDeviceStatusMap.emplace(std::piecewise_construct,
+                std::forward_as_tuple(cameraId),
+                std::forward_as_tuple(status, supportsHAL3));
+    } else {
+        mDeviceStatusMap[cameraId].updateStatus(status);
+    }
     // Iterate through all registered callbacks
-    mDeviceStatusMap[cameraId] = status;
-    for (auto cb : mCallbacks) {
-        sp<AMessage> msg = new AMessage(kWhatSendSingleCallback, mHandler);
-        ACameraManager_AvailabilityCallback cbFp = isStatusAvailable(status) ?
-                cb.mAvailable : cb.mUnavailable;
-        msg->setPointer(kCallbackFpKey, (void *) cbFp);
-        msg->setPointer(kContextKey, cb.mContext);
-        msg->setString(kCameraIdKey, AString(cameraId));
-        msg->post();
+    if (supportsHAL3) {
+        for (auto cb : mCallbacks) {
+            sp<AMessage> msg = new AMessage(kWhatSendSingleCallback, mHandler);
+            ACameraManager_AvailabilityCallback cbFp = isStatusAvailable(status) ?
+                    cb.mAvailable : cb.mUnavailable;
+            msg->setPointer(kCallbackFpKey, (void *) cbFp);
+            msg->setPointer(kContextKey, cb.mContext);
+            msg->setString(kCameraIdKey, AString(cameraId));
+            mPendingCallbackCnt++;
+            msg->post();
+        }
     }
     if (status == hardware::ICameraServiceListener::STATUS_NOT_PRESENT) {
         mDeviceStatusMap.erase(cameraId);
     }
+}
+
+void CameraManagerGlobal::onStatusChanged(
+        int32_t status, const String8& cameraId, const String8& physicalCameraId) {
+    Mutex::Autolock _l(mLock);
+    onStatusChangedLocked(status, cameraId, physicalCameraId);
+}
+
+void CameraManagerGlobal::onStatusChangedLocked(
+        int32_t status, const String8& cameraId, const String8& physicalCameraId) {
+    if (!validStatus(status)) {
+        ALOGE("%s: Invalid status %d", __FUNCTION__, status);
+        return;
+    }
+
+    auto logicalStatus = mDeviceStatusMap.find(cameraId);
+    if (logicalStatus == mDeviceStatusMap.end()) {
+        ALOGE("%s: Physical camera id %s status change on a non-present id %s",
+                __FUNCTION__, physicalCameraId.c_str(), cameraId.c_str());
+        return;
+    }
+    int32_t logicalCamStatus = mDeviceStatusMap[cameraId].getStatus();
+    if (logicalCamStatus != hardware::ICameraServiceListener::STATUS_PRESENT &&
+            logicalCamStatus != hardware::ICameraServiceListener::STATUS_NOT_AVAILABLE) {
+        ALOGE("%s: Physical camera id %s status %d change for an invalid logical camera state %d",
+                __FUNCTION__, physicalCameraId.string(), status, logicalCamStatus);
+        return;
+    }
+
+    bool supportsHAL3 = supportsCamera2ApiLocked(cameraId);
+
+    bool updated = false;
+    if (status == hardware::ICameraServiceListener::STATUS_PRESENT) {
+        updated = mDeviceStatusMap[cameraId].removeUnavailablePhysicalId(physicalCameraId);
+    } else {
+        updated = mDeviceStatusMap[cameraId].addUnavailablePhysicalId(physicalCameraId);
+    }
+
+    // Iterate through all registered callbacks
+    if (supportsHAL3 && updated) {
+        for (auto cb : mCallbacks) {
+            sp<AMessage> msg = new AMessage(kWhatSendSinglePhysicalCameraCallback, mHandler);
+            ACameraManager_PhysicalCameraAvailabilityCallback cbFp = isStatusAvailable(status) ?
+                    cb.mPhysicalCamAvailable : cb.mPhysicalCamUnavailable;
+            msg->setPointer(kCallbackFpKey, (void *) cbFp);
+            msg->setPointer(kContextKey, cb.mContext);
+            msg->setString(kCameraIdKey, AString(cameraId));
+            msg->setString(kPhysicalCameraIdKey, AString(physicalCameraId));
+            mPendingCallbackCnt++;
+            msg->post();
+        }
+    }
+}
+
+int32_t CameraManagerGlobal::StatusAndHAL3Support::getStatus() {
+    std::lock_guard<std::mutex> lock(mLock);
+    return status;
+}
+
+void CameraManagerGlobal::StatusAndHAL3Support::updateStatus(int32_t newStatus) {
+    std::lock_guard<std::mutex> lock(mLock);
+    status = newStatus;
+}
+
+bool CameraManagerGlobal::StatusAndHAL3Support::addUnavailablePhysicalId(
+        const String8& physicalCameraId) {
+    std::lock_guard<std::mutex> lock(mLock);
+    auto result = unavailablePhysicalIds.insert(physicalCameraId);
+    return result.second;
+}
+
+bool CameraManagerGlobal::StatusAndHAL3Support::removeUnavailablePhysicalId(
+        const String8& physicalCameraId) {
+    std::lock_guard<std::mutex> lock(mLock);
+    auto count = unavailablePhysicalIds.erase(physicalCameraId);
+    return count > 0;
+}
+
+std::set<String8> CameraManagerGlobal::StatusAndHAL3Support::getUnavailablePhysicalIds() {
+    std::lock_guard<std::mutex> lock(mLock);
+    return unavailablePhysicalIds;
 }
 
 } // namespace acam
@@ -413,7 +693,9 @@ camera_status_t ACameraManager::getCameraCharacteristics(
         return ACAMERA_ERROR_CAMERA_DISCONNECTED;
     }
     CameraMetadata rawMetadata;
-    binder::Status serviceRet = cs->getCameraCharacteristics(String16(cameraIdStr), &rawMetadata);
+    int targetSdkVersion = android_get_application_target_sdk_version();
+    binder::Status serviceRet = cs->getCameraCharacteristics(String16(cameraIdStr),
+            targetSdkVersion, &rawMetadata);
     if (!serviceRet.isOk()) {
         switch(serviceRet.serviceSpecificErrorCode()) {
             case hardware::ICameraService::ERROR_DISCONNECTED:
@@ -459,11 +741,13 @@ ACameraManager::openCamera(
 
     sp<hardware::camera2::ICameraDeviceCallbacks> callbacks = device->getServiceCallback();
     sp<hardware::camera2::ICameraDeviceUser> deviceRemote;
+    int targetSdkVersion = android_get_application_target_sdk_version();
     // No way to get package name from native.
     // Send a zero length package name and let camera service figure it out from UID
     binder::Status serviceRet = cs->connectDevice(
-            callbacks, String16(cameraId), String16(""),
-            hardware::ICameraService::USE_CALLING_UID, /*out*/&deviceRemote);
+            callbacks, String16(cameraId), String16(""), {},
+            hardware::ICameraService::USE_CALLING_UID, /*oomScoreOffset*/0,
+            targetSdkVersion, /*out*/&deviceRemote);
 
     if (!serviceRet.isOk()) {
         ALOGE("%s: connect camera device failed: %s", __FUNCTION__, serviceRet.toString8().string());

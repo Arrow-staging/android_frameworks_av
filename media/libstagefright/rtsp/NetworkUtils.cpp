@@ -14,11 +14,13 @@
  * limitations under the License.
  */
 
+#include <unistd.h>
+
 //#define LOG_NDEBUG 0
 #define LOG_TAG "NetworkUtils"
 #include <utils/Log.h>
 
-#include "NetworkUtils.h"
+#include <media/stagefright/rtsp/NetworkUtils.h>
 #include <cutils/qtaguid.h>
 #include <NetdClient.h>
 

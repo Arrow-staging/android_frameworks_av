@@ -24,7 +24,20 @@ class AudioPolicyTestManager : public AudioPolicyManager {
     explicit AudioPolicyTestManager(AudioPolicyClientInterface *clientInterface)
             : AudioPolicyManager(clientInterface, true /*forTesting*/) { }
     using AudioPolicyManager::getConfig;
+    using AudioPolicyManager::loadConfig;
     using AudioPolicyManager::initialize;
+    using AudioPolicyManager::getOutputs;
+    using AudioPolicyManager::getAvailableOutputDevices;
+    using AudioPolicyManager::getAvailableInputDevices;
+    using AudioPolicyManager::setSurroundFormatEnabled;
+    using AudioPolicyManager::releaseMsdOutputPatches;
+    using AudioPolicyManager::setMsdOutputPatches;
+    using AudioPolicyManager::getAudioPatches;
+    using AudioPolicyManager::getDirectPlaybackSupport;
+    using AudioPolicyManager::getDirectProfilesForAttributes;
+    using AudioPolicyManager::setDeviceConnectionState;
+    using AudioPolicyManager::deviceToAudioPort;
+    uint32_t getAudioPortGeneration() const { return mAudioPortGeneration; }
 };
 
 }  // namespace android

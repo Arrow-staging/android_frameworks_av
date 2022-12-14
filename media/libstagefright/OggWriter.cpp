@@ -22,7 +22,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
-#include <media/MediaSource.h>
+#include <media/stagefright/MediaSource.h>
 #include <media/mediarecorder.h>
 #include <media/stagefright/MediaBuffer.h>
 #include <media/stagefright/MediaDefs.h>
@@ -52,6 +52,7 @@ namespace android {
 
 OggWriter::OggWriter(int fd)
       : mFd(dup(fd)),
+        mHaveAllCodecSpecificData(false),
         mInitCheck(mFd < 0 ? NO_INIT : OK) {
     // empty
 }
@@ -66,7 +67,11 @@ OggWriter::~OggWriter() {
         mFd = -1;
     }
 
-    free(mOs);
+    if (mOs != nullptr) {
+        ogg_stream_clear(mOs);
+        free(mOs);
+        mOs = nullptr;
+    }
 }
 
 status_t OggWriter::initCheck() const {
@@ -115,17 +120,26 @@ status_t OggWriter::addSource(const sp<MediaSource>& source) {
 
     mSampleRate = sampleRate;
     uint32_t type;
-    const void *header_data;
-    size_t packet_size;
+    const void *header_data = NULL;
+    size_t packet_size = 0;
+
     if (!source->getFormat()->findData(kKeyOpusHeader, &type, &header_data, &packet_size)) {
-        ALOGE("opus header not found");
-        return UNKNOWN_ERROR;
+        ALOGV("opus header not found in format");
+    } else if (header_data && packet_size) {
+        writeOggHeaderPackets((unsigned char *)header_data, packet_size);
+    } else {
+        ALOGD("ignoring incomplete opus header data in format");
     }
 
+    mSource = source;
+    return OK;
+}
+
+status_t OggWriter::writeOggHeaderPackets(unsigned char *buf, size_t size) {
     ogg_packet op;
     ogg_page og;
-    op.packet = (unsigned char *)header_data;
-    op.bytes = packet_size;
+    op.packet = buf;
+    op.bytes = size;
     op.b_o_s = 1;
     op.e_o_s = 0;
     op.granulepos = 0;
@@ -169,8 +183,8 @@ status_t OggWriter::addSource(const sp<MediaSource>& source) {
         write(mFd, og.body, og.body_len);
     }
 
-    mSource = source;
     free(comments);
+    mHaveAllCodecSpecificData = true;
     return OK;
 }
 
@@ -295,6 +309,41 @@ status_t OggWriter::threadFunc() {
                   mEstimatedSizeBytes, mMaxFileSizeLimitBytes);
             break;
         }
+
+        int32_t isCodecSpecific;
+        if ((buffer->meta_data().findInt32(kKeyIsCodecConfig, &isCodecSpecific)
+             && isCodecSpecific)
+            || IsOpusHeader((uint8_t*)buffer->data() + buffer->range_offset(),
+                         buffer->range_length())) {
+            if (mHaveAllCodecSpecificData == false) {
+                size_t opusHeadSize = 0;
+                size_t codecDelayBufSize = 0;
+                size_t seekPreRollBufSize = 0;
+                void *opusHeadBuf = NULL;
+                void *codecDelayBuf = NULL;
+                void *seekPreRollBuf = NULL;
+                GetOpusHeaderBuffers((uint8_t*)buffer->data() + buffer->range_offset(),
+                                    buffer->range_length(), &opusHeadBuf,
+                                    &opusHeadSize, &codecDelayBuf,
+                                    &codecDelayBufSize, &seekPreRollBuf,
+                                    &seekPreRollBufSize);
+                writeOggHeaderPackets((unsigned char *)opusHeadBuf, opusHeadSize);
+            } else {
+                ALOGV("ignoring later copy of CSD contained in info buffer");
+            }
+            buffer->release();
+            buffer = nullptr;
+            continue;
+        }
+
+        if (mHaveAllCodecSpecificData == false) {
+            ALOGE("Did not get valid opus header before first sample data");
+            buffer->release();
+            buffer = nullptr;
+            err = ERROR_MALFORMED;
+            break;
+        }
+
         int64_t timestampUs;
         CHECK(buffer->meta_data().findInt64(kKeyTime, &timestampUs));
         if (timestampUs > mEstimatedDurationUs) {

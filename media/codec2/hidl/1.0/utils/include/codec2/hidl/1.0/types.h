@@ -22,7 +22,7 @@
 #include <android/hardware/media/bufferpool/2.0/types.h>
 #include <android/hardware/media/c2/1.0/IComponentStore.h>
 #include <android/hardware/media/c2/1.0/types.h>
-#include <gui/IGraphicBufferProducer.h>
+#include <android/hidl/safe_union/1.0/types.h>
 
 #include <C2Component.h>
 #include <C2Param.h>
@@ -49,7 +49,6 @@ using ::android::status_t;
 using ::android::sp;
 using ::android::hardware::media::bufferpool::V2_0::implementation::
         ConnectionId;
-using ::android::IGraphicBufferProducer;
 
 // Types of metadata for Blocks.
 struct C2Hidl_Range {
@@ -207,10 +206,23 @@ private:
     std::mutex mMutex;
     sp<ClientManager> mSenderManager;
     sp<IClientManager> mReceiverManager;
-    int64_t mReceiverConnectionId;
-    int64_t mSourceConnectionId;
-    std::chrono::steady_clock::time_point mLastSent;
     std::chrono::steady_clock::duration mRefreshInterval;
+
+    struct Connection {
+        int64_t receiverConnectionId;
+        std::chrono::steady_clock::time_point lastSent;
+        Connection(int64_t receiverConnectionId,
+                   std::chrono::steady_clock::time_point lastSent)
+              : receiverConnectionId(receiverConnectionId),
+                lastSent(lastSent) {
+        }
+    };
+
+    // Map of connections.
+    //
+    // The key is the connection id. One sender-receiver pair may have multiple
+    // connections.
+    std::map<int64_t, Connection> mConnections;
 };
 
 // std::list<std::unique_ptr<C2Work>> -> WorkBundle
@@ -300,79 +312,46 @@ c2_status_t toC2Status(::android::hardware::media::bufferpool::V2_0::
 // BufferQueue-Based Block Operations
 // ==================================
 
-// Create a GraphicBuffer object from a graphic block and attach it to an
-// IGraphicBufferProducer.
-status_t attachToBufferQueue(const C2ConstGraphicBlock& block,
-                             const sp<IGraphicBufferProducer>& igbp,
-                             uint32_t generation,
-                             int32_t* bqSlot);
+// Call before transferring block to other processes.
+//
+// The given block is ready to transfer to other processes. This will guarantee
+// the given block data is not mutated by bufferqueue migration.
+bool beginTransferBufferQueueBlock(const C2ConstGraphicBlock& block);
 
-// Return false if block does not come from a bufferqueue-based blockpool.
-// Otherwise, extract generation, bqId and bqSlot and return true.
-bool getBufferQueueAssignment(const C2ConstGraphicBlock& block,
-                              uint32_t* generation,
-                              uint64_t* bqId,
-                              int32_t* bqSlot);
+// Call beginTransferBufferQueueBlock() on blocks in the given workList.
+// processInput determines whether input blocks are yielded. processOutput
+// works similarly on output blocks. (The default value of processInput is
+// false while the default value of processOutput is true. This implies that in
+// most cases, only output buffers contain bufferqueue-based blocks.)
+void beginTransferBufferQueueBlocks(
+        const std::list<std::unique_ptr<C2Work>>& workList,
+        bool processInput = false,
+        bool processOutput = true);
 
-// Disassociate the given block with its designated bufferqueue so that
-// cancelBuffer() will not be called when the block is destroyed. If the block
-// does not have a designated bufferqueue, the function returns false.
-// Otherwise, it returns true.
+// Call after transferring block is finished and make sure that
+// beginTransferBufferQueueBlock() is called before.
 //
-// Note: This function should be called after attachBuffer() or queueBuffer() is
-// called manually.
-bool yieldBufferQueueBlock(const C2ConstGraphicBlock& block);
+// The transfer of given block is finished. If transfer is successful the given
+// block is not owned by process anymore. Since transfer is finished the given
+// block data is OK to mutate by bufferqueue migration after this call.
+bool endTransferBufferQueueBlock(const C2ConstGraphicBlock& block,
+                                 bool transfer);
 
-// Call yieldBufferQueueBlock() on blocks in the given workList. processInput
-// determines whether input blocks are yielded. processOutput works similarly on
-// output blocks. (The default value of processInput is false while the default
-// value of processOutput is true. This implies that in most cases, only output
-// buffers contain bufferqueue-based blocks.)
-//
-// Note: This function should be called after WorkBundle has been successfully
-// sent over the Treble boundary to another process.
-void yieldBufferQueueBlocks(const std::list<std::unique_ptr<C2Work>>& workList,
-                            bool processInput = false,
-                            bool processOutput = true);
+// Call endTransferBufferQueueBlock() on blocks in the given workList.
+// processInput determines whether input blocks are yielded. processOutput
+// works similarly on output blocks. (The default value of processInput is
+// false while the default value of processOutput is true. This implies that in
+// most cases, only output buffers contain bufferqueue-based blocks.)
+void endTransferBufferQueueBlocks(
+        const std::list<std::unique_ptr<C2Work>>& workList,
+        bool transfer,
+        bool processInput = false,
+        bool processOutput = true);
 
-// Assign the given block to a bufferqueue so that when the block is destroyed,
-// cancelBuffer() will be called.
-//
-// If the block does not come from a bufferqueue-based blockpool, this function
-// returns false.
-//
-// If the block already has a bufferqueue assignment that matches the given one,
-// the function returns true.
-//
-// If the block already has a bufferqueue assignment that does not match the
-// given one, the block will be reassigned to the given bufferqueue. This
-// will call attachBuffer() on the given igbp. The function then returns true on
-// success or false on any failure during the operation.
-//
-// Note: This function should be called after detachBuffer() or dequeueBuffer()
-// is called manually.
-bool holdBufferQueueBlock(const C2ConstGraphicBlock& block,
-                          const sp<IGraphicBufferProducer>& igbp,
-                          uint64_t bqId,
-                          uint32_t generation);
-
-// Call holdBufferQueueBlock() on input or output blocks in the given workList.
-// Since the bufferqueue assignment for input and output buffers can be
-// different, this function takes forInput to determine whether the given
-// bufferqueue is for input buffers or output buffers. (The default value of
-// forInput is false.)
-//
-// In the (rare) case that both input and output buffers are bufferqueue-based,
-// this function must be called twice, once for the input buffers and once for
-// the output buffers.
-//
-// Note: This function should be called after WorkBundle has been received from
-// another process.
-void holdBufferQueueBlocks(const std::list<std::unique_ptr<C2Work>>& workList,
-                           const sp<IGraphicBufferProducer>& igbp,
-                           uint64_t bqId,
-                           uint32_t generation,
-                           bool forInput = false);
+// The given block is ready to be rendered. the given block is not owned by
+// process anymore. If migration is in progress, this returns false in order
+// not to render.
+bool displayBufferQueueBlock(const C2ConstGraphicBlock& block);
 
 }  // namespace utils
 }  // namespace V1_0

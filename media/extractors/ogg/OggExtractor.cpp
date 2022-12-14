@@ -22,7 +22,7 @@
 
 #include <cutils/properties.h>
 #include <utils/Vector.h>
-#include <media/DataSourceBase.h>
+#include <media/stagefright/DataSourceBase.h>
 #include <media/ExtractorUtils.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
@@ -323,6 +323,7 @@ MyOggExtractor::MyOggExtractor(
       mFirstDataOffset(-1),
       mHapticChannelCount(0) {
     mCurrentPage.mNumSegments = 0;
+    mCurrentPage.mFlags = 0;
 
     vorbis_info_init(&mVi);
     vorbis_comment_init(&mVc);
@@ -414,19 +415,18 @@ status_t MyOggExtractor::findPrevGranulePosition(
 
     ALOGV("prevPageOffset at %lld, pageOffset at %lld",
             (long long)prevPageOffset, (long long)pageOffset);
-
+    uint8_t flag = 0;
     for (;;) {
         Page prevPage;
         ssize_t n = readPage(prevPageOffset, &prevPage);
 
         if (n <= 0) {
-            return (status_t)n;
+            return (flag & 0x4) ? OK : (status_t)n;
         }
-
+        flag = prevPage.mFlags;
         prevPageOffset += n;
-
+        *granulePos = prevPage.mGranulePosition;
         if (prevPageOffset == pageOffset) {
-            *granulePos = prevPage.mGranulePosition;
             return OK;
         }
     }
@@ -635,7 +635,8 @@ media_status_t MyOpusExtractor::readNextPacket(MediaBufferHelper **out) {
             currentPageSamples -= mStartGranulePosition;
             AMediaFormat_setInt32(meta, AMEDIAFORMAT_KEY_VALID_SAMPLES, currentPageSamples);
         }
-        mCurGranulePosition = mCurrentPage.mGranulePosition - currentPageSamples;
+        (void) __builtin_sub_overflow(mCurrentPage.mGranulePosition, currentPageSamples,
+                                      &mCurGranulePosition);
     }
 
     int64_t timeUs = getTimeUsOfGranule(mCurGranulePosition);
@@ -688,7 +689,7 @@ uint32_t MyOpusExtractor::getNumSamplesInPacket(MediaBufferHelper *buffer) const
         TRESPASS();
     }
 
-    uint32_t numSamples = frameSizeUs * numFrames * kOpusSampleRate / 1000000;
+    uint32_t numSamples = (uint32_t)((uint64_t)frameSizeUs * numFrames * kOpusSampleRate) / 1000000;
     return numSamples;
 }
 
@@ -868,6 +869,7 @@ media_status_t MyOggExtractor::_readNextPacket(MediaBufferHelper **out, bool cal
         CHECK_EQ(mNextLaceIndex, mCurrentPage.mNumSegments);
 
         mOffset += mCurrentPageSize;
+        uint8_t flag = mCurrentPage.mFlags;
         ssize_t n = readPage(mOffset, &mCurrentPage);
 
         if (n <= 0) {
@@ -878,6 +880,7 @@ media_status_t MyOggExtractor::_readNextPacket(MediaBufferHelper **out, bool cal
 
             ALOGV("readPage returned %zd", n);
 
+            if (flag & 0x04) return AMEDIA_ERROR_END_OF_STREAM;
             return (media_status_t) n;
         }
 
@@ -1060,8 +1063,15 @@ media_status_t MyOpusExtractor::verifyOpusHeader(MediaBufferHelper *buffer) {
     size_t size = buffer->range_length();
 
     if (size < kOpusHeaderSize
-            || memcmp(data, "OpusHead", 8)
-            || /* version = */ data[8] != 1) {
+            || memcmp(data, "OpusHead", 8)) {
+        return AMEDIA_ERROR_MALFORMED;
+    }
+    // allow both version 0 and 1. Per the opus specification:
+    // An earlier draft of the specification described a version 0, but the only difference
+    // between version 1 and version 0 is that version 0 did not specify the semantics for
+    // handling the version field
+    if ( /* version = */ data[8] > 1) {
+        ALOGW("no support for opus version %d", data[8]);
         return AMEDIA_ERROR_MALFORMED;
     }
 
@@ -1280,7 +1290,7 @@ void MyOggExtractor::parseFileMetaData() {
         //ALOGI("comment #%d: '%s'", i + 1, mVc.user_comments[i]);
     }
 
-    AMediaFormat_getInt32(mFileMeta, "haptic", &mHapticChannelCount);
+    AMediaFormat_getInt32(mFileMeta, AMEDIAFORMAT_KEY_HAPTIC_CHANNEL_COUNT, &mHapticChannelCount);
 }
 
 void MyOggExtractor::setChannelMask(int channelCount) {
@@ -1294,9 +1304,11 @@ void MyOggExtractor::setChannelMask(int channelCount) {
                 || audioChannelCount <= 0 || audioChannelCount > FCC_8) {
             ALOGE("Invalid haptic channel count found in metadata: %d", mHapticChannelCount);
         } else {
-            const audio_channel_mask_t channelMask = audio_channel_out_mask_from_count(
-                    audioChannelCount) | hapticChannelMask;
+            const audio_channel_mask_t channelMask = static_cast<audio_channel_mask_t>(
+                    audio_channel_out_mask_from_count(audioChannelCount) | hapticChannelMask);
             AMediaFormat_setInt32(mMeta, AMEDIAFORMAT_KEY_CHANNEL_MASK, channelMask);
+            AMediaFormat_setInt32(
+                    mMeta, AMEDIAFORMAT_KEY_HAPTIC_CHANNEL_COUNT, mHapticChannelCount);
         }
     } else {
         AMediaFormat_setInt32(mMeta, AMEDIAFORMAT_KEY_CHANNEL_MASK,
@@ -1380,7 +1392,7 @@ static CreatorFunc Sniff(
         return NULL;
     }
 
-    *confidence = 0.2f;
+    *confidence = 0.5f;
 
     return CreateExtractor;
 }

@@ -32,6 +32,11 @@
 #include <policy.h>
 #include <AudioIODescriptorInterface.h>
 #include <ParameterManagerWrapper.h>
+#include <media/AudioContainers.h>
+
+#include <media/TypeConverter.h>
+
+#include <cinttypes>
 
 using std::string;
 using std::map;
@@ -77,8 +82,9 @@ Engine::~Engine()
 
 status_t Engine::initCheck()
 {
-    if (mPolicyParameterMgr == nullptr || mPolicyParameterMgr->start() != NO_ERROR) {
-        ALOGE("%s: could not start Policy PFW", __FUNCTION__);
+    std::string error;
+    if (mPolicyParameterMgr == nullptr || mPolicyParameterMgr->start(error) != NO_ERROR) {
+        ALOGE("%s: could not start Policy PFW: %s", __FUNCTION__, error.c_str());
         return NO_INIT;
     }
     return EngineBase::initCheck();
@@ -125,7 +131,7 @@ bool Engine::setPropertyForKey(const Property &property, const Key &key)
     Element<Key> *element = getFromCollection<Key>(key);
     if (element == NULL) {
         ALOGE("%s: Element not found within collection", __FUNCTION__);
-        return BAD_VALUE;
+        return false;
     }
     return element->template set<Property>(property) == NO_ERROR;
 }
@@ -159,19 +165,18 @@ audio_policy_forced_cfg_t Engine::getForceUse(audio_policy_force_use_t usage) co
     return mPolicyParameterMgr->getForceUse(usage);
 }
 
-status_t Engine::setDeviceConnectionState(const sp<DeviceDescriptor> devDesc,
+status_t Engine::setDeviceConnectionState(const sp<DeviceDescriptor> device,
                                           audio_policy_dev_state_t state)
 {
-    mPolicyParameterMgr->setDeviceConnectionState(devDesc, state);
-
-    if (audio_is_output_device(devDesc->type())) {
+    mPolicyParameterMgr->setDeviceConnectionState(device->type(), device->address(), state);
+    if (audio_is_output_device(device->type())) {
         return mPolicyParameterMgr->setAvailableOutputDevices(
                     getApmObserver()->getAvailableOutputDevices().types());
-    } else if (audio_is_input_device(devDesc->type())) {
+    } else if (audio_is_input_device(device->type())) {
         return mPolicyParameterMgr->setAvailableInputDevices(
                     getApmObserver()->getAvailableInputDevices().types());
     }
-    return BAD_TYPE;
+    return EngineBase::setDeviceConnectionState(device, state);
 }
 
 status_t Engine::loadAudioPolicyEngineConfig()
@@ -207,9 +212,9 @@ DeviceVector Engine::getDevicesForProductStrategy(product_strategy_t ps) const
         ALOGE("%s: Trying to get device on invalid strategy %d", __FUNCTION__, ps);
         return {};
     }
-    const DeviceVector &availableOutputDevices = getApmObserver()->getAvailableOutputDevices();
+    const DeviceVector availableOutputDevices = getApmObserver()->getAvailableOutputDevices();
     const SwAudioOutputCollection &outputs = getApmObserver()->getOutputs();
-    uint32_t availableOutputDevicesType = availableOutputDevices.types();
+    DeviceTypeSet availableOutputDevicesTypes = availableOutputDevices.types();
 
     /** This is the only case handled programmatically because the PFW is unable to know the
      * activity of streams.
@@ -221,45 +226,54 @@ DeviceVector Engine::getDevicesForProductStrategy(product_strategy_t ps) const
      *
      * -When media is not playing anymore, fall back on the sonification behavior
      */
-    audio_devices_t devices = AUDIO_DEVICE_NONE;
+    DeviceTypeSet deviceTypes;
     if (ps == getProductStrategyForStream(AUDIO_STREAM_NOTIFICATION) &&
             !is_state_in_call(getPhoneState()) &&
-            !outputs.isActiveRemotely(streamToVolumeSource(AUDIO_STREAM_MUSIC),
+            !outputs.isActiveRemotely(toVolumeSource(AUDIO_STREAM_MUSIC),
                                       SONIFICATION_RESPECTFUL_AFTER_MUSIC_DELAY) &&
-            outputs.isActive(streamToVolumeSource(AUDIO_STREAM_MUSIC),
+            outputs.isActive(toVolumeSource(AUDIO_STREAM_MUSIC),
                              SONIFICATION_RESPECTFUL_AFTER_MUSIC_DELAY)) {
         product_strategy_t strategyForMedia =
                 getProductStrategyForStream(AUDIO_STREAM_MUSIC);
-        devices = productStrategies.getDeviceTypesForProductStrategy(strategyForMedia);
+        deviceTypes = productStrategies.getDeviceTypesForProductStrategy(strategyForMedia);
     } else if (ps == getProductStrategyForStream(AUDIO_STREAM_ACCESSIBILITY) &&
-        (outputs.isActive(streamToVolumeSource(AUDIO_STREAM_RING)) ||
-         outputs.isActive(streamToVolumeSource(AUDIO_STREAM_ALARM)))) {
+        (outputs.isActive(toVolumeSource(AUDIO_STREAM_RING)) ||
+         outputs.isActive(toVolumeSource(AUDIO_STREAM_ALARM)))) {
             // do not route accessibility prompts to a digital output currently configured with a
             // compressed format as they would likely not be mixed and dropped.
             // Device For Sonification conf file has HDMI, SPDIF and HDMI ARC unreacheable.
         product_strategy_t strategyNotification = getProductStrategyForStream(AUDIO_STREAM_RING);
-        devices = productStrategies.getDeviceTypesForProductStrategy(strategyNotification);
+        deviceTypes = productStrategies.getDeviceTypesForProductStrategy(strategyNotification);
     } else {
-        devices = productStrategies.getDeviceTypesForProductStrategy(ps);
+        deviceTypes = productStrategies.getDeviceTypesForProductStrategy(ps);
     }
-    if (devices == AUDIO_DEVICE_NONE ||
-            (devices & availableOutputDevicesType) == AUDIO_DEVICE_NONE) {
-        devices = getApmObserver()->getDefaultOutputDevice()->type();
-        ALOGE_IF(devices == AUDIO_DEVICE_NONE, "%s: no valid default device defined", __FUNCTION__);
-        return DeviceVector(getApmObserver()->getDefaultOutputDevice());
+    if (deviceTypes.empty() ||
+            Intersection(deviceTypes, availableOutputDevicesTypes).empty()) {
+        auto defaultDevice = getApmObserver()->getDefaultOutputDevice();
+        ALOG_ASSERT(defaultDevice != nullptr, "no valid default device defined");
+        return DeviceVector(defaultDevice);
     }
-    if (/*device_distinguishes_on_address(devices)*/ devices == AUDIO_DEVICE_OUT_BUS) {
+    if (/*device_distinguishes_on_address(*deviceTypes.begin())*/ isSingleDeviceType(
+            deviceTypes, AUDIO_DEVICE_OUT_BUS)) {
         // We do expect only one device for these types of devices
         // Criterion device address garantee this one is available
         // If this criterion is not wished, need to ensure this device is available
         const String8 address(productStrategies.getDeviceAddressForProductStrategy(ps).c_str());
-        ALOGV("%s:device 0x%x %s %d", __FUNCTION__, devices, address.c_str(), ps);
-        return DeviceVector(availableOutputDevices.getDevice(devices,
-                                                             address,
-                                                             AUDIO_FORMAT_DEFAULT));
+        ALOGV("%s:device %s %s %d",
+                __FUNCTION__, dumpDeviceTypes(deviceTypes).c_str(), address.c_str(), ps);
+        auto busDevice = availableOutputDevices.getDevice(
+                *deviceTypes.begin(), address, AUDIO_FORMAT_DEFAULT);
+        if (busDevice == nullptr) {
+            ALOGE("%s:unavailable device %s %s, fallback on default", __func__,
+                  dumpDeviceTypes(deviceTypes).c_str(), address.c_str());
+            auto defaultDevice = getApmObserver()->getDefaultOutputDevice();
+            ALOG_ASSERT(defaultDevice != nullptr, "Default Output Device NOT available");
+            return DeviceVector(defaultDevice);
+        }
+        return DeviceVector(busDevice);
     }
-    ALOGV("%s:device 0x%x %d", __FUNCTION__, devices, ps);
-    return availableOutputDevices.getDevicesFromTypeMask(devices);
+    ALOGV("%s:device %s %d", __FUNCTION__, dumpDeviceTypes(deviceTypes).c_str(), ps);
+    return availableOutputDevices.getDevicesFromTypes(deviceTypes);
 }
 
 DeviceVector Engine::getOutputDevicesForAttributes(const audio_attributes_t &attributes,
@@ -272,7 +286,7 @@ DeviceVector Engine::getOutputDevicesForAttributes(const audio_attributes_t &att
         return DeviceVector(preferredDevice);
     }
     product_strategy_t strategy = getProductStrategyForAttributes(attributes);
-    const DeviceVector &availableOutputDevices = getApmObserver()->getAvailableOutputDevices();
+    const DeviceVector availableOutputDevices = getApmObserver()->getAvailableOutputDevices();
     const SwAudioOutputCollection &outputs = getApmObserver()->getOutputs();
     //
     // @TODO: what is the priority of explicit routing? Shall it be considered first as it used to
@@ -284,8 +298,13 @@ DeviceVector Engine::getOutputDevicesForAttributes(const audio_attributes_t &att
     if (device != nullptr) {
         return DeviceVector(device);
     }
+    return fromCache? getCachedDevices(strategy) : getDevicesForProductStrategy(strategy);
+}
 
-    return fromCache? mDevicesForStrategies.at(strategy) : getDevicesForProductStrategy(strategy);
+DeviceVector Engine::getCachedDevices(product_strategy_t ps) const
+{
+    return mDevicesForStrategies.find(ps) != mDevicesForStrategies.end() ?
+                mDevicesForStrategies.at(ps) : DeviceVector{};
 }
 
 DeviceVector Engine::getOutputDevicesForStream(audio_stream_type_t stream, bool fromCache) const
@@ -295,10 +314,11 @@ DeviceVector Engine::getOutputDevicesForStream(audio_stream_type_t stream, bool 
 }
 
 sp<DeviceDescriptor> Engine::getInputDeviceForAttributes(const audio_attributes_t &attr,
-                                                         AudioMix **mix) const
+                                                         uid_t uid,
+                                                         sp<AudioPolicyMix> *mix) const
 {
     const auto &policyMixes = getApmObserver()->getAudioPolicyMixCollection();
-    const auto &availableInputDevices = getApmObserver()->getAvailableInputDevices();
+    const auto availableInputDevices = getApmObserver()->getAvailableInputDevices();
     const auto &inputs = getApmObserver()->getInputs();
     std::string address;
     //
@@ -313,7 +333,10 @@ sp<DeviceDescriptor> Engine::getInputDeviceForAttributes(const audio_attributes_
         return device;
     }
 
-    device = policyMixes.getDeviceAndMixForInputSource(attr.source, availableInputDevices, mix);
+    device = policyMixes.getDeviceAndMixForInputSource(attr.source,
+                                                       availableInputDevices,
+                                                       uid,
+                                                       mix);
     if (device != nullptr) {
         return device;
     }
@@ -350,18 +373,30 @@ void Engine::setDeviceAddressForProductStrategy(product_strategy_t strategy,
     getProductStrategies().at(strategy)->setDeviceAddress(address);
 }
 
-bool Engine::setDeviceTypesForProductStrategy(product_strategy_t strategy, audio_devices_t devices)
+bool Engine::setDeviceTypesForProductStrategy(product_strategy_t strategy, uint64_t devices)
 {
     if (getProductStrategies().find(strategy) == getProductStrategies().end()) {
-        ALOGE("%s: set device %d on invalid strategy %d", __FUNCTION__, devices, strategy);
+        ALOGE("%s: set device %" PRId64 " on invalid strategy %d", __FUNCTION__, devices, strategy);
         return false;
     }
-    getProductStrategies().at(strategy)->setDeviceTypes(devices);
+    // Here device matches the criterion value, need to rebuitd android device types;
+    DeviceTypeSet types =
+            mPolicyParameterMgr->convertDeviceCriterionValueToDeviceTypes(devices, true /*isOut*/);
+    getProductStrategies().at(strategy)->setDeviceTypes(types);
     return true;
 }
 
+bool Engine::setDeviceForInputSource(const audio_source_t &inputSource, uint64_t device)
+{
+    DeviceTypeSet types = mPolicyParameterMgr->convertDeviceCriterionValueToDeviceTypes(
+                device, false /*isOut*/);
+    ALOG_ASSERT(types.size() <= 1, "one input device expected at most");
+    audio_devices_t deviceType = types.empty() ? AUDIO_DEVICE_IN_DEFAULT : *types.begin();
+    return setPropertyForKey<audio_devices_t, audio_source_t>(deviceType, inputSource);
+}
+
 template <>
-AudioPolicyManagerInterface *Engine::queryInterface()
+EngineInterface *Engine::queryInterface()
 {
     return this;
 }

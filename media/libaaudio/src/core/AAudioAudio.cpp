@@ -25,8 +25,8 @@
 
 #include <aaudio/AAudio.h>
 #include <aaudio/AAudioTesting.h>
-
 #include "AudioClock.h"
+#include "AudioGlobal.h"
 #include "AudioStreamBuilder.h"
 #include "AudioStream.h"
 #include "binding/AAudioCommon.h"
@@ -45,62 +45,13 @@ using namespace aaudio;
         return AAUDIO_ERROR_NULL; \
     }
 
-#define AAUDIO_CASE_ENUM(name) case name: return #name
-
 AAUDIO_API const char * AAudio_convertResultToText(aaudio_result_t returnCode) {
-    switch (returnCode) {
-        AAUDIO_CASE_ENUM(AAUDIO_OK);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_DISCONNECTED);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_ILLEGAL_ARGUMENT);
-        // reserved
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_INTERNAL);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_INVALID_STATE);
-        // reserved
-        // reserved
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_INVALID_HANDLE);
-         // reserved
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_UNIMPLEMENTED);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_UNAVAILABLE);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_NO_FREE_HANDLES);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_NO_MEMORY);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_NULL);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_TIMEOUT);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_WOULD_BLOCK);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_INVALID_FORMAT);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_OUT_OF_RANGE);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_NO_SERVICE);
-        AAUDIO_CASE_ENUM(AAUDIO_ERROR_INVALID_RATE);
-    }
-    return "Unrecognized AAudio error.";
+    return AudioGlobal_convertResultToText(returnCode);
 }
 
 AAUDIO_API const char * AAudio_convertStreamStateToText(aaudio_stream_state_t state) {
-    switch (state) {
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_UNINITIALIZED);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_UNKNOWN);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_OPEN);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_STARTING);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_STARTED);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_PAUSING);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_PAUSED);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_FLUSHING);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_FLUSHED);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_STOPPING);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_STOPPED);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_DISCONNECTED);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_CLOSING);
-        AAUDIO_CASE_ENUM(AAUDIO_STREAM_STATE_CLOSED);
-    }
-    return "Unrecognized AAudio state.";
+    return AudioGlobal_convertStreamStateToText(state);
 }
-
-#undef AAUDIO_CASE_ENUM
-
-
-/******************************************
- * Static globals.
- */
-static aaudio_policy_t s_MMapPolicy = AAUDIO_UNSPECIFIED;
 
 static AudioStream *convertAAudioStreamToAudioStream(AAudioStream* stream)
 {
@@ -136,6 +87,30 @@ AAUDIO_API void AAudioStreamBuilder_setDeviceId(AAudioStreamBuilder* builder,
     streamBuilder->setDeviceId(deviceId);
 }
 
+AAUDIO_API void AAudioStreamBuilder_setPackageName(AAudioStreamBuilder* builder,
+                                                   const char* packageName)
+{
+    AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
+    std::optional<std::string> optionalPackageName;
+    if (packageName != nullptr) {
+      optionalPackageName = std::string(packageName);
+    }
+    // Only system apps can read the op package name. For regular apps the
+    // regular package name is a sufficient replacement
+    streamBuilder->setOpPackageName(optionalPackageName);
+}
+
+AAUDIO_API void AAudioStreamBuilder_setAttributionTag(AAudioStreamBuilder* builder,
+                                                      const char* attributionTag)
+{
+    AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
+    std::optional<std::string> optionalAttrTag;
+    if (attributionTag != nullptr) {
+      optionalAttrTag = std::string(attributionTag);
+    }
+    streamBuilder->setAttributionTag(optionalAttrTag);
+}
+
 AAUDIO_API void AAudioStreamBuilder_setSampleRate(AAudioStreamBuilder* builder,
                                               int32_t sampleRate)
 {
@@ -153,7 +128,8 @@ AAUDIO_API void AAudioStreamBuilder_setSamplesPerFrame(AAudioStreamBuilder* buil
                                                        int32_t samplesPerFrame)
 {
     AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
-    streamBuilder->setSamplesPerFrame(samplesPerFrame);
+    const aaudio_channel_mask_t channelMask = AAudioConvert_channelCountToMask(samplesPerFrame);
+    streamBuilder->setChannelMask(channelMask);
 }
 
 AAUDIO_API void AAudioStreamBuilder_setDirection(AAudioStreamBuilder* builder,
@@ -191,10 +167,28 @@ AAUDIO_API void AAudioStreamBuilder_setContentType(AAudioStreamBuilder* builder,
     streamBuilder->setContentType(contentType);
 }
 
+AAUDIO_API void AAudioStreamBuilder_setSpatializationBehavior(AAudioStreamBuilder* builder,
+        aaudio_spatialization_behavior_t spatializationBehavior) {
+    AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
+    streamBuilder->setSpatializationBehavior(spatializationBehavior);
+}
+
+AAUDIO_API void AAudioStreamBuilder_setIsContentSpatialized(AAudioStreamBuilder* builder,
+                                                            bool isSpatialized) {
+    AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
+    streamBuilder->setIsContentSpatialized(isSpatialized);
+}
+
 AAUDIO_API void AAudioStreamBuilder_setInputPreset(AAudioStreamBuilder* builder,
                                                    aaudio_input_preset_t inputPreset) {
     AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
     streamBuilder->setInputPreset(inputPreset);
+}
+
+AAUDIO_API void AAudioStreamBuilder_setPrivacySensitive(AAudioStreamBuilder* builder,
+                                                   bool privacySensitive) {
+    AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
+    streamBuilder->setPrivacySensitiveRequest(privacySensitive);
 }
 
 AAUDIO_API void AAudioStreamBuilder_setBufferCapacityInFrames(AAudioStreamBuilder* builder,
@@ -202,6 +196,12 @@ AAUDIO_API void AAudioStreamBuilder_setBufferCapacityInFrames(AAudioStreamBuilde
 {
     AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
     streamBuilder->setBufferCapacity(frames);
+}
+
+AAUDIO_API void AAudioStreamBuilder_setAllowedCapturePolicy(
+        AAudioStreamBuilder* builder, aaudio_allowed_capture_policy_t policy) {
+    AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
+    streamBuilder->setAllowedCapturePolicy(policy);
 }
 
 AAUDIO_API void AAudioStreamBuilder_setSessionId(AAudioStreamBuilder* builder,
@@ -236,22 +236,30 @@ AAUDIO_API void AAudioStreamBuilder_setFramesPerDataCallback(AAudioStreamBuilder
     streamBuilder->setFramesPerDataCallback(frames);
 }
 
+AAUDIO_API void AAudioStreamBuilder_setChannelMask(AAudioStreamBuilder* builder,
+                                                   aaudio_channel_mask_t channelMask)
+{
+    AudioStreamBuilder *streamBuilder = convertAAudioBuilderToStreamBuilder(builder);
+    streamBuilder->setChannelMask(channelMask);
+}
+
 AAUDIO_API aaudio_result_t  AAudioStreamBuilder_openStream(AAudioStreamBuilder* builder,
                                                      AAudioStream** streamPtr)
 {
     AudioStream *audioStream = nullptr;
+    aaudio_stream_id_t id = 0;
     // Please leave these logs because they are very helpful when debugging.
-    ALOGD("%s() called ----------------------------------------", __func__);
+    ALOGI("%s() called ----------------------------------------", __func__);
     AudioStreamBuilder *streamBuilder = COMMON_GET_FROM_BUILDER_OR_RETURN(streamPtr);
     aaudio_result_t result = streamBuilder->build(&audioStream);
-    ALOGD("AAudioStreamBuilder_openStream() returns %d = %s for (%p) ----------------",
-          result, AAudio_convertResultToText(result), audioStream);
     if (result == AAUDIO_OK) {
-        audioStream->registerPlayerBase();
         *streamPtr = (AAudioStream*) audioStream;
+        id = audioStream->getId();
     } else {
         *streamPtr = nullptr;
     }
+    ALOGI("%s() returns %d = %s for s#%u ----------------",
+        __func__, result, AAudio_convertResultToText(result), id);
     return result;
 }
 
@@ -265,57 +273,75 @@ AAUDIO_API aaudio_result_t  AAudioStreamBuilder_delete(AAudioStreamBuilder* buil
     return AAUDIO_ERROR_NULL;
 }
 
-AAUDIO_API aaudio_result_t  AAudioStream_close(AAudioStream* stream)
-{
+AAUDIO_API aaudio_result_t  AAudioStream_release(AAudioStream* stream) {
     aaudio_result_t result = AAUDIO_ERROR_NULL;
-    AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
-    ALOGD("%s(%p) called ---------------", __func__, stream);
+    AudioStream* audioStream = convertAAudioStreamToAudioStream(stream);
     if (audioStream != nullptr) {
-        result = audioStream->safeClose();
-        // Close will only fail if called illegally, for example, from a callback.
-        // That would result in deleting an active stream, which would cause a crash.
-        if (result == AAUDIO_OK) {
-            audioStream->unregisterPlayerBase();
-            delete audioStream;
-        } else {
-            ALOGW("%s attempt to close failed. Close it from another thread.", __func__);
+        aaudio_stream_id_t id = audioStream->getId();
+        ALOGD("%s(s#%u) called ---------------", __func__, id);
+        result = audioStream->safeRelease();
+        // safeRelease() will only fail if called illegally, for example, from a callback.
+        // That would result in the release of an active stream, which would cause a crash.
+        if (result != AAUDIO_OK) {
+            ALOGW("%s(s#%u) failed. Release it from another thread.",
+                  __func__, id);
         }
+        ALOGD("%s(s#%u) returned %d %s ---------", __func__,
+                id, result, AAudio_convertResultToText(result));
     }
-    // We're potentially freeing `stream` above, so its use here makes some
-    // static analysis tools unhappy. Casting to uintptr_t helps assure
-    // said tools that we're not doing anything bad here.
-    ALOGD("%s(%#" PRIxPTR ") returned %d ---------", __func__,
-          reinterpret_cast<uintptr_t>(stream), result);
+    return result;
+}
+
+AAUDIO_API aaudio_result_t  AAudioStream_close(AAudioStream* stream) {
+    aaudio_result_t result = AAUDIO_ERROR_NULL;
+    AudioStream* audioStream = convertAAudioStreamToAudioStream(stream);
+    if (audioStream != nullptr) {
+        aaudio_stream_id_t id = audioStream->getId();
+        ALOGD("%s(s#%u) called ---------------", __func__, id);
+        result = audioStream->safeReleaseClose();
+        // safeReleaseClose will only fail if called illegally, for example, from a callback.
+        // That would result in deleting an active stream, which would cause a crash.
+        if (result != AAUDIO_OK) {
+            ALOGW("%s(s#%u) failed. Close it from another thread.",
+                  __func__, id);
+        } else {
+            audioStream->unregisterPlayerBase();
+            // Allow the stream to be deleted.
+            AudioStreamBuilder::stopUsingStream(audioStream);
+        }
+        ALOGD("%s(s#%u) returned %d ---------", __func__, id, result);
+    }
     return result;
 }
 
 AAUDIO_API aaudio_result_t  AAudioStream_requestStart(AAudioStream* stream)
 {
     AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
-    ALOGD("%s(%p) called --------------", __func__, stream);
+    aaudio_stream_id_t id = audioStream->getId();
+    ALOGD("%s(s#%u) called --------------", __func__, id);
     aaudio_result_t result = audioStream->systemStart();
-    ALOGD("%s(%p) returned %d ---------", __func__, stream, result);
+    ALOGD("%s(s#%u) returned %d ---------", __func__, id, result);
     return result;
 }
 
 AAUDIO_API aaudio_result_t  AAudioStream_requestPause(AAudioStream* stream)
 {
     AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
-    ALOGD("%s(%p) called", __func__, stream);
+    ALOGD("%s(s#%u) called", __func__, audioStream->getId());
     return audioStream->systemPause();
 }
 
 AAUDIO_API aaudio_result_t  AAudioStream_requestFlush(AAudioStream* stream)
 {
     AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
-    ALOGD("%s(%p) called", __func__, stream);
+    ALOGD("%s(s#%u) called", __func__, audioStream->getId());
     return audioStream->safeFlush();
 }
 
 AAUDIO_API aaudio_result_t  AAudioStream_requestStop(AAudioStream* stream)
 {
     AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
-    ALOGD("%s(%p) called", __func__, stream);
+    ALOGD("%s(s#%u) called", __func__, audioStream->getId());
     return audioStream->systemStopFromApp();
 }
 
@@ -326,7 +352,8 @@ AAUDIO_API aaudio_result_t AAudioStream_waitForStateChange(AAudioStream* stream,
 {
 
     AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
-    return audioStream->waitForStateChange(inputState, nextState, timeoutNanoseconds);
+    android::sp<AudioStream> spAudioStream(audioStream);
+    return spAudioStream->waitForStateChange(inputState, nextState, timeoutNanoseconds);
 }
 
 // ============================================================
@@ -365,7 +392,8 @@ AAUDIO_API aaudio_result_t AAudioStream_write(AAudioStream* stream,
 
     // Don't allow writes when playing with a callback.
     if (audioStream->isDataCallbackActive()) {
-        ALOGE("Cannot write to a callback stream when running.");
+        // A developer requested this warning because it would have saved lots of debugging.
+        ALOGW("%s() - Cannot write to a callback stream when running.", __func__);
         return AAUDIO_ERROR_INVALID_STATE;
     }
 
@@ -488,10 +516,30 @@ AAUDIO_API aaudio_content_type_t AAudioStream_getContentType(AAudioStream* strea
     return audioStream->getContentType();
 }
 
+AAUDIO_API aaudio_spatialization_behavior_t AAudioStream_getSpatializationBehavior(
+        AAudioStream* stream)
+{
+    AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
+    return audioStream->getSpatializationBehavior();
+}
+
+AAUDIO_API bool AAudioStream_isContentSpatialized(AAudioStream* stream)
+{
+    AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
+    return audioStream->isContentSpatialized();
+}
+
 AAUDIO_API aaudio_input_preset_t AAudioStream_getInputPreset(AAudioStream* stream)
 {
     AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
     return audioStream->getInputPreset();
+}
+
+AAUDIO_API aaudio_allowed_capture_policy_t AAudioStream_getAllowedCapturePolicy(
+        AAudioStream* stream)
+{
+    AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
+    return audioStream->getAllowedCapturePolicy();
 }
 
 AAUDIO_API int32_t AAudioStream_getSessionId(AAudioStream* stream)
@@ -530,27 +578,29 @@ AAUDIO_API aaudio_result_t AAudioStream_getTimestamp(AAudioStream* stream,
 }
 
 AAUDIO_API aaudio_policy_t AAudio_getMMapPolicy() {
-    return s_MMapPolicy;
+    return AudioGlobal_getMMapPolicy();
 }
 
 AAUDIO_API aaudio_result_t AAudio_setMMapPolicy(aaudio_policy_t policy) {
-    aaudio_result_t result = AAUDIO_OK;
-    switch(policy) {
-        case AAUDIO_UNSPECIFIED:
-        case AAUDIO_POLICY_NEVER:
-        case AAUDIO_POLICY_AUTO:
-        case AAUDIO_POLICY_ALWAYS:
-            s_MMapPolicy = policy;
-            break;
-        default:
-            result = AAUDIO_ERROR_ILLEGAL_ARGUMENT;
-            break;
-    }
-    return result;
+    return AudioGlobal_setMMapPolicy(policy);
 }
 
 AAUDIO_API bool AAudioStream_isMMapUsed(AAudioStream* stream)
 {
     AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
     return audioStream->isMMap();
+}
+
+AAUDIO_API bool AAudioStream_isPrivacySensitive(AAudioStream* stream)
+{
+    AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
+    return audioStream->isPrivacySensitive();
+}
+
+AAUDIO_API aaudio_channel_mask_t AAudioStream_getChannelMask(AAudioStream* stream)
+{
+    AudioStream *audioStream = convertAAudioStreamToAudioStream(stream);
+    const aaudio_channel_mask_t channelMask = audioStream->getChannelMask();
+    // Do not return channel index masks as they are not public.
+    return AAudio_isChannelIndexMask(channelMask) ? AAUDIO_UNSPECIFIED : channelMask;
 }

@@ -16,7 +16,9 @@
 
 #pragma once
 
-#include "AudioPort.h"
+#include "PolicyAudioPort.h"
+#include <media/AudioContainers.h>
+#include <media/DeviceDescriptorBase.h>
 #include <utils/Errors.h>
 #include <utils/String8.h>
 #include <utils/SortedVector.h>
@@ -26,23 +28,28 @@
 
 namespace android {
 
-class DeviceDescriptor : public AudioPort, public AudioPortConfig
+class AudioPolicyClientInterface;
+
+class DeviceDescriptor : public DeviceDescriptorBase,
+                         public PolicyAudioPort, public PolicyAudioPortConfig
 {
 public:
      // Note that empty name refers by convention to a generic device.
-    explicit DeviceDescriptor(audio_devices_t type, const String8 &tagName = String8(""));
-    DeviceDescriptor(audio_devices_t type, const FormatVector &encodedFormats,
-            const String8 &tagName = String8(""));
+    explicit DeviceDescriptor(audio_devices_t type);
+    DeviceDescriptor(audio_devices_t type, const std::string &tagName,
+            const FormatVector &encodedFormats = FormatVector{});
+    DeviceDescriptor(audio_devices_t type, const std::string &tagName,
+            const std::string &address, const FormatVector &encodedFormats = FormatVector{});
+    DeviceDescriptor(const AudioDeviceTypeAddr &deviceTypeAddr, const std::string &tagName = "",
+            const FormatVector &encodedFormats = FormatVector{});
 
-    virtual ~DeviceDescriptor() {}
+    virtual ~DeviceDescriptor() = default;
 
-    virtual const String8 getTagName() const { return mTagName; }
+    virtual void addAudioProfile(const sp<AudioProfile> &profile) {
+        addAudioProfileAndSort(mProfiles, profile);
+    }
 
-    audio_devices_t type() const { return mDeviceType; }
-    String8 address() const { return mAddress; }
-    void setAddress(const String8 &address) { mAddress = address; }
-
-    const FormatVector& encodedFormats() const { return mEncodedFormats; }
+    virtual const std::string getTagName() const { return mTagName; }
 
     audio_format_t getEncodedFormat() { return mCurrentEncodedFormat; }
 
@@ -54,38 +61,56 @@ public:
 
     bool hasCurrentEncodedFormat() const;
 
-    bool supportsFormat(audio_format_t format);
+    void setDynamic() { mIsDynamic = true; }
+    bool isDynamic() const { return mIsDynamic; }
+
+    // PolicyAudioPortConfig
+    virtual sp<PolicyAudioPort> getPolicyAudioPort() const {
+        return static_cast<PolicyAudioPort*>(const_cast<DeviceDescriptor*>(this));
+    }
 
     // AudioPortConfig
-    virtual sp<AudioPort> getAudioPort() const { return (AudioPort*) this; }
+    virtual status_t applyAudioPortConfig(const struct audio_port_config *config,
+                                          struct audio_port_config *backupConfig = NULL);
     virtual void toAudioPortConfig(struct audio_port_config *dstConfig,
             const struct audio_port_config *srcConfig = NULL) const;
 
-    // AudioPort
+    // PolicyAudioPort
+    virtual sp<AudioPort> asAudioPort() const {
+        return static_cast<AudioPort*>(const_cast<DeviceDescriptor*>(this));
+    }
     virtual void attach(const sp<HwModule>& module);
     virtual void detach();
 
+    // AudioPort
     virtual void toAudioPort(struct audio_port *port) const;
-    virtual void importAudioPort(const sp<AudioPort>& port, bool force = false);
+    virtual void toAudioPort(struct audio_port_v7 *port) const;
 
-    audio_port_handle_t getId() const;
-    void dump(String8 *dst, int spaces, int index, bool verbose = true) const;
-    void log() const;
-    std::string toString() const;
+    void importAudioPortAndPickAudioProfile(const sp<PolicyAudioPort>& policyPort,
+                                            bool force = false);
+
+    void setEncapsulationInfoFromHal(AudioPolicyClientInterface *clientInterface);
+
+    void dump(String8 *dst, int spaces, bool verbose = true) const;
 
 private:
-    String8 mAddress{""};
-    String8 mTagName; // Unique human readable identifier for a device port found in conf file.
-    audio_devices_t     mDeviceType;
-    FormatVector        mEncodedFormats;
-    audio_port_handle_t mId = AUDIO_PORT_HANDLE_NONE;
+    template <typename T, std::enable_if_t<std::is_same<T, struct audio_port>::value
+                                        || std::is_same<T, struct audio_port_v7>::value, int> = 0>
+    void toAudioPortInternal(T* port) const {
+        DeviceDescriptorBase::toAudioPort(port);
+        port->ext.device.hw_module = getModuleHandle();
+    }
+
+    std::string mTagName; // Unique human readable identifier for a device port found in conf file.
     audio_format_t      mCurrentEncodedFormat;
+    bool                mIsDynamic = false;
+    const std::string   mDeclaredAddress; // Original device address
 };
 
 class DeviceVector : public SortedVector<sp<DeviceDescriptor> >
 {
 public:
-    DeviceVector() : SortedVector(), mDeviceTypes(AUDIO_DEVICE_NONE) {}
+    DeviceVector() : SortedVector() {}
     explicit DeviceVector(const sp<DeviceDescriptor>& item) : DeviceVector()
     {
         add(item);
@@ -97,13 +122,16 @@ public:
     void remove(const DeviceVector &devices);
     ssize_t indexOf(const sp<DeviceDescriptor>& item) const;
 
-    audio_devices_t types() const { return mDeviceTypes; }
+    DeviceTypeSet types() const { return mDeviceTypes; }
 
     // If 'address' is empty and 'codec' is AUDIO_FORMAT_DEFAULT, a device with a non-empty
     // address may be returned if there is no device with the specified 'type' and empty address.
     sp<DeviceDescriptor> getDevice(audio_devices_t type, const String8 &address,
                                    audio_format_t codec) const;
-    DeviceVector getDevicesFromTypeMask(audio_devices_t types) const;
+    DeviceVector getDevicesFromTypes(const DeviceTypeSet& types) const;
+    DeviceVector getDevicesFromType(audio_devices_t type) const {
+        return getDevicesFromTypes({type});
+    }
 
     /**
      * @brief getDeviceFromId
@@ -112,9 +140,48 @@ public:
      * equal to AUDIO_PORT_HANDLE_NONE, it also returns a nullptr.
      */
     sp<DeviceDescriptor> getDeviceFromId(audio_port_handle_t id) const;
-    sp<DeviceDescriptor> getDeviceFromTagName(const String8 &tagName) const;
+    sp<DeviceDescriptor> getDeviceFromTagName(const std::string &tagName) const;
     DeviceVector getDevicesFromHwModule(audio_module_handle_t moduleHandle) const;
-    audio_devices_t getDeviceTypesFromHwModule(audio_module_handle_t moduleHandle) const;
+
+    DeviceVector getFirstDevicesFromTypes(std::vector<audio_devices_t> orderedTypes) const;
+    sp<DeviceDescriptor> getFirstExistingDevice(std::vector<audio_devices_t> orderedTypes) const;
+
+    // Return device descriptor that is used to open an input/output stream.
+    // Null pointer will be returned if
+    //     1) this collection is empty
+    //     2) the device descriptors are not the same category(input or output)
+    //     3) there are more than one device type for input case
+    //     4) the combination of all devices is invalid for selection
+    sp<DeviceDescriptor> getDeviceForOpening() const;
+
+    // Return the device descriptor that matches the given AudioDeviceTypeAddr
+    sp<DeviceDescriptor> getDeviceFromDeviceTypeAddr(
+            const AudioDeviceTypeAddr& deviceTypeAddr) const;
+
+    // Return the device vector that contains device descriptor whose AudioDeviceTypeAddr appears
+    // in the given AudioDeviceTypeAddrVector
+    DeviceVector getDevicesFromDeviceTypeAddrVec(
+            const AudioDeviceTypeAddrVector& deviceTypeAddrVector) const;
+
+    // Return the device vector that contains device descriptor whose AudioDeviceTypeAddr appears
+    // in the given AudioDeviceTypeAddrVector
+    AudioDeviceTypeAddrVector toTypeAddrVector() const;
+
+    // If there are devices with the given type and the devices to add is not empty,
+    // remove all the devices with the given type and add all the devices to add.
+    void replaceDevicesByType(audio_devices_t typeToRemove, const DeviceVector &devicesToAdd);
+
+    bool containsDeviceAmongTypes(const DeviceTypeSet& deviceTypes) const {
+        return !Intersection(mDeviceTypes, deviceTypes).empty();
+    }
+
+    bool containsDeviceWithType(audio_devices_t deviceType) const {
+        return containsDeviceAmongTypes({deviceType});
+    }
+
+    bool onlyContainsDevicesWithType(audio_devices_t deviceType) const {
+        return isSingleDeviceType(mDeviceTypes, deviceType);
+    }
 
     bool contains(const sp<DeviceDescriptor>& item) const { return indexOf(item) >= 0; }
 
@@ -135,9 +202,16 @@ public:
     /**
      * @brief filter the devices supported by this collection against another collection
      * @param devices to filter against
-     * @return
+     * @return a filtered DeviceVector
      */
     DeviceVector filter(const DeviceVector &devices) const;
+
+    /**
+     * @brief filter the devices supported by this collection before sending
+     * then to the Engine via AudioPolicyManagerObserver interface
+     * @return a filtered DeviceVector
+     */
+    DeviceVector filterForEngine() const;
 
     /**
      * @brief merge two vectors. As SortedVector Implementation is buggy (it does not check the size
@@ -151,7 +225,9 @@ public:
             add(devices);
             return size();
         }
-        return SortedVector::merge(devices);
+        ssize_t ret = SortedVector::merge(devices);
+        refreshTypes();
+        return ret;
     }
 
     /**
@@ -189,19 +265,27 @@ public:
     {
         for (const auto &device : *this) {
             if (device->address() != "") {
-                return device->address();
+                return String8(device->address().c_str());
             }
         }
         return String8("");
     }
 
-    std::string toString() const;
+    const AudioProfileVector& getSupportedProfiles() { return mSupportedProfiles; }
+
+    // Return a string to describe the DeviceVector. The sensitive information will only be
+    // added to the string if `includeSensitiveInfo` is true.
+    std::string toString(bool includeSensitiveInfo = false) const;
 
     void dump(String8 *dst, const String8 &tag, int spaces = 0, bool verbose = true) const;
 
+protected:
+    int     do_compare(const void* lhs, const void* rhs) const;
 private:
     void refreshTypes();
-    audio_devices_t mDeviceTypes;
+    void refreshAudioProfiles();
+    DeviceTypeSet mDeviceTypes;
+    AudioProfileVector mSupportedProfiles;
 };
 
 } // namespace android

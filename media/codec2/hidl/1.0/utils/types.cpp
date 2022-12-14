@@ -19,8 +19,6 @@
 #include <android-base/logging.h>
 
 #include <codec2/hidl/1.0/types.h>
-
-#include <media/stagefright/bqhelper/WGraphicBufferProducer.h>
 #include <media/stagefright/foundation/AUtils.h>
 
 #include <C2AllocatorIon.h>
@@ -28,6 +26,7 @@
 #include <C2BlockInternal.h>
 #include <C2Buffer.h>
 #include <C2Component.h>
+#include <C2FenceFactory.h>
 #include <C2Param.h>
 #include <C2ParamInternal.h>
 #include <C2PlatformSupport.h>
@@ -46,7 +45,6 @@ namespace c2 {
 namespace V1_0 {
 namespace utils {
 
-using namespace ::android;
 using ::android::hardware::Return;
 using ::android::hardware::media::bufferpool::BufferPoolData;
 using ::android::hardware::media::bufferpool::V2_0::BufferStatusMessage;
@@ -55,7 +53,6 @@ using ::android::hardware::media::bufferpool::V2_0::implementation::
         ClientManager;
 using ::android::hardware::media::bufferpool::V2_0::implementation::
         TransactionId;
-using ::android::TWGraphicBufferProducer;
 
 const char* asString(Status status, const char* def) {
     return asString(static_cast<c2_status_t>(status), def);
@@ -118,9 +115,9 @@ bool objcpy(C2WorkOrdinalStruct *d, const WorkOrdinal &s) {
     return true;
 }
 
-// C2FieldSupportedValues::range's type -> FieldSupportedValues::Range
+// C2FieldSupportedValues::range's type -> ValueRange
 bool objcpy(
-        FieldSupportedValues::Range* d,
+        ValueRange* d,
         const decltype(C2FieldSupportedValues::range)& s) {
     d->min = static_cast<PrimitiveValue>(s.min.u64);
     d->max = static_cast<PrimitiveValue>(s.max.u64);
@@ -133,45 +130,45 @@ bool objcpy(
 // C2FieldSupportedValues -> FieldSupportedValues
 bool objcpy(FieldSupportedValues *d, const C2FieldSupportedValues &s) {
     switch (s.type) {
-    case C2FieldSupportedValues::EMPTY:
-        d->type = FieldSupportedValues::Type::EMPTY;
-        d->values.resize(0);
-        break;
-    case C2FieldSupportedValues::RANGE:
-        d->type = FieldSupportedValues::Type::RANGE;
-        if (!objcpy(&d->range, s.range)) {
-            LOG(ERROR) << "Invalid C2FieldSupportedValues::range.";
-            return false;
+    case C2FieldSupportedValues::EMPTY: {
+            d->empty(::android::hidl::safe_union::V1_0::Monostate{});
+            break;
         }
-        d->values.resize(0);
-        break;
-    default:
-        switch (s.type) {
-        case C2FieldSupportedValues::VALUES:
-            d->type = FieldSupportedValues::Type::VALUES;
-            break;
-        case C2FieldSupportedValues::FLAGS:
-            d->type = FieldSupportedValues::Type::FLAGS;
-            break;
-        default:
-            LOG(DEBUG) << "Unrecognized C2FieldSupportedValues::type_t "
-                       << "with underlying value " << underlying_value(s.type)
-                       << ".";
-            d->type = static_cast<FieldSupportedValues::Type>(s.type);
-            if (!objcpy(&d->range, s.range)) {
+    case C2FieldSupportedValues::RANGE: {
+            ValueRange range{};
+            if (!objcpy(&range, s.range)) {
                 LOG(ERROR) << "Invalid C2FieldSupportedValues::range.";
+                d->range(range);
                 return false;
             }
+            d->range(range);
+            break;
         }
-        copyVector<uint64_t>(&d->values, s.values);
+    case C2FieldSupportedValues::VALUES: {
+            hidl_vec<PrimitiveValue> values;
+            copyVector<uint64_t>(&values, s.values);
+            d->values(values);
+            break;
+        }
+    case C2FieldSupportedValues::FLAGS: {
+            hidl_vec<PrimitiveValue> flags;
+            copyVector<uint64_t>(&flags, s.values);
+            d->flags(flags);
+            break;
+        }
+    default:
+        LOG(DEBUG) << "Unrecognized C2FieldSupportedValues::type_t "
+                   << "with underlying value " << underlying_value(s.type)
+                   << ".";
+        return false;
     }
     return true;
 }
 
-// FieldSupportedValues::Range -> C2FieldSupportedValues::range's type
+// ValueRange -> C2FieldSupportedValues::range's type
 bool objcpy(
         decltype(C2FieldSupportedValues::range)* d,
-        const FieldSupportedValues::Range& s) {
+        const ValueRange& s) {
     d->min.u64 = static_cast<uint64_t>(s.min);
     d->max.u64 = static_cast<uint64_t>(s.max);
     d->step.u64 = static_cast<uint64_t>(s.step);
@@ -182,37 +179,33 @@ bool objcpy(
 
 // FieldSupportedValues -> C2FieldSupportedValues
 bool objcpy(C2FieldSupportedValues *d, const FieldSupportedValues &s) {
-    switch (s.type) {
-    case FieldSupportedValues::Type::EMPTY:
-        d->type = C2FieldSupportedValues::EMPTY;
-        break;
-    case FieldSupportedValues::Type::RANGE:
-        d->type = C2FieldSupportedValues::RANGE;
-        if (!objcpy(&d->range, s.range)) {
-            LOG(ERROR) << "Invalid FieldSupportedValues::range.";
-            return false;
+    switch (s.getDiscriminator()) {
+    case FieldSupportedValues::hidl_discriminator::empty: {
+            d->type = C2FieldSupportedValues::EMPTY;
+            break;
         }
-        d->values.resize(0);
-        break;
-    default:
-        switch (s.type) {
-        case FieldSupportedValues::Type::VALUES:
-            d->type = C2FieldSupportedValues::VALUES;
-            break;
-        case FieldSupportedValues::Type::FLAGS:
-            d->type = C2FieldSupportedValues::FLAGS;
-            break;
-        default:
-            LOG(DEBUG) << "Unrecognized FieldSupportedValues::Type "
-                       << "with underlying value " << underlying_value(s.type)
-                       << ".";
-            d->type = static_cast<C2FieldSupportedValues::type_t>(s.type);
-            if (!objcpy(&d->range, s.range)) {
+    case FieldSupportedValues::hidl_discriminator::range: {
+            d->type = C2FieldSupportedValues::RANGE;
+            if (!objcpy(&d->range, s.range())) {
                 LOG(ERROR) << "Invalid FieldSupportedValues::range.";
                 return false;
             }
+            d->values.resize(0);
+            break;
         }
-        copyVector<uint64_t>(&d->values, s.values);
+    case FieldSupportedValues::hidl_discriminator::values: {
+            d->type = C2FieldSupportedValues::VALUES;
+            copyVector<uint64_t>(&d->values, s.values());
+            break;
+        }
+    case FieldSupportedValues::hidl_discriminator::flags: {
+            d->type = C2FieldSupportedValues::FLAGS;
+            copyVector<uint64_t>(&d->values, s.flags());
+            break;
+        }
+    default:
+        LOG(WARNING) << "Unrecognized FieldSupportedValues::getDiscriminator()";
+        return false;
     }
     return true;
 }
@@ -745,7 +738,15 @@ bool addBaseBlock(
                     bufferPoolSender, baseBlocks, baseBlockIndices);
         }
     case _C2BlockPoolData::TYPE_BUFFERQUEUE:
-        // Do the same thing as a NATIVE block.
+        uint32_t gen;
+        uint64_t bqId;
+        int32_t bqSlot;
+        // Update handle if migration happened.
+        if (_C2BlockFactory::GetBufferQueueData(
+                blockPoolData, &gen, &bqId, &bqSlot)) {
+            android::MigrateNativeCodec2GrallocHandle(
+                    const_cast<native_handle_t*>(handle), gen, bqId, bqSlot);
+        }
         return _addBaseBlock(
                 index, handle,
                 baseBlocks, baseBlockIndices);
@@ -759,17 +760,14 @@ bool addBaseBlock(
 // Note: File descriptors are not duplicated. The original file descriptor must
 // not be closed before the transaction is complete.
 bool objcpy(hidl_handle* d, const C2Fence& s) {
-    (void)s; // TODO: implement s.fd()
-    int fenceFd = -1;
     d->setTo(nullptr);
-    if (fenceFd >= 0) {
-        native_handle_t *handle = native_handle_create(1, 0);
-        if (!handle) {
-            LOG(ERROR) << "Failed to create a native handle.";
-            return false;
-        }
-        handle->data[0] = fenceFd;
+    native_handle_t* handle = _C2FenceFactory::CreateNativeHandle(s);
+    if (handle) {
         d->setTo(handle, true /* owns */);
+//  } else if (!s.ready()) {
+//      // TODO: we should wait for unmarshallable fences but this may not be
+//      // the best place for it. We can safely ignore here as at this time
+//      // all fences used here are marshallable.
     }
     return true;
 }
@@ -895,13 +893,12 @@ bool objcpy(InfoBuffer* d, const C2InfoBuffer& s,
         BufferPoolSender* bufferPoolSender,
         std::list<BaseBlock>* baseBlocks,
         std::map<const void*, uint32_t>* baseBlockIndices) {
-    // TODO: C2InfoBuffer is not implemented.
-    (void)d;
-    (void)s;
-    (void)bufferPoolSender;
-    (void)baseBlocks;
-    (void)baseBlockIndices;
-    LOG(INFO) << "InfoBuffer not implemented.";
+    d->index = static_cast<ParamIndex>(s.index());
+    Buffer& dBuffer = d->buffer;
+    if (!objcpy(&dBuffer, s.data(), bufferPoolSender, baseBlocks, baseBlockIndices)) {
+        LOG(ERROR) << "Invalid C2InfoBuffer::data";
+        return false;
+    }
     return true;
 }
 
@@ -943,14 +940,9 @@ bool objcpy(FrameData* d, const C2FrameData& s,
 
     d->infoBuffers.resize(s.infoBuffers.size());
     i = 0;
-    for (const std::shared_ptr<C2InfoBuffer>& sInfoBuffer : s.infoBuffers) {
+    for (const C2InfoBuffer& sInfoBuffer : s.infoBuffers) {
         InfoBuffer& dInfoBuffer = d->infoBuffers[i++];
-        if (!sInfoBuffer) {
-            LOG(ERROR) << "Null C2FrameData::infoBuffers["
-                       << i - 1 << "].";
-            return false;
-        }
-        if (!objcpy(&dInfoBuffer, *sInfoBuffer,
+        if (!objcpy(&dInfoBuffer, sInfoBuffer,
                 bufferPoolSender, baseBlocks, baseBlockIndices)) {
             LOG(ERROR) << "Invalid C2FrameData::infoBuffers["
                        << i - 1 << "].";
@@ -969,8 +961,6 @@ DefaultBufferPoolSender::DefaultBufferPoolSender(
         const sp<IClientManager>& receiverManager,
         std::chrono::steady_clock::duration refreshInterval)
     : mReceiverManager(receiverManager),
-      mSourceConnectionId(0),
-      mLastSent(std::chrono::steady_clock::now()),
       mRefreshInterval(refreshInterval) {
 }
 
@@ -980,6 +970,7 @@ void DefaultBufferPoolSender::setReceiver(
     std::lock_guard<std::mutex> lock(mMutex);
     if (mReceiverManager != receiverManager) {
         mReceiverManager = receiverManager;
+        mConnections.clear();
     }
     mRefreshInterval = refreshInterval;
 }
@@ -987,12 +978,16 @@ void DefaultBufferPoolSender::setReceiver(
 ResultStatus DefaultBufferPoolSender::send(
         const std::shared_ptr<BufferPoolData>& bpData,
         BufferStatusMessage* bpMessage) {
+    int64_t connectionId = bpData->mConnectionId;
+    if (connectionId == 0) {
+        LOG(WARNING) << "registerSender -- invalid sender connection id (0).";
+        return ResultStatus::CRITICAL_ERROR;
+    }
+    std::lock_guard<std::mutex> lock(mMutex);
     if (!mReceiverManager) {
         LOG(ERROR) << "No access to receiver's BufferPool.";
         return ResultStatus::NOT_FOUND;
     }
-    ResultStatus rs;
-    std::lock_guard<std::mutex> lock(mMutex);
     if (!mSenderManager) {
         mSenderManager = ClientManager::getInstance();
         if (!mSenderManager) {
@@ -1000,52 +995,61 @@ ResultStatus DefaultBufferPoolSender::send(
             return ResultStatus::CRITICAL_ERROR;
         }
     }
-    int64_t connectionId = bpData->mConnectionId;
+
+    int64_t receiverConnectionId{0};
+    auto foundConnection = mConnections.find(connectionId);
+    bool isNewConnection = foundConnection == mConnections.end();
     std::chrono::steady_clock::time_point now =
             std::chrono::steady_clock::now();
-    std::chrono::steady_clock::duration interval = now - mLastSent;
-    if (mSourceConnectionId == 0 ||
-            mSourceConnectionId != connectionId ||
-            interval > mRefreshInterval) {
+    if (isNewConnection ||
+            (now - foundConnection->second.lastSent > mRefreshInterval)) {
         // Initialize the bufferpool connection.
-        mSourceConnectionId = connectionId;
-        if (mSourceConnectionId == 0) {
-            return ResultStatus::CRITICAL_ERROR;
-        }
-
-        int64_t receiverConnectionId;
-        rs = mSenderManager->registerSender(mReceiverManager,
-                                            connectionId,
-                                            &receiverConnectionId);
+        ResultStatus rs =
+                mSenderManager->registerSender(mReceiverManager,
+                                               connectionId,
+                                               &receiverConnectionId);
         if ((rs != ResultStatus::OK) && (rs != ResultStatus::ALREADY_EXISTS)) {
             LOG(WARNING) << "registerSender -- returned error: "
                          << static_cast<int32_t>(rs)
                          << ".";
             return rs;
+        } else if (receiverConnectionId == 0) {
+            LOG(WARNING) << "registerSender -- "
+                            "invalid receiver connection id (0).";
+            return ResultStatus::CRITICAL_ERROR;
         } else {
-            mReceiverConnectionId = receiverConnectionId;
+            if (isNewConnection) {
+                foundConnection = mConnections.try_emplace(
+                        connectionId, receiverConnectionId, now).first;
+            } else {
+                foundConnection->second.receiverConnectionId = receiverConnectionId;
+            }
         }
+    } else {
+        receiverConnectionId = foundConnection->second.receiverConnectionId;
     }
 
     uint64_t transactionId;
     int64_t timestampUs;
-    rs = mSenderManager->postSend(
-            mReceiverConnectionId, bpData, &transactionId, &timestampUs);
+    ResultStatus rs = mSenderManager->postSend(
+            receiverConnectionId, bpData, &transactionId, &timestampUs);
     if (rs != ResultStatus::OK) {
         LOG(ERROR) << "ClientManager::postSend -- returned error: "
                    << static_cast<int32_t>(rs)
                    << ".";
+        mConnections.erase(foundConnection);
         return rs;
     }
     if (!bpMessage) {
         LOG(ERROR) << "Null output parameter for BufferStatusMessage.";
+        mConnections.erase(foundConnection);
         return ResultStatus::CRITICAL_ERROR;
     }
-    bpMessage->connectionId = mReceiverConnectionId;
+    bpMessage->connectionId = receiverConnectionId;
     bpMessage->bufferId = bpData->mId;
     bpMessage->transactionId = transactionId;
     bpMessage->timestampUs = timestampUs;
-    mLastSent = now;
+    foundConnection->second.lastSent = now;
     return rs;
 }
 
@@ -1178,9 +1182,8 @@ struct C2BaseBlock {
 // Note: File descriptors are not duplicated. The original file descriptor must
 // not be closed before the transaction is complete.
 bool objcpy(C2Fence* d, const hidl_handle& s) {
-    // TODO: Implement.
-    (void)s;
-    *d = C2Fence();
+    const native_handle_t* handle = s.getNativeHandle();
+    *d = _C2FenceFactory::CreateFromNativeHandle(handle);
     return true;
 }
 
@@ -1329,6 +1332,68 @@ bool objcpy(std::shared_ptr<C2Buffer>* d, const Buffer& s,
     return true;
 }
 
+// InfoBuffer -> C2InfoBuffer
+bool objcpy(std::vector<C2InfoBuffer> *d, const InfoBuffer& s,
+        const std::vector<C2BaseBlock>& baseBlocks) {
+
+    // Currently, a non-null C2InfoBufer must contain exactly 1 block.
+    if (s.buffer.blocks.size() == 0) {
+        return true;
+    } else if (s.buffer.blocks.size() != 1) {
+        LOG(ERROR) << "Invalid InfoBuffer::Buffer "
+                      "Currently, a C2InfoBuffer must contain exactly 1 block.";
+        return false;
+    }
+
+    const Block &sBlock = s.buffer.blocks[0];
+    if (sBlock.index >= baseBlocks.size()) {
+        LOG(ERROR) << "Invalid InfoBuffer::Buffer::blocks[0].index: "
+                      "Array index out of range.";
+        return false;
+    }
+    const C2BaseBlock &baseBlock = baseBlocks[sBlock.index];
+
+    // Parse meta.
+    std::vector<C2Param*> sBlockMeta;
+    if (!parseParamsBlob(&sBlockMeta, sBlock.meta)) {
+        LOG(ERROR) << "Invalid InfoBuffer::Buffer::blocks[0].meta.";
+        return false;
+    }
+
+    // Copy fence.
+    C2Fence dFence;
+    if (!objcpy(&dFence, sBlock.fence)) {
+        LOG(ERROR) << "Invalid InfoBuffer::Buffer::blocks[0].fence.";
+        return false;
+    }
+
+    // Construct a block.
+    switch (baseBlock.type) {
+    case C2BaseBlock::LINEAR:
+        if (sBlockMeta.size() == 1 && sBlockMeta[0] != nullptr &&
+            sBlockMeta[0]->size() == sizeof(C2Hidl_RangeInfo)) {
+            C2Hidl_RangeInfo *rangeInfo =
+                    reinterpret_cast<C2Hidl_RangeInfo*>(sBlockMeta[0]);
+            d->emplace_back(C2InfoBuffer::CreateLinearBuffer(
+                    s.index,
+                    baseBlock.linear->share(
+                            rangeInfo->offset, rangeInfo->length, dFence)));
+            return true;
+        }
+        LOG(ERROR) << "Invalid Meta for C2BaseBlock::Linear InfoBuffer.";
+        break;
+    case C2BaseBlock::GRAPHIC:
+        // It's not used now
+        LOG(ERROR) << "Non-Used C2BaseBlock::type for InfoBuffer.";
+        break;
+    default:
+        LOG(ERROR) << "Invalid C2BaseBlock::type for InfoBuffer.";
+        break;
+    }
+
+    return false;
+}
+
 // FrameData -> C2FrameData
 bool objcpy(C2FrameData* d, const FrameData& s,
         const std::vector<C2BaseBlock>& baseBlocks) {
@@ -1363,8 +1428,18 @@ bool objcpy(C2FrameData* d, const FrameData& s,
         }
     }
 
-    // TODO: Implement this once C2InfoBuffer has constructors.
     d->infoBuffers.clear();
+    if (s.infoBuffers.size() == 0) {
+        // InfoBuffer is optional
+        return true;
+    }
+    d->infoBuffers.reserve(s.infoBuffers.size());
+    for (const InfoBuffer &sInfoBuffer: s.infoBuffers) {
+        if (!objcpy(&(d->infoBuffers), sInfoBuffer, baseBlocks)) {
+            LOG(ERROR) << "Invalid Framedata::infoBuffers.";
+            return false;
+        }
+    }
     return true;
 }
 
@@ -1372,6 +1447,10 @@ bool objcpy(C2FrameData* d, const FrameData& s,
 bool objcpy(C2BaseBlock* d, const BaseBlock& s) {
     switch (s.getDiscriminator()) {
     case BaseBlock::hidl_discriminator::nativeBlock: {
+            if (s.nativeBlock() == nullptr) {
+                LOG(ERROR) << "Null BaseBlock::nativeBlock handle";
+                return false;
+            }
             native_handle_t* sHandle =
                     native_handle_clone(s.nativeBlock());
             if (sHandle == nullptr) {
@@ -1433,6 +1512,11 @@ bool objcpy(C2BaseBlock* d, const BaseBlock& s) {
             if (d->graphic) {
                 d->type = C2BaseBlock::GRAPHIC;
                 return true;
+            }
+            if (cHandle) {
+                // Though we got cloned handle, creating block failed.
+                native_handle_close(cHandle);
+                native_handle_delete(cHandle);
             }
 
             LOG(ERROR) << "Unknown handle type in BaseBlock::pooledBlock.";
@@ -1529,6 +1613,7 @@ bool parseParamsBlob(std::vector<C2Param*> *params, const hidl_vec<uint8_t> &blo
     // assuming blob is const here
     size_t size = blob.size();
     size_t ix = 0;
+    size_t old_ix = 0;
     const uint8_t *data = blob.data();
     C2Param *p = nullptr;
 
@@ -1536,8 +1621,13 @@ bool parseParamsBlob(std::vector<C2Param*> *params, const hidl_vec<uint8_t> &blo
         p = C2ParamUtils::ParseFirst(data + ix, size - ix);
         if (p) {
             params->emplace_back(p);
+            old_ix = ix;
             ix += p->size();
             ix = align(ix, PARAMS_ALIGNMENT);
+            if (ix <= old_ix || ix > size) {
+                android_errorWriteLog(0x534e4554, "238083570");
+                break;
+            }
         }
     } while (p);
 
@@ -1743,30 +1833,6 @@ c2_status_t toC2Status(ResultStatus rs) {
 
 namespace /* unnamed */ {
 
-// Create a GraphicBuffer object from a graphic block.
-sp<GraphicBuffer> createGraphicBuffer(const C2ConstGraphicBlock& block) {
-    uint32_t width;
-    uint32_t height;
-    uint32_t format;
-    uint64_t usage;
-    uint32_t stride;
-    uint32_t generation;
-    uint64_t bqId;
-    int32_t bqSlot;
-    _UnwrapNativeCodec2GrallocMetadata(
-            block.handle(), &width, &height, &format, &usage,
-            &stride, &generation, &bqId, reinterpret_cast<uint32_t*>(&bqSlot));
-    native_handle_t *grallocHandle =
-            UnwrapNativeCodec2GrallocHandle(block.handle());
-    sp<GraphicBuffer> graphicBuffer =
-            new GraphicBuffer(grallocHandle,
-                              GraphicBuffer::CLONE_HANDLE,
-                              width, height, format,
-                              1, usage, stride);
-    native_handle_delete(grallocHandle);
-    return graphicBuffer;
-}
-
 template <typename BlockProcessor>
 void forEachBlock(C2FrameData& frameData,
                   BlockProcessor process) {
@@ -1802,141 +1868,55 @@ void forEachBlock(const std::list<std::unique_ptr<C2Work>>& workList,
     }
 }
 
-sp<HGraphicBufferProducer> getHgbp(const sp<IGraphicBufferProducer>& igbp) {
-    sp<HGraphicBufferProducer> hgbp =
-            igbp->getHalInterface<HGraphicBufferProducer>();
-    return hgbp ? hgbp :
-            new TWGraphicBufferProducer<HGraphicBufferProducer>(igbp);
-}
-
 } // unnamed namespace
 
-status_t attachToBufferQueue(const C2ConstGraphicBlock& block,
-                             const sp<IGraphicBufferProducer>& igbp,
-                             uint32_t generation,
-                             int32_t* bqSlot) {
-    if (!igbp) {
-        LOG(WARNING) << "attachToBufferQueue -- null producer.";
-        return NO_INIT;
-    }
-
-    sp<GraphicBuffer> graphicBuffer = createGraphicBuffer(block);
-    graphicBuffer->setGenerationNumber(generation);
-
-    LOG(VERBOSE) << "attachToBufferQueue -- attaching buffer:"
-            << " block dimension " << block.width() << "x"
-                                   << block.height()
-            << ", graphicBuffer dimension " << graphicBuffer->getWidth() << "x"
-                                           << graphicBuffer->getHeight()
-            << std::hex << std::setfill('0')
-            << ", format 0x" << std::setw(8) << graphicBuffer->getPixelFormat()
-            << ", usage 0x" << std::setw(16) << graphicBuffer->getUsage()
-            << std::dec << std::setfill(' ')
-            << ", stride " << graphicBuffer->getStride()
-            << ", generation " << graphicBuffer->getGenerationNumber();
-
-    status_t result = igbp->attachBuffer(bqSlot, graphicBuffer);
-    if (result != OK) {
-        LOG(WARNING) << "attachToBufferQueue -- attachBuffer failed: "
-                        "status = " << result << ".";
-        return result;
-    }
-    LOG(VERBOSE) << "attachToBufferQueue -- attachBuffer returned slot #"
-                 << *bqSlot << ".";
-    return OK;
-}
-
-bool getBufferQueueAssignment(const C2ConstGraphicBlock& block,
-                              uint32_t* generation,
-                              uint64_t* bqId,
-                              int32_t* bqSlot) {
-    return _C2BlockFactory::GetBufferQueueData(
-            _C2BlockFactory::GetGraphicBlockPoolData(block),
-            generation, bqId, bqSlot);
-}
-
-bool yieldBufferQueueBlock(const C2ConstGraphicBlock& block) {
+bool beginTransferBufferQueueBlock(const C2ConstGraphicBlock& block) {
     std::shared_ptr<_C2BlockPoolData> data =
             _C2BlockFactory::GetGraphicBlockPoolData(block);
     if (data && _C2BlockFactory::GetBufferQueueData(data)) {
-        _C2BlockFactory::YieldBlockToBufferQueue(data);
+        _C2BlockFactory::BeginTransferBlockToClient(data);
         return true;
     }
     return false;
 }
 
-void yieldBufferQueueBlocks(
+void beginTransferBufferQueueBlocks(
         const std::list<std::unique_ptr<C2Work>>& workList,
         bool processInput, bool processOutput) {
-    forEachBlock(workList, yieldBufferQueueBlock, processInput, processOutput);
+    forEachBlock(workList, beginTransferBufferQueueBlock,
+                 processInput, processOutput);
 }
 
-bool holdBufferQueueBlock(const C2ConstGraphicBlock& block,
-                            const sp<IGraphicBufferProducer>& igbp,
-                            uint64_t bqId,
-                            uint32_t generation) {
+bool endTransferBufferQueueBlock(
+        const C2ConstGraphicBlock& block,
+        bool transfer) {
     std::shared_ptr<_C2BlockPoolData> data =
             _C2BlockFactory::GetGraphicBlockPoolData(block);
-    if (!data) {
-        return false;
-    }
-
-    uint32_t oldGeneration;
-    uint64_t oldId;
-    int32_t oldSlot;
-    // If the block is not bufferqueue-based, do nothing.
-    if (!_C2BlockFactory::GetBufferQueueData(
-            data, &oldGeneration, &oldId, &oldSlot) ||
-            (oldId == 0)) {
-        return false;
-    }
-
-    // If the block's bqId is the same as the desired bqId, just hold.
-    if ((oldId == bqId) && (oldGeneration == generation)) {
-        LOG(VERBOSE) << "holdBufferQueueBlock -- import without attaching:"
-                     << " bqId " << oldId
-                     << ", bqSlot " << oldSlot
-                     << ", generation " << generation
-                     << ".";
-        _C2BlockFactory::HoldBlockFromBufferQueue(data, getHgbp(igbp));
+    if (data && _C2BlockFactory::GetBufferQueueData(data)) {
+        _C2BlockFactory::EndTransferBlockToClient(data, transfer);
         return true;
     }
-
-    // Otherwise, attach to the given igbp, which must not be null.
-    if (!igbp) {
-        return false;
-    }
-
-    int32_t bqSlot;
-    status_t result = attachToBufferQueue(block, igbp, generation, &bqSlot);
-
-    if (result != OK) {
-        LOG(ERROR) << "holdBufferQueueBlock -- fail to attach:"
-                   << " target bqId " << bqId
-                   << ", generation " << generation
-                   << ".";
-        return false;
-    }
-
-    LOG(VERBOSE) << "holdBufferQueueBlock -- attached:"
-                 << " bqId " << bqId
-                 << ", bqSlot " << bqSlot
-                 << ", generation " << generation
-                 << ".";
-    _C2BlockFactory::AssignBlockToBufferQueue(
-            data, getHgbp(igbp), generation, bqId, bqSlot, true);
-    return true;
+    return false;
 }
 
-void holdBufferQueueBlocks(const std::list<std::unique_ptr<C2Work>>& workList,
-                           const sp<IGraphicBufferProducer>& igbp,
-                           uint64_t bqId,
-                           uint32_t generation,
-                           bool forInput) {
+void endTransferBufferQueueBlocks(
+        const std::list<std::unique_ptr<C2Work>>& workList,
+        bool transfer,
+        bool processInput, bool processOutput) {
     forEachBlock(workList,
-                 std::bind(holdBufferQueueBlock,
-                           std::placeholders::_1, igbp, bqId, generation),
-                 forInput, !forInput);
+                 std::bind(endTransferBufferQueueBlock,
+                           std::placeholders::_1, transfer),
+                 processInput, processOutput);
+}
+
+bool displayBufferQueueBlock(const C2ConstGraphicBlock& block) {
+    std::shared_ptr<_C2BlockPoolData> data =
+            _C2BlockFactory::GetGraphicBlockPoolData(block);
+    if (data && _C2BlockFactory::GetBufferQueueData(data)) {
+        _C2BlockFactory::DisplayBlockToBufferQueue(data);
+        return true;
+    }
+    return false;
 }
 
 }  // namespace utils

@@ -17,18 +17,22 @@
 #ifndef ANDROID_AUDIORECORD_H
 #define ANDROID_AUDIORECORD_H
 
+#include <memory>
+#include <vector>
+
 #include <binder/IMemory.h>
 #include <cutils/sched_policy.h>
 #include <media/AudioSystem.h>
 #include <media/AudioTimestamp.h>
-#include <media/MediaAnalyticsItem.h>
+#include <media/MediaMetricsItem.h>
 #include <media/Modulo.h>
 #include <media/MicrophoneInfo.h>
+#include <media/RecordingActivityTracker.h>
 #include <utils/RefBase.h>
 #include <utils/threads.h>
-#include <vector>
 
 #include "android/media/IAudioRecord.h"
+#include <android/content/AttributionSourceState.h>
 
 namespace android {
 
@@ -36,14 +40,13 @@ namespace android {
 
 struct audio_track_cblk_t;
 class AudioRecordClientProxy;
-
 // ----------------------------------------------------------------------------
 
 class AudioRecord : public AudioSystem::AudioDeviceCallback
 {
 public:
 
-    /* Events used by AudioRecord callback function (callback_t).
+    /* Events used by AudioRecord callback function (legacy_callback_t).
      * Keep in sync with frameworks/base/media/java/android/media/AudioRecord.java NATIVE_EVENT_*.
      */
     enum event_type {
@@ -61,20 +64,26 @@ public:
     };
 
     /* Client should declare a Buffer and pass address to obtainBuffer()
-     * and releaseBuffer().  See also callback_t for EVENT_MORE_DATA.
+     * and releaseBuffer().  See also legacy_callback_t for EVENT_MORE_DATA.
      */
 
     class Buffer
     {
+      friend AudioRecord;
     public:
-        // FIXME use m prefix
+        size_t size() const { return mSize; }
+        size_t getFrameCount() const { return frameCount; }
+        uint8_t* data() const { return ui8; }
+        // Leaving public for now to assist refactoring. This class will
+        // be replaced.
         size_t      frameCount;     // number of sample frames corresponding to size;
                                     // on input to obtainBuffer() it is the number of frames desired
                                     // on output from obtainBuffer() it is the number of available
                                     //    frames to be read
                                     // on input to releaseBuffer() it is currently ignored
 
-        size_t      size;           // input/output in bytes == frameCount * frameSize
+    private:
+        size_t      mSize;          // input/output in bytes == frameCount * frameSize
                                     // on input to obtainBuffer() it is ignored
                                     // on output from obtainBuffer() it is the number of available
                                     //    bytes to be read, which is frameCount * frameSize
@@ -86,9 +95,14 @@ public:
         union {
             void*       raw;
             int16_t*    i16;        // signed 16-bit
-            int8_t*     i8;         // unsigned 8-bit, offset by 0x80
+            uint8_t*    ui8;        // unsigned 8-bit, offset by 0x80
                                     // input to obtainBuffer(): unused, output: pointer to buffer
         };
+
+        uint32_t    sequence;       // IAudioRecord instance sequence number, as of obtainBuffer().
+                                    // It is set by obtainBuffer() and confirmed by releaseBuffer().
+                                    // Not "user-serviceable".
+                                    // TODO Consider sp<IMemory> instead, or in addition to this.
     };
 
     /* As a convenience, if a callback is supplied, a handler thread
@@ -108,7 +122,28 @@ public:
      *          - EVENT_NEW_IAUDIORECORD: unused.
      */
 
-    typedef void (*callback_t)(int event, void* user, void *info);
+    typedef void (*legacy_callback_t)(int event, void* user, void *info);
+
+    class IAudioRecordCallback : public virtual RefBase {
+        friend AudioRecord;
+     protected:
+        // Request for client to read newly available data.
+        // Used for TRANSFER_CALLBACK mode.
+        // Parameters:
+        //  - buffer : Buffer to read from
+        // Returns:
+        //  - Number of bytes actually consumed.
+        virtual size_t onMoreData([[maybe_unused]] const AudioRecord::Buffer& buffer) { return 0; }
+        // A buffer overrun occurred.
+        virtual void onOverrun() {}
+        // Record head is at the specified marker (see setMarkerPosition()).
+        virtual void onMarker([[maybe_unused]] uint32_t markerPosition) {}
+        // Record head is at a new position (see setPositionUpdatePeriod()).
+        virtual void onNewPos([[maybe_unused]] uint32_t newPos) {}
+        // IAudioRecord was recreated due to re-routing, server invalidation or
+        // server crash.
+        virtual void onNewIAudioRecord() {}
+    };
 
     /* Returns the minimum frame count required for the successful creation of
      * an AudioRecord object.
@@ -140,9 +175,9 @@ public:
      *
      * Parameters:
      *
-     * opPackageName:      The package name used for app ops.
+     * client:          The attribution source of the owner of the record
      */
-                        AudioRecord(const String16& opPackageName);
+                        AudioRecord(const android::content::AttributionSourceState& client);
 
     /* Creates an AudioRecord object and registers it with AudioFlinger.
      * Once created, the track needs to be started before it can be used.
@@ -155,7 +190,7 @@ public:
      * format:             Audio format (e.g AUDIO_FORMAT_PCM_16_BIT for signed
      *                     16 bits per sample).
      * channelMask:        Channel mask, such that audio_is_input_channel(channelMask) is true.
-     * opPackageName:      The package name used for app ops.
+     * client:             The attribution source of the owner of the record
      * frameCount:         Minimum size of track PCM buffer in frames. This defines the
      *                     application's contribution to the
      *                     latency of the track.  The actual size selected by the AudioRecord could
@@ -173,23 +208,41 @@ public:
      * pAttributes:        If not NULL, supersedes inputSource for use case selection.
      * threadCanCallJava:  Not present in parameter list, and so is fixed at false.
      */
+                        AudioRecord(audio_source_t inputSource,
+                                    uint32_t sampleRate,
+                                    audio_format_t format,
+                                    audio_channel_mask_t channelMask,
+                                    const android::content::AttributionSourceState& client,
+                                    size_t frameCount = 0,
+                                    const wp<IAudioRecordCallback> &callback = nullptr,
+                                    uint32_t notificationFrames = 0,
+                                    audio_session_t sessionId = AUDIO_SESSION_ALLOCATE,
+                                    transfer_type transferType = TRANSFER_DEFAULT,
+                                    audio_input_flags_t flags = AUDIO_INPUT_FLAG_NONE,
+                                    const audio_attributes_t* pAttributes = nullptr,
+                                    audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE,
+                                    audio_microphone_direction_t
+                                        selectedMicDirection = MIC_DIRECTION_UNSPECIFIED,
+                                    float selectedMicFieldDimension = MIC_FIELD_DIMENSION_DEFAULT);
+
 
                         AudioRecord(audio_source_t inputSource,
                                     uint32_t sampleRate,
                                     audio_format_t format,
                                     audio_channel_mask_t channelMask,
-                                    const String16& opPackageName,
-                                    size_t frameCount = 0,
-                                    callback_t cbf = NULL,
-                                    void* user = NULL,
+                                    const android::content::AttributionSourceState& client,
+                                    size_t frameCount,
+                                    legacy_callback_t callback,
+                                    void* user,
                                     uint32_t notificationFrames = 0,
                                     audio_session_t sessionId = AUDIO_SESSION_ALLOCATE,
                                     transfer_type transferType = TRANSFER_DEFAULT,
                                     audio_input_flags_t flags = AUDIO_INPUT_FLAG_NONE,
-                                    uid_t uid = AUDIO_UID_INVALID,
-                                    pid_t pid = -1,
-                                    const audio_attributes_t* pAttributes = NULL,
-                                    audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE);
+                                    const audio_attributes_t* pAttributes = nullptr,
+                                    audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE,
+                                    audio_microphone_direction_t
+                                        selectedMicDirection = MIC_DIRECTION_UNSPECIFIED,
+                                    float selectedMicFieldDimension = MIC_FIELD_DIMENSION_DEFAULT);
 
     /* Terminates the AudioRecord and unregisters it from AudioFlinger.
      * Also destroys all resources associated with the AudioRecord.
@@ -213,13 +266,12 @@ public:
      *
      * threadCanCallJava:  Whether callbacks are made from an attached thread and thus can call JNI.
      */
-            status_t    set(audio_source_t inputSource,
+           status_t    set(audio_source_t inputSource,
                             uint32_t sampleRate,
                             audio_format_t format,
                             audio_channel_mask_t channelMask,
                             size_t frameCount = 0,
-                            callback_t cbf = NULL,
-                            void* user = NULL,
+                            const wp<IAudioRecordCallback> &callback = nullptr,
                             uint32_t notificationFrames = 0,
                             bool threadCanCallJava = false,
                             audio_session_t sessionId = AUDIO_SESSION_ALLOCATE,
@@ -227,8 +279,33 @@ public:
                             audio_input_flags_t flags = AUDIO_INPUT_FLAG_NONE,
                             uid_t uid = AUDIO_UID_INVALID,
                             pid_t pid = -1,
-                            const audio_attributes_t* pAttributes = NULL,
-                            audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE);
+                            const audio_attributes_t* pAttributes = nullptr,
+                            audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE,
+                            audio_microphone_direction_t
+                                selectedMicDirection = MIC_DIRECTION_UNSPECIFIED,
+                            float selectedMicFieldDimension = MIC_FIELD_DIMENSION_DEFAULT,
+                            int32_t maxSharedAudioHistoryMs = 0);
+
+           status_t    set(audio_source_t inputSource,
+                            uint32_t sampleRate,
+                            audio_format_t format,
+                            audio_channel_mask_t channelMask,
+                            size_t frameCount,
+                            legacy_callback_t callback,
+                            void* user,
+                            uint32_t notificationFrames = 0,
+                            bool threadCanCallJava = false,
+                            audio_session_t sessionId = AUDIO_SESSION_ALLOCATE,
+                            transfer_type transferType = TRANSFER_DEFAULT,
+                            audio_input_flags_t flags = AUDIO_INPUT_FLAG_NONE,
+                            uid_t uid = AUDIO_UID_INVALID,
+                            pid_t pid = -1,
+                            const audio_attributes_t* pAttributes = nullptr,
+                            audio_port_handle_t selectedDeviceId = AUDIO_PORT_HANDLE_NONE,
+                            audio_microphone_direction_t
+                                selectedMicDirection = MIC_DIRECTION_UNSPECIFIED,
+                            float selectedMicFieldDimension = MIC_FIELD_DIMENSION_DEFAULT,
+                            int32_t maxSharedAudioHistoryMs = 0);
 
     /* Result of constructing the AudioRecord. This must be checked for successful initialization
      * before using any AudioRecord API (except for set()), because using
@@ -250,6 +327,7 @@ public:
             size_t      frameCount() const  { return mFrameCount; }
             size_t      frameSize() const   { return mFrameSize; }
             audio_source_t inputSource() const  { return mAttributes.source; }
+            audio_channel_mask_t channelMask() const { return mChannelMask; }
 
     /*
      * Return the period of the notification callback in frames.
@@ -261,7 +339,20 @@ public:
     /*
      * return metrics information for the current instance.
      */
-            status_t getMetrics(MediaAnalyticsItem * &item);
+            status_t getMetrics(mediametrics::Item * &item);
+
+    /*
+     * Set name of API that is using this object.
+     * For example "aaudio" or "opensles".
+     * This may be logged or reported as part of MediaMetrics.
+     */
+            void setCallerName(const std::string &name) {
+                mCallerName = name;
+            }
+
+            std::string getCallerName() const {
+                return mCallerName;
+            };
 
     /* After it's created the track is not active. Call start() to
      * make it active. If set, the callback will start being called.
@@ -276,6 +367,19 @@ public:
      */
             void        stop();
             bool        stopped() const;
+
+    /* Calls stop() and then wait for all of the callbacks to return.
+     * It is safe to call this if stop() or pause() has already been called.
+     *
+     * This function is called from the destructor. But since AudioRecord
+     * is ref counted, the destructor may be called later than desired.
+     * This can be called explicitly as part of closing an AudioRecord
+     * if you want to be certain that callbacks have completely finished.
+     *
+     * This is not thread safe and should only be called from one thread,
+     * ideally as the AudioRecord is being closed.
+     */
+            void        stopAndJoinCallbacks();
 
     /* Return the sink sample rate for this record track in Hz.
      * If specified as zero in constructor or set(), this will be the source sample rate.
@@ -411,14 +515,17 @@ public:
      *  frameCount  number of frames requested
      *  size        ignored
      *  raw         ignored
+     *  sequence    ignored
      * After error return:
      *  frameCount  0
      *  size        0
      *  raw         undefined
+     *  sequence    undefined
      * After successful return:
      *  frameCount  actual number of frames available, <= number requested
      *  size        actual number of bytes available
      *  raw         pointer to the buffer
+     *  sequence    IAudioRecord instance sequence number, as of obtainBuffer()
      */
 
             status_t    obtainBuffer(Buffer* audioBuffer, int32_t waitCount,
@@ -536,17 +643,27 @@ public:
 
     /* Set the Microphone direction (for processing purposes).
      */
-            status_t    setMicrophoneDirection(audio_microphone_direction_t direction);
+            status_t    setPreferredMicrophoneDirection(audio_microphone_direction_t direction);
 
     /* Set the Microphone zoom factor (for processing purposes).
      */
-            status_t    setMicrophoneFieldDimension(float zoom);
+            status_t    setPreferredMicrophoneFieldDimension(float zoom);
 
      /* Get the unique port ID assigned to this AudioRecord instance by audio policy manager.
       * The ID is unique across all audioserver clients and can change during the life cycle
       * of a given AudioRecord instance if the connection to audioserver is restored.
       */
             audio_port_handle_t getPortId() const { return mPortId; };
+
+    /* Sets the LogSessionId field which is used for metrics association of
+     * this object with other objects. A nullptr or empty string clears
+     * the logSessionId.
+     */
+            void setLogSessionId(const char *logSessionId);
+
+
+            status_t shareAudioHistory(const std::string& sharedPackageName,
+                                       int64_t sharedStartMs);
 
      /*
       * Dumps the state of an audio record.
@@ -562,7 +679,7 @@ private:
     class AudioRecordThread : public Thread
     {
     public:
-        AudioRecordThread(AudioRecord& receiver, bool bCanCallJava = false);
+        AudioRecordThread(AudioRecord& receiver);
 
         // Do not call Thread::requestExitAndWait() without first calling requestExit().
         // Thread::requestExitAndWait() is not virtual, and the implementation doesn't do enough.
@@ -602,7 +719,7 @@ private:
 
             // caller must hold lock on mLock for all _l methods
 
-            status_t createRecord_l(const Modulo<uint32_t> &epoch, const String16& opPackageName);
+            status_t createRecord_l(const Modulo<uint32_t> &epoch);
 
             // FIXME enum is faster than strcmp() for parameter 'from'
             status_t restoreRecord_l(const char *from);
@@ -612,14 +729,18 @@ private:
     sp<AudioRecordThread>   mAudioRecordThread;
     mutable Mutex           mLock;
 
+    std::unique_ptr<RecordingActivityTracker> mTracker;
+
     // Current client state:  false = stopped, true = active.  Protected by mLock.  If more states
     // are added, consider changing this to enum State { ... } mState as in AudioTrack.
     bool                    mActive;
 
     // for client callback handler
-    callback_t              mCbf;                   // callback handler for events, or NULL
-    void*                   mUserData;
 
+    wp<IAudioRecordCallback> mCallback;
+    sp<IAudioRecordCallback> mLegacyCallbackWrapper;
+
+    bool                    mInitialized = false;   // Protect against double set
     // for notification APIs
     uint32_t                mNotificationFramesReq; // requested number of frames between each
                                                     // notification callback
@@ -641,7 +762,7 @@ private:
 
     status_t                mStatus;
 
-    String16                mOpPackageName;         // The package name used for app ops.
+    android::content::AttributionSourceState mClientAttributionSource; // Owner's attribution source
 
     size_t                  mFrameCount;            // corresponds to current IAudioRecord, value is
                                                     // reported back by AudioFlinger to the client
@@ -669,6 +790,14 @@ private:
 
     audio_session_t         mSessionId;
     audio_port_handle_t     mPortId;                    // Id from Audio Policy Manager
+
+    /**
+     * mLogSessionId is a string identifying this AudioRecord for the metrics service.
+     * It may be unique or shared with other objects.  An empty string means the
+     * logSessionId is not set.
+     */
+    std::string             mLogSessionId{};
+
     transfer_type           mTransfer;
 
     // Next 5 fields may be changed if IAudioRecord is re-created, but always != 0
@@ -692,6 +821,17 @@ private:
 
     bool                    mInOverrun;         // whether recorder is currently in overrun state
 
+    ExtendedTimestamp       mPreviousTimestamp{}; // used to detect retrograde motion
+    bool                    mTimestampRetrogradePositionReported = false; // reduce log spam
+    bool                    mTimestampRetrogradeTimeReported = false;     // reduce log spam
+
+    // Format conversion. Maybe needed for adding fast tracks whose format is different from server.
+    audio_config_base_t     mServerConfig;
+    size_t                  mServerFrameSize;
+    size_t                  mServerSampleSize;
+    std::unique_ptr<uint8_t[]> mFormatConversionBufRaw;
+    Buffer                  mFormatConversionBuffer;
+
 private:
     class DeathNotifier : public IBinder::DeathRecipient {
     public:
@@ -704,8 +844,6 @@ private:
 
     sp<DeathNotifier>       mDeathNotifier;
     uint32_t                mSequence;              // incremented for each new IAudioRecord attempt
-    uid_t                   mClientUid;
-    pid_t                   mClientPid;
     audio_attributes_t      mAttributes;
 
     // For Device Selection API
@@ -716,30 +854,37 @@ private:
                                               // activity and connected devices
     wp<AudioSystem::AudioDeviceCallback> mDeviceCallback;
 
+    audio_microphone_direction_t mSelectedMicDirection;
+    float mSelectedMicFieldDimension;
+
+    int32_t                    mMaxSharedAudioHistoryMs = 0;
+    std::string                mSharedAudioPackageName = {};
+    int64_t                    mSharedAudioStartMs = 0;
+
 private:
     class MediaMetrics {
       public:
-        MediaMetrics() : mAnalyticsItem(MediaAnalyticsItem::create("audiorecord")),
+        MediaMetrics() : mMetricsItem(mediametrics::Item::create("audiorecord")),
                          mCreatedNs(systemTime(SYSTEM_TIME_REALTIME)),
                          mStartedNs(0), mDurationNs(0), mCount(0),
                          mLastError(NO_ERROR) {
         }
         ~MediaMetrics() {
-            // mAnalyticsItem alloc failure will be flagged in the constructor
+            // mMetricsItem alloc failure will be flagged in the constructor
             // don't log empty records
-            if (mAnalyticsItem->count() > 0) {
-                mAnalyticsItem->selfrecord();
+            if (mMetricsItem->count() > 0) {
+                mMetricsItem->selfrecord();
             }
         }
         void gather(const AudioRecord *record);
-        MediaAnalyticsItem *dup() { return mAnalyticsItem->dup(); }
+        mediametrics::Item *dup() { return mMetricsItem->dup(); }
 
         void logStart(nsecs_t when) { mStartedNs = when; mCount++; }
         void logStop(nsecs_t when) { mDurationNs += (when-mStartedNs); mStartedNs = 0;}
         void markError(status_t errcode, const char *func)
                  { mLastError = errcode; mLastErrorFunc = func;}
       private:
-        std::unique_ptr<MediaAnalyticsItem> mAnalyticsItem;
+        std::unique_ptr<mediametrics::Item> mMetricsItem;
         nsecs_t mCreatedNs;     // XXX: perhaps not worth it in production
         nsecs_t mStartedNs;
         nsecs_t mDurationNs;
@@ -749,6 +894,10 @@ private:
         std::string mLastErrorFunc;
     };
     MediaMetrics mMediaMetrics;
+    std::string mMetricsId;  // GUARDED_BY(mLock), could change in createRecord_l().
+    std::string mCallerName; // for example "aaudio"
+
+    void reportError(status_t status, const char *event, const char *message) const;
 };
 
 }; // namespace android

@@ -14,13 +14,13 @@
  * limitations under the License.
  */
 
-#include <hidl/Convert.h>
+#include <android-base/properties.h>
 
-#include <hidl/HidlCameraService.h>
-
-#include <hidl/HidlCameraDeviceUser.h>
 #include <hidl/AidlCameraDeviceCallbacks.h>
 #include <hidl/AidlCameraServiceListener.h>
+#include <hidl/HidlCameraService.h>
+#include <hidl/HidlCameraDeviceUser.h>
+#include <hidl/Utils.h>
 
 #include <hidl/HidlTransportSupport.h>
 
@@ -34,11 +34,12 @@ namespace implementation {
 using frameworks::cameraservice::service::V2_0::implementation::HidlCameraService;
 using hardware::hidl_vec;
 using hardware::cameraservice::utils::conversion::convertToHidl;
+using hardware::cameraservice::utils::conversion::filterVndkKeys;
 using hardware::cameraservice::utils::conversion::B2HStatus;
 using hardware::Void;
 
 using device::V2_0::implementation::H2BCameraDeviceCallbacks;
-using device::V2_0::implementation::HidlCameraDeviceUser;
+using device::V2_1::implementation::HidlCameraDeviceUser;
 using service::V2_0::implementation::H2BCameraServiceListener;
 using HCameraMetadataType = frameworks::cameraservice::common::V2_0::CameraMetadataType;
 using HVendorTag = frameworks::cameraservice::common::V2_0::VendorTag;
@@ -53,13 +54,18 @@ sp<HidlCameraService> HidlCameraService::getInstance(android::CameraService *cs)
     return gHidlCameraService;
 }
 
+HidlCameraService::HidlCameraService(android::CameraService *cs) : mAidlICameraService(cs) {
+    mVndkVersion = base::GetIntProperty("ro.vndk.version", __ANDROID_API_FUTURE__);
+};
+
 Return<void>
 HidlCameraService::getCameraCharacteristics(const hidl_string& cameraId,
                                             getCameraCharacteristics_cb _hidl_cb) {
     android::CameraMetadata cameraMetadata;
     HStatus status = HStatus::NO_ERROR;
     binder::Status serviceRet =
-        mAidlICameraService->getCameraCharacteristics(String16(cameraId.c_str()), &cameraMetadata);
+        mAidlICameraService->getCameraCharacteristics(String16(cameraId.c_str()),
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__, &cameraMetadata);
     HCameraMetadata hidlMetadata;
     if (!serviceRet.isOk()) {
         switch(serviceRet.serviceSpecificErrorCode()) {
@@ -74,6 +80,11 @@ HidlCameraService::getCameraCharacteristics(const hidl_string& cameraId,
                 status = B2HStatus(serviceRet);
           }
         _hidl_cb(status, hidlMetadata);
+        return Void();
+    }
+    if (filterVndkKeys(mVndkVersion, cameraMetadata) != OK) {
+        ALOGE("%s: Unable to filter vndk metadata keys for version %d", __FUNCTION__, mVndkVersion);
+        _hidl_cb(HStatus::UNKNOWN_ERROR, hidlMetadata);
         return Void();
     }
     const camera_metadata_t *rawMetadata = cameraMetadata.getAndLock();
@@ -96,15 +107,16 @@ Return<void> HidlCameraService::connectDevice(const sp<HCameraDeviceCallback>& h
     // Create a hardware::camera2::ICameraDeviceCallback object which internally
     // calls callback functions passed through hCallback.
     sp<H2BCameraDeviceCallbacks> hybridCallbacks = new H2BCameraDeviceCallbacks(hCallback);
-    if (!hybridCallbacks->initializeLooper()) {
+    if (!hybridCallbacks->initializeLooper(mVndkVersion)) {
         ALOGE("Unable to handle callbacks on device, cannot connect");
         _hidl_cb(HStatus::UNKNOWN_ERROR, nullptr);
         return Void();
     }
     sp<hardware::camera2::ICameraDeviceCallbacks> callbacks = hybridCallbacks;
     binder::Status serviceRet = mAidlICameraService->connectDevice(
-            callbacks, String16(cameraId.c_str()), String16(""),
-            hardware::ICameraService::USE_CALLING_UID, /*out*/&deviceRemote);
+            callbacks, String16(cameraId.c_str()), String16(""), {},
+            hardware::ICameraService::USE_CALLING_UID, 0/*oomScoreOffset*/,
+            /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*out*/&deviceRemote);
     HStatus status = HStatus::NO_ERROR;
     if (!serviceRet.isOk()) {
         ALOGE("%s: Unable to connect to camera device", __FUNCTION__);
@@ -154,14 +166,49 @@ HidlCameraService::searchListenerCacheLocked(sp<HCameraServiceListener> hListene
 
 Return<void> HidlCameraService::addListener(const sp<HCameraServiceListener>& hCsListener,
                                             addListener_cb _hidl_cb) {
-    if (mAidlICameraService == nullptr) {
-        _hidl_cb(HStatus::UNKNOWN_ERROR, {});
+    std::vector<hardware::CameraStatus> cameraStatusAndIds{};
+    HStatus status = addListenerInternal<HCameraServiceListener>(
+            hCsListener, &cameraStatusAndIds);
+    if (status != HStatus::NO_ERROR) {
+        _hidl_cb(status, {});
         return Void();
     }
-    if (hCsListener == nullptr) {
-        ALOGE("%s listener must not be NULL", __FUNCTION__);
-        _hidl_cb(HStatus::ILLEGAL_ARGUMENT, {});
+
+    hidl_vec<HCameraStatusAndId> hCameraStatusAndIds;
+    //Convert cameraStatusAndIds to HIDL and call callback
+    convertToHidl(cameraStatusAndIds, &hCameraStatusAndIds);
+    _hidl_cb(status, hCameraStatusAndIds);
+
+    return Void();
+}
+
+Return<void> HidlCameraService::addListener_2_1(const sp<HCameraServiceListener2_1>& hCsListener,
+                                                addListener_2_1_cb _hidl_cb) {
+    std::vector<hardware::CameraStatus> cameraStatusAndIds{};
+    HStatus status = addListenerInternal<HCameraServiceListener2_1>(
+            hCsListener, &cameraStatusAndIds);
+    if (status != HStatus::NO_ERROR) {
+        _hidl_cb(status, {});
         return Void();
+    }
+
+    hidl_vec<frameworks::cameraservice::service::V2_1::CameraStatusAndId> hCameraStatusAndIds;
+    //Convert cameraStatusAndIds to HIDL and call callback
+    convertToHidl(cameraStatusAndIds, &hCameraStatusAndIds);
+    _hidl_cb(status, hCameraStatusAndIds);
+
+    return Void();
+}
+
+template<class T>
+HStatus HidlCameraService::addListenerInternal(const sp<T>& hCsListener,
+        std::vector<hardware::CameraStatus>* cameraStatusAndIds) {
+    if (mAidlICameraService == nullptr) {
+        return HStatus::UNKNOWN_ERROR;
+    }
+    if (hCsListener == nullptr || cameraStatusAndIds == nullptr) {
+        ALOGE("%s listener and cameraStatusAndIds must not be NULL", __FUNCTION__);
+        return HStatus::ILLEGAL_ARGUMENT;
     }
     sp<hardware::ICameraServiceListener> csListener = nullptr;
     // Check the cache for previously registered callbacks
@@ -177,25 +224,27 @@ Return<void> HidlCameraService::addListener(const sp<HCameraServiceListener>& hC
         } else {
             ALOGE("%s: Trying to add a listener %p already registered",
                   __FUNCTION__, hCsListener.get());
-            _hidl_cb(HStatus::ILLEGAL_ARGUMENT, {});
-            return Void();
+            return HStatus::ILLEGAL_ARGUMENT;
         }
     }
-    std::vector<hardware::CameraStatus> cameraStatusAndIds{};
     binder::Status serviceRet =
-        mAidlICameraService->addListenerHelper(csListener, &cameraStatusAndIds, true);
+            mAidlICameraService->addListenerHelper(csListener, cameraStatusAndIds, true);
     HStatus status = HStatus::NO_ERROR;
     if (!serviceRet.isOk()) {
-      ALOGE("%s: Unable to add camera device status listener", __FUNCTION__);
-      status = B2HStatus(serviceRet);
-      _hidl_cb(status, {});
-      return Void();
+        ALOGE("%s: Unable to add camera device status listener", __FUNCTION__);
+        status = B2HStatus(serviceRet);
+        return status;
     }
-    hidl_vec<HCameraStatusAndId> hCameraStatusAndIds;
-    //Convert cameraStatusAndIds to HIDL and call callback
-    convertToHidl(cameraStatusAndIds, &hCameraStatusAndIds);
-    _hidl_cb(status, hCameraStatusAndIds);
-    return Void();
+    cameraStatusAndIds->erase(std::remove_if(cameraStatusAndIds->begin(), cameraStatusAndIds->end(),
+            [this](const hardware::CameraStatus& s) {
+                bool supportsHAL3 = false;
+                binder::Status sRet =
+                            mAidlICameraService->supportsCameraApi(String16(s.cameraId),
+                                    hardware::ICameraService::API_VERSION_2, &supportsHAL3);
+                return !sRet.isOk() || !supportsHAL3;
+            }), cameraStatusAndIds->end());
+
+    return HStatus::NO_ERROR;
 }
 
 Return<HStatus> HidlCameraService::removeListener(const sp<HCameraServiceListener>& hCsListener) {
@@ -240,6 +289,9 @@ Return<void> HidlCameraService::getCameraVendorTagSections(getCameraVendorTagSec
         size_t numSections = sectionNames->size();
         std::vector<std::vector<HVendorTag>> tagsBySection(numSections);
         int tagCount = desc->getTagCount();
+        if (tagCount <= 0) {
+            continue;
+        }
         std::vector<uint32_t> tags(tagCount);
         desc->getTagArray(tags.data());
         for (int i = 0; i < tagCount; i++) {

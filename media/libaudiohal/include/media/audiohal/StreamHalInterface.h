@@ -25,27 +25,34 @@
 #include <utils/Errors.h>
 #include <utils/RefBase.h>
 #include <utils/String8.h>
+#include <utils/Vector.h>
 
 namespace android {
 
 class StreamHalInterface : public virtual RefBase
 {
   public:
-    // Return the sampling rate in Hz - eg. 44100.
-    virtual status_t getSampleRate(uint32_t *rate) = 0;
-
     // Return size of input/output buffer in bytes for this stream - eg. 4800.
     virtual status_t getBufferSize(size_t *size) = 0;
 
-    // Return the channel mask.
-    virtual status_t getChannelMask(audio_channel_mask_t *mask) = 0;
-
-    // Return the audio format - e.g. AUDIO_FORMAT_PCM_16_BIT.
-    virtual status_t getFormat(audio_format_t *format) = 0;
+    // Return the base configuration of the stream:
+    //   - channel mask;
+    //   - format - e.g. AUDIO_FORMAT_PCM_16_BIT;
+    //   - sampling rate in Hz - eg. 44100.
+    virtual status_t getAudioProperties(audio_config_base_t *configBase) = 0;
 
     // Convenience method.
-    virtual status_t getAudioProperties(
-            uint32_t *sampleRate, audio_channel_mask_t *mask, audio_format_t *format) = 0;
+    inline status_t getAudioProperties(
+            uint32_t *sampleRate, audio_channel_mask_t *mask, audio_format_t *format) {
+        audio_config_base_t config = AUDIO_CONFIG_BASE_INITIALIZER;
+        const status_t result = getAudioProperties(&config);
+        if (result == NO_ERROR) {
+            if (sampleRate != nullptr) *sampleRate = config.sample_rate;
+            if (mask != nullptr) *mask = config.channel_mask;
+            if (format != nullptr) *format = config.format;
+        }
+        return result;
+    }
 
     // Set audio stream parameters.
     virtual status_t setParameters(const String8& kvPairs) = 0;
@@ -63,7 +70,7 @@ class StreamHalInterface : public virtual RefBase
     // Put the audio hardware input/output into standby mode.
     virtual status_t standby() = 0;
 
-    virtual status_t dump(int fd) = 0;
+    virtual status_t dump(int fd, const Vector<String16>& args = {}) = 0;
 
     // Start a stream operating in mmap mode.
     virtual status_t start() = 0;
@@ -82,6 +89,12 @@ class StreamHalInterface : public virtual RefBase
     // (must match the priority of the audioflinger's thread that calls 'read' / 'write')
     virtual status_t setHalThreadPriority(int priority) = 0;
 
+    virtual status_t legacyCreateAudioPatch(const struct audio_port_config& port,
+                                            std::optional<audio_source_t> source,
+                                            audio_devices_t type) = 0;
+
+    virtual status_t legacyReleaseAudioPatch() = 0;
+
   protected:
     // Subclasses can not be constructed directly by clients.
     StreamHalInterface() {}
@@ -99,6 +112,27 @@ class StreamOutHalInterfaceCallback : public virtual RefBase {
   protected:
     StreamOutHalInterfaceCallback() {}
     virtual ~StreamOutHalInterfaceCallback() {}
+};
+
+class StreamOutHalInterfaceEventCallback : public virtual RefBase {
+public:
+    virtual void onCodecFormatChanged(const std::basic_string<uint8_t>& metadataBs) = 0;
+
+protected:
+    StreamOutHalInterfaceEventCallback() {}
+    virtual ~StreamOutHalInterfaceEventCallback() {}
+};
+
+class StreamOutHalInterfaceLatencyModeCallback : public virtual RefBase {
+public:
+    /**
+     * Called with the new list of supported latency modes when a change occurs.
+     */
+    virtual void onRecommendedLatencyModeChanged(std::vector<audio_latency_mode_t> modes) = 0;
+
+protected:
+    StreamOutHalInterfaceLatencyModeCallback() {}
+    virtual ~StreamOutHalInterfaceLatencyModeCallback() {}
 };
 
 class StreamOutHalInterface : public virtual StreamHalInterface {
@@ -149,13 +183,75 @@ class StreamOutHalInterface : public virtual StreamHalInterface {
     virtual status_t getPresentationPosition(uint64_t *frames, struct timespec *timestamp) = 0;
 
     struct SourceMetadata {
-        std::vector<playback_track_metadata_t> tracks;
+        std::vector<playback_track_metadata_v7_t> tracks;
     };
+
     /**
      * Called when the metadata of the stream's source has been changed.
      * @param sourceMetadata Description of the audio that is played by the clients.
      */
     virtual status_t updateSourceMetadata(const SourceMetadata& sourceMetadata) = 0;
+
+    // Returns the Dual Mono mode presentation setting.
+    virtual status_t getDualMonoMode(audio_dual_mono_mode_t* mode) = 0;
+
+    // Sets the Dual Mono mode presentation on the output device.
+    virtual status_t setDualMonoMode(audio_dual_mono_mode_t mode) = 0;
+
+    // Returns the Audio Description Mix level in dB.
+    virtual status_t getAudioDescriptionMixLevel(float* leveldB) = 0;
+
+    // Sets the Audio Description Mix level in dB.
+    virtual status_t setAudioDescriptionMixLevel(float leveldB) = 0;
+
+    // Retrieves current playback rate parameters.
+    virtual status_t getPlaybackRateParameters(audio_playback_rate_t* playbackRate) = 0;
+
+    // Sets the playback rate parameters that control playback behavior.
+    virtual status_t setPlaybackRateParameters(const audio_playback_rate_t& playbackRate) = 0;
+
+    virtual status_t setEventCallback(const sp<StreamOutHalInterfaceEventCallback>& callback) = 0;
+
+    /**
+     * Indicates the requested latency mode for this output stream.
+     *
+     * The requested mode can be one of the modes returned by
+     * getRecommendedLatencyModes() API.
+     *
+     * @param mode the requested latency mode.
+     * @return operation completion status.
+     */
+    virtual status_t setLatencyMode(audio_latency_mode_t mode) = 0;
+
+    /**
+     * Indicates which latency modes are currently supported on this output stream.
+     * If the transport protocol (e.g Bluetooth A2DP) used by this output stream to reach
+     * the output device supports variable latency modes, the HAL indicates which
+     * modes are currently supported.
+     * The framework can then call setLatencyMode() with one of the supported modes to select
+     * the desired operation mode.
+     *
+     * @param modes currrently supported latency modes.
+     * @return operation completion status.
+     */
+    virtual status_t getRecommendedLatencyModes(std::vector<audio_latency_mode_t> *modes) = 0;
+
+    /**
+     * Set the callback interface for notifying changes in supported latency modes.
+     *
+     * Calling this method with a null pointer will result in releasing
+     * the callback.
+     *
+     * @param callback the registered callback or null to unregister.
+     * @return operation completion status.
+     */
+    virtual status_t setLatencyModeCallback(
+            const sp<StreamOutHalInterfaceLatencyModeCallback>& callback) = 0;
+
+    /**
+     * Signal the end of audio output, interrupting an ongoing 'write' operation.
+     */
+    virtual status_t exit() = 0;
 
   protected:
     virtual ~StreamOutHalInterface() {}
@@ -180,13 +276,13 @@ class StreamInHalInterface : public virtual StreamHalInterface {
     virtual status_t getActiveMicrophones(std::vector<media::MicrophoneInfo> *microphones) = 0;
 
     // Set direction for capture processing
-    virtual status_t setMicrophoneDirection(audio_microphone_direction_t) = 0;
+    virtual status_t setPreferredMicrophoneDirection(audio_microphone_direction_t) = 0;
 
     // Set zoom factor for capture stream
-    virtual status_t setMicrophoneFieldDimension(float zoom) = 0;
+    virtual status_t setPreferredMicrophoneFieldDimension(float zoom) = 0;
 
     struct SinkMetadata {
-        std::vector<record_track_metadata_t> tracks;
+        std::vector<record_track_metadata_v7_t> tracks;
     };
     /**
      * Called when the metadata of the stream's sink has been changed.

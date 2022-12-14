@@ -39,7 +39,23 @@ status_t CaptureResultExtras::readFromParcel(const android::Parcel *parcel) {
     parcel->readInt64(&frameNumber);
     parcel->readInt32(&partialResultCount);
     parcel->readInt32(&errorStreamId);
-
+    auto physicalCameraIdPresent = parcel->readBool();
+    if (physicalCameraIdPresent) {
+        String16 cameraId;
+        status_t res = OK;
+        if ((res = parcel->readString16(&cameraId)) != OK) {
+            ALOGE("%s: Failed to read camera id: %d", __FUNCTION__, res);
+            return res;
+        }
+        errorPhysicalCameraId = cameraId;
+    }
+    parcel->readInt64(&lastCompletedRegularFrameNumber);
+    parcel->readInt64(&lastCompletedReprocessFrameNumber);
+    parcel->readInt64(&lastCompletedZslFrameNumber);
+    parcel->readBool(&hasReadoutTimestamp);
+    if (hasReadoutTimestamp) {
+        parcel->readInt64(&readoutTimestamp);
+    }
     return OK;
 }
 
@@ -56,6 +72,23 @@ status_t CaptureResultExtras::writeToParcel(android::Parcel *parcel) const {
     parcel->writeInt64(frameNumber);
     parcel->writeInt32(partialResultCount);
     parcel->writeInt32(errorStreamId);
+    if (errorPhysicalCameraId.size() > 0) {
+        parcel->writeBool(true);
+        status_t res = OK;
+        if ((res = parcel->writeString16(errorPhysicalCameraId)) != OK) {
+            ALOGE("%s: Failed to write physical camera ID to parcel: %d", __FUNCTION__, res);
+            return res;
+        }
+    } else {
+        parcel->writeBool(false);
+    }
+    parcel->writeInt64(lastCompletedRegularFrameNumber);
+    parcel->writeInt64(lastCompletedReprocessFrameNumber);
+    parcel->writeInt64(lastCompletedZslFrameNumber);
+    parcel->writeBool(hasReadoutTimestamp);
+    if (hasReadoutTimestamp) {
+        parcel->writeInt64(readoutTimestamp);
+    }
 
     return OK;
 }
@@ -63,7 +96,7 @@ status_t CaptureResultExtras::writeToParcel(android::Parcel *parcel) const {
 status_t PhysicalCaptureResultInfo::readFromParcel(const android::Parcel* parcel) {
     status_t res;
 
-    mPhysicalCameraId.remove(mPhysicalCameraId.size());
+    mPhysicalCameraId.setTo(u"");
     mPhysicalCameraMetadata.clear();
 
     if ((res = parcel->readString16(&mPhysicalCameraId)) != OK) {
@@ -95,6 +128,12 @@ status_t PhysicalCaptureResultInfo::writeToParcel(android::Parcel* parcel) const
 
 CaptureResult::CaptureResult() :
         mMetadata(), mResultExtras() {
+}
+
+CaptureResult::CaptureResult(CaptureResult &&otherResult) {
+    mMetadata = std::move(otherResult.mMetadata);
+    mResultExtras = otherResult.mResultExtras;
+    mPhysicalMetadatas = std::move(otherResult.mPhysicalMetadatas);
 }
 
 CaptureResult::CaptureResult(const CaptureResult &otherResult) {

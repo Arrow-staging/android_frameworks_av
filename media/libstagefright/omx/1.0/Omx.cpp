@@ -18,17 +18,15 @@
 #include <list>
 
 #include <android-base/logging.h>
-#include <gui/IGraphicBufferProducer.h>
 #include <media/openmax/OMX_Core.h>
 #include <media/openmax/OMX_AsString.h>
 
 #include <media/stagefright/omx/OMXUtils.h>
-#include <media/stagefright/omx/OMXMaster.h>
+#include <media/stagefright/omx/OMXStore.h>
 #include <media/stagefright/omx/OmxGraphicBufferSource.h>
 
 #include <media/stagefright/omx/1.0/WOmxNode.h>
 #include <media/stagefright/omx/1.0/WOmxObserver.h>
-#include <media/stagefright/omx/1.0/WGraphicBufferProducer.h>
 #include <media/stagefright/omx/1.0/WGraphicBufferSource.h>
 #include <media/stagefright/omx/1.0/Conversion.h>
 #include <media/stagefright/omx/1.0/Omx.h>
@@ -43,19 +41,21 @@ namespace implementation {
 constexpr size_t kMaxNodeInstances = (1 << 16);
 
 Omx::Omx() :
-    mMaster(new OMXMaster()),
+    mStore(new OMXStore()),
     mParser() {
+    (void)mParser.parseXmlFilesInSearchDirs();
+    (void)mParser.parseXmlPath(mParser.defaultProfilingResultsXmlPath);
 }
 
 Omx::~Omx() {
-    delete mMaster;
+    delete mStore;
 }
 
 Return<void> Omx::listNodes(listNodes_cb _hidl_cb) {
     std::list<::android::IOMX::ComponentInfo> list;
     char componentName[256];
     for (OMX_U32 index = 0;
-            mMaster->enumerateComponents(
+            mStore->enumerateComponents(
             componentName, sizeof(componentName), index) == OMX_ErrorNone;
             ++index) {
         list.push_back(::android::IOMX::ComponentInfo());
@@ -63,7 +63,7 @@ Return<void> Omx::listNodes(listNodes_cb _hidl_cb) {
         info.mName = componentName;
         ::android::Vector<::android::String8> roles;
         OMX_ERRORTYPE err =
-                mMaster->getRolesOfComponent(componentName, &roles);
+                mStore->getRolesOfComponent(componentName, &roles);
         if (err == OMX_ErrorNone) {
             for (OMX_U32 i = 0; i < roles.size(); ++i) {
                 info.mRoles.push_back(roles[i]);
@@ -101,7 +101,7 @@ Return<void> Omx::allocateNode(
                 this, new LWOmxObserver(observer), name.c_str());
 
         OMX_COMPONENTTYPE *handle;
-        OMX_ERRORTYPE err = mMaster->makeComponentInstance(
+        OMX_ERRORTYPE err = mStore->makeComponentInstance(
                 name.c_str(), &OMXNodeInstance::kCallbacks,
                 instance.get(), &handle);
 
@@ -146,8 +146,6 @@ Return<void> Omx::allocateNode(
 }
 
 Return<void> Omx::createInputSurface(createInputSurface_cb _hidl_cb) {
-    sp<::android::IGraphicBufferProducer> bufferProducer;
-
     sp<OmxGraphicBufferSource> graphicBufferSource = new OmxGraphicBufferSource();
     status_t err = graphicBufferSource->initCheck();
     if (err != OK) {
@@ -157,10 +155,9 @@ Return<void> Omx::createInputSurface(createInputSurface_cb _hidl_cb) {
         _hidl_cb(toStatus(err), nullptr, nullptr);
         return Void();
     }
-    bufferProducer = graphicBufferSource->getIGraphicBufferProducer();
 
     _hidl_cb(toStatus(OK),
-            new TWGraphicBufferProducer(bufferProducer),
+            graphicBufferSource->getHGraphicBufferProducer_V1_0(),
             new TWGraphicBufferSource(graphicBufferSource));
     return Void();
 }
@@ -211,7 +208,7 @@ status_t Omx::freeNode(sp<OMXNodeInstance> const& instance) {
 
     OMX_ERRORTYPE err = OMX_ErrorNone;
     if (instance->handle() != NULL) {
-        err = mMaster->destroyComponentInstance(
+        err = mStore->destroyComponentInstance(
                 static_cast<OMX_COMPONENTTYPE*>(instance->handle()));
     }
     return StatusFromOMXError(err);

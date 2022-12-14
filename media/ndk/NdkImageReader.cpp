@@ -25,10 +25,10 @@
 #include <cutils/atomic.h>
 #include <utils/Log.h>
 #include <android_media_Utils.h>
-#include <android_runtime/android_view_Surface.h>
+#include <ui/PublicFormat.h>
 #include <private/android/AHardwareBufferHelpers.h>
 #include <grallocusage/GrallocUsageConversion.h>
-#include <media/stagefright/bqhelper/WGraphicBufferProducer.h>
+#include <gui/bufferqueue/1.0/WGraphicBufferProducer.h>
 
 using namespace android;
 
@@ -63,6 +63,7 @@ AImageReader::isSupportedFormatAndUsage(int32_t format, uint64_t usage) {
         case AIMAGE_FORMAT_YUV_420_888:
         case AIMAGE_FORMAT_JPEG:
         case AIMAGE_FORMAT_RAW16:
+        case AIMAGE_FORMAT_RAW_DEPTH:
         case AIMAGE_FORMAT_RAW_PRIVATE:
         case AIMAGE_FORMAT_RAW10:
         case AIMAGE_FORMAT_RAW12:
@@ -71,6 +72,8 @@ AImageReader::isSupportedFormatAndUsage(int32_t format, uint64_t usage) {
         case AIMAGE_FORMAT_Y8:
         case AIMAGE_FORMAT_HEIC:
         case AIMAGE_FORMAT_DEPTH_JPEG:
+        case AIMAGE_FORMAT_RAW_DEPTH10:
+        case HAL_PIXEL_FORMAT_YCBCR_P010:
             return true;
         case AIMAGE_FORMAT_PRIVATE:
             // For private format, cpu usage is prohibited.
@@ -84,6 +87,7 @@ int
 AImageReader::getNumPlanesForFormat(int32_t format) {
     switch (format) {
         case AIMAGE_FORMAT_YUV_420_888:
+        case HAL_PIXEL_FORMAT_YCBCR_P010:
             return 3;
         case AIMAGE_FORMAT_RGBA_8888:
         case AIMAGE_FORMAT_RGBX_8888:
@@ -92,6 +96,7 @@ AImageReader::getNumPlanesForFormat(int32_t format) {
         case AIMAGE_FORMAT_RGBA_FP16:
         case AIMAGE_FORMAT_JPEG:
         case AIMAGE_FORMAT_RAW16:
+        case AIMAGE_FORMAT_RAW_DEPTH:
         case AIMAGE_FORMAT_RAW_PRIVATE:
         case AIMAGE_FORMAT_RAW10:
         case AIMAGE_FORMAT_RAW12:
@@ -100,6 +105,7 @@ AImageReader::getNumPlanesForFormat(int32_t format) {
         case AIMAGE_FORMAT_Y8:
         case AIMAGE_FORMAT_HEIC:
         case AIMAGE_FORMAT_DEPTH_JPEG:
+        case AIMAGE_FORMAT_RAW_DEPTH10:
             return 1;
         case AIMAGE_FORMAT_PRIVATE:
             return 0;
@@ -110,12 +116,12 @@ AImageReader::getNumPlanesForFormat(int32_t format) {
 
 void
 AImageReader::FrameListener::onFrameAvailable(const BufferItem& /*item*/) {
-    Mutex::Autolock _l(mLock);
     sp<AImageReader> reader = mReader.promote();
     if (reader == nullptr) {
         ALOGW("A frame is available after AImageReader closed!");
         return; // reader has been closed
     }
+    Mutex::Autolock _l(mLock);
     if (mListener.onImageAvailable == nullptr) {
         return; // No callback registered
     }
@@ -140,12 +146,12 @@ AImageReader::FrameListener::setImageListener(AImageReader_ImageListener* listen
 
 void
 AImageReader::BufferRemovedListener::onBufferFreed(const wp<GraphicBuffer>& graphicBuffer) {
-    Mutex::Autolock _l(mLock);
     sp<AImageReader> reader = mReader.promote();
     if (reader == nullptr) {
         ALOGW("A frame is available after AImageReader closed!");
         return; // reader has been closed
     }
+    Mutex::Autolock _l(mLock);
     if (mListener.onBufferRemoved == nullptr) {
         return; // No callback registered
     }
@@ -269,11 +275,16 @@ AImageReader::AImageReader(int32_t width,
       mFrameListener(new FrameListener(this)),
       mBufferRemovedListener(new BufferRemovedListener(this)) {}
 
+AImageReader::~AImageReader() {
+    Mutex::Autolock _l(mLock);
+    LOG_FATAL_IF(mIsOpen, "AImageReader not closed before destruction");
+}
+
 media_status_t
 AImageReader::init() {
     PublicFormat publicFormat = static_cast<PublicFormat>(mFormat);
-    mHalFormat = android_view_Surface_mapPublicFormatToHalFormat(publicFormat);
-    mHalDataSpace = android_view_Surface_mapPublicFormatToHalDataspace(publicFormat);
+    mHalFormat = mapPublicFormatToHalFormat(publicFormat);
+    mHalDataSpace = mapPublicFormatToHalDataspace(publicFormat);
     mHalUsage = AHardwareBuffer_convertToGrallocUsageBits(mUsage);
 
     sp<IGraphicBufferProducer> gbProducer;
@@ -340,12 +351,16 @@ AImageReader::init() {
     }
     mHandler = new CallbackHandler(this);
     mCbLooper->registerHandler(mHandler);
-
+    mIsOpen = true;
     return AMEDIA_OK;
 }
 
-AImageReader::~AImageReader() {
+void AImageReader::close() {
     Mutex::Autolock _l(mLock);
+    if (!mIsOpen) {
+        return;
+    }
+    mIsOpen = false;
     AImageReader_ImageListener nullListener = {nullptr, nullptr};
     setImageListenerLocked(&nullListener);
 
@@ -738,6 +753,7 @@ EXPORT
 void AImageReader_delete(AImageReader* reader) {
     ALOGV("%s", __FUNCTION__);
     if (reader != nullptr) {
+        reader->close();
         reader->decStrong((void*) AImageReader_delete);
     }
     return;

@@ -57,7 +57,7 @@
 #include <algorithm>
 
 using namespace android;
-using ::android::hardware::ICameraServiceDefault;
+using ::android::hardware::ICameraService;
 using ::android::hardware::camera2::ICameraDeviceUser;
 
 #define ASSERT_NOT_NULL(x) \
@@ -83,12 +83,40 @@ public:
         return binder::Status::ok();
     };
 
+    virtual binder::Status onPhysicalCameraStatusChanged(int32_t /*status*/,
+            const String16& /*cameraId*/, const String16& /*physicalCameraId*/) {
+        // No op
+        return binder::Status::ok();
+    };
+
     virtual binder::Status onTorchStatusChanged(int32_t status, const String16& cameraId) {
         Mutex::Autolock l(mLock);
         mCameraTorchStatuses[cameraId] = status;
         mTorchCondition.broadcast();
         return binder::Status::ok();
     };
+
+    virtual binder::Status onTorchStrengthLevelChanged(const String16& /*cameraId*/,
+            int32_t /*torchStrength*/) {
+        // No op
+        return binder::Status::ok();
+    }
+
+    virtual binder::Status onCameraAccessPrioritiesChanged() {
+        // No op
+        return binder::Status::ok();
+    }
+
+    virtual binder::Status onCameraOpened(const String16& /*cameraId*/,
+            const String16& /*clientPackageName*/) {
+        // No op
+        return binder::Status::ok();
+    }
+
+    virtual binder::Status onCameraClosed(const String16& /*cameraId*/) {
+        // No op
+        return binder::Status::ok();
+    }
 
     bool waitForNumCameras(size_t num) const {
         Mutex::Autolock l(mLock);
@@ -341,7 +369,8 @@ TEST(CameraServiceBinderTest, CheckBinderCameraService) {
 
         // Check metadata binder call
         CameraMetadata metadata;
-        res = service->getCameraCharacteristics(cameraId, &metadata);
+        res = service->getCameraCharacteristics(cameraId,
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__, &metadata);
         EXPECT_TRUE(res.isOk()) << res;
         EXPECT_FALSE(metadata.isEmpty());
 
@@ -356,7 +385,8 @@ TEST(CameraServiceBinderTest, CheckBinderCameraService) {
         sp<TestCameraDeviceCallbacks> callbacks(new TestCameraDeviceCallbacks());
         sp<hardware::camera2::ICameraDeviceUser> device;
         res = service->connectDevice(callbacks, cameraId, String16("meeeeeeeee!"),
-                hardware::ICameraService::USE_CALLING_UID, /*out*/&device);
+                {}, hardware::ICameraService::USE_CALLING_UID, /*oomScoreOffset*/ 0,
+                /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*out*/&device);
         EXPECT_TRUE(res.isOk()) << res;
         ASSERT_NE(nullptr, device.get());
         device->disconnect();
@@ -398,7 +428,8 @@ protected:
         {
             SCOPED_TRACE("openNewDevice");
             binder::Status res = service->connectDevice(callbacks, deviceId, String16("meeeeeeeee!"),
-                    hardware::ICameraService::USE_CALLING_UID, /*out*/&device);
+                    {}, hardware::ICameraService::USE_CALLING_UID, /*oomScoreOffset*/ 0,
+                    /*targetSdkVersion*/__ANDROID_API_FUTURE__, /*out*/&device);
             EXPECT_TRUE(res.isOk()) << res;
         }
         auto p = std::make_pair(callbacks, device);
@@ -491,7 +522,9 @@ TEST_F(CameraClientBinderTest, CheckBinderCameraDeviceUser) {
         EXPECT_TRUE(res.isOk()) << res;
         EXPECT_LE(0, streamId);
         CameraMetadata sessionParams;
-        res = device->endConfigure(/*isConstrainedHighSpeed*/ false, sessionParams);
+        std::vector<int> offlineStreamIds;
+        res = device->endConfigure(/*isConstrainedHighSpeed*/ false, sessionParams,
+                ns2ms(systemTime()), &offlineStreamIds);
         EXPECT_TRUE(res.isOk()) << res;
         EXPECT_FALSE(callbacks->hadError());
 
@@ -502,7 +535,7 @@ TEST_F(CameraClientBinderTest, CheckBinderCameraDeviceUser) {
         bool queryStatus;
         res = device->isSessionConfigurationSupported(sessionConfiguration, &queryStatus);
         EXPECT_TRUE(res.isOk() ||
-                (res.serviceSpecificErrorCode() == ICameraServiceDefault::ERROR_INVALID_OPERATION))
+                (res.serviceSpecificErrorCode() == ICameraService::ERROR_INVALID_OPERATION))
                 << res;
         if (res.isOk()) {
             EXPECT_TRUE(queryStatus);
@@ -602,7 +635,8 @@ TEST_F(CameraClientBinderTest, CheckBinderCameraDeviceUser) {
         EXPECT_TRUE(res.isOk()) << res;
         res = device->deleteStream(streamId);
         EXPECT_TRUE(res.isOk()) << res;
-        res = device->endConfigure(/*isConstrainedHighSpeed*/ false, sessionParams);
+        res = device->endConfigure(/*isConstrainedHighSpeed*/ false, sessionParams,
+                ns2ms(systemTime()), &offlineStreamIds);
         EXPECT_TRUE(res.isOk()) << res;
 
         sleep(/*second*/1); // allow some time for errors to show up, if any

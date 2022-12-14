@@ -27,22 +27,21 @@
 #include <binder/ProcessState.h>
 #include <binder/IServiceManager.h>
 #include <cutils/properties.h>
+#include <datasource/DataSourceFactory.h>
 #include <media/DataSource.h>
 #include <media/IMediaHTTPService.h>
-#include <media/MediaSource.h>
+#include <media/stagefright/MediaSource.h>
 #include <media/OMXBuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/ALooper.h>
-#include <media/stagefright/DataSourceFactory.h>
 #include <media/stagefright/InterfaceUtils.h>
 #include <media/stagefright/MediaBuffer.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/MediaExtractorFactory.h>
 #include <media/stagefright/MetaData.h>
+#include <media/stagefright/OMXClient.h>
 #include <media/stagefright/SimpleDecodingSource.h>
-#include <android/hardware/media/omx/1.0/IOmx.h>
-#include <media/omx/1.0/WOmx.h>
 #include <system/window.h>
 
 #define DEFAULT_TIMEOUT         500000
@@ -81,12 +80,13 @@ status_t Harness::initCheck() const {
 }
 
 status_t Harness::initOMX() {
-    using namespace ::android::hardware::media::omx::V1_0;
-    sp<IOmx> tOmx = IOmx::getService();
-    if (tOmx == nullptr) {
+    OMXClient client;
+    if (client.connect() != OK) {
+        ALOGE("Failed to connect to OMX to create persistent input surface.");
         return NO_INIT;
     }
-    mOMX = new utils::LWOmx(tOmx);
+
+    mOMX = client.interface();
 
     return mOMX != 0 ? OK : NO_INIT;
 }
@@ -211,6 +211,17 @@ status_t Harness::allocatePortBuffers(
     status_t err = getPortDefinition(portIndex, &def);
     EXPECT_SUCCESS(err, "getPortDefinition");
 
+    switch (def.eDomain) {
+        case OMX_PortDomainVideo:
+            EXPECT(def.format.video.cMIMEType == 0, "portDefinition video MIME");
+            break;
+        case OMX_PortDomainAudio:
+            EXPECT(def.format.audio.cMIMEType == 0, "portDefinition audio MIME");
+            break;
+        default:
+            break;
+    }
+
     for (OMX_U32 i = 0; i < def.nBufferCountActual; ++i) {
         Buffer buffer;
         buffer.mFlags = 0;
@@ -278,7 +289,7 @@ private:
 
 static sp<IMediaExtractor> CreateExtractorFromURI(const char *uri) {
     sp<DataSource> source =
-        DataSourceFactory::CreateFromURI(NULL /* httpService */, uri);
+        DataSourceFactory::getInstance()->CreateFromURI(NULL /* httpService */, uri);
 
     if (source == NULL) {
         return NULL;

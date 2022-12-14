@@ -22,8 +22,8 @@
 #include "mp4enc_api.h"
 #include "OMX_Video.h"
 
-#include <HardwareAPI.h>
-#include <MetadataBufferType.h>
+#include <media/hardware/HardwareAPI.h>
+#include <media/hardware/MetadataBufferType.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/AUtils.h>
 #include <media/stagefright/MediaDefs.h>
@@ -354,7 +354,7 @@ OMX_ERRORTYPE SoftMPEG4Encoder::internalSetParameter(
             }
 
             if (mpeg4type->eProfile != OMX_VIDEO_MPEG4ProfileCore ||
-                mpeg4type->eLevel != OMX_VIDEO_MPEG4Level2 ||
+                mpeg4type->eLevel > OMX_VIDEO_MPEG4Level2 ||
                 (mpeg4type->nAllowedPictureTypes & OMX_VIDEO_PictureTypeB) ||
                 mpeg4type->nBFrames != 0 ||
                 mpeg4type->nIDCVLCThreshold != 0 ||
@@ -528,6 +528,7 @@ void SoftMPEG4Encoder::onReset() {
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 android::SoftOMXComponent *createSoftOMXComponent(
         const char *name, const OMX_CALLBACKTYPE *callbacks,
         OMX_PTR appData, OMX_COMPONENTTYPE **component) {

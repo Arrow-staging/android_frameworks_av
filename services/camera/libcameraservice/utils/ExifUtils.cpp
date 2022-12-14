@@ -603,13 +603,13 @@ bool ExifUtilsImpl::setGpsTimestamp(const struct tm& t) {
 }
 
 bool ExifUtilsImpl::setImageHeight(uint32_t length) {
-    SET_LONG(EXIF_IFD_0, EXIF_TAG_IMAGE_LENGTH, length);
+    SET_SHORT(EXIF_IFD_0, EXIF_TAG_IMAGE_LENGTH, length);
     SET_LONG(EXIF_IFD_EXIF, EXIF_TAG_PIXEL_Y_DIMENSION, length);
     return true;
 }
 
 bool ExifUtilsImpl::setImageWidth(uint32_t width) {
-    SET_LONG(EXIF_IFD_0, EXIF_TAG_IMAGE_WIDTH, width);
+    SET_SHORT(EXIF_IFD_0, EXIF_TAG_IMAGE_WIDTH, width);
     SET_LONG(EXIF_IFD_EXIF, EXIF_TAG_PIXEL_X_DIMENSION, width);
     return true;
 }
@@ -916,11 +916,25 @@ bool ExifUtilsImpl::setFromMetadata(const CameraMetadata& metadata,
         ALOGV("%s: Cannot find focal length in metadata.", __FUNCTION__);
     }
 
+    int32_t sensorPixelMode = ANDROID_SENSOR_PIXEL_MODE_DEFAULT;
+    camera_metadata_ro_entry sensorPixelModeEntry = metadata.find(ANDROID_SENSOR_PIXEL_MODE);
+    if (sensorPixelModeEntry.count != 0) {
+        sensorPixelMode = sensorPixelModeEntry.data.u8[0];
+        if (sensorPixelMode != ANDROID_SENSOR_PIXEL_MODE_DEFAULT &&
+            sensorPixelMode != ANDROID_SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION) {
+            ALOGE("%s: Request sensor pixel mode is not one of the valid values %d",
+                      __FUNCTION__, sensorPixelMode);
+            return false;
+        }
+    }
+    int32_t activeArrayTag = sensorPixelMode == ANDROID_SENSOR_PIXEL_MODE_MAXIMUM_RESOLUTION ?
+            ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE_MAXIMUM_RESOLUTION :
+                    ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE;
     if (metadata.exists(ANDROID_SCALER_CROP_REGION) &&
-            staticInfo.exists(ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE)) {
+            staticInfo.exists(activeArrayTag)) {
         entry = metadata.find(ANDROID_SCALER_CROP_REGION);
         camera_metadata_ro_entry activeArrayEntry =
-                staticInfo.find(ANDROID_SENSOR_INFO_ACTIVE_ARRAY_SIZE);
+                staticInfo.find(activeArrayTag);
 
         if (!setDigitalZoomRatio(entry.data.i32[2], entry.data.i32[3],
                 activeArrayEntry.data.i32[2], activeArrayEntry.data.i32[3])) {

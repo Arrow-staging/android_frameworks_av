@@ -1,9 +1,19 @@
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_av_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_av_license"],
+}
+
 cc_library_shared {
     name: "libaudiohal",
 
     srcs: [
         "DevicesFactoryHalInterface.cpp",
         "EffectsFactoryHalInterface.cpp",
+        "FactoryHalHidl.cpp",
     ],
 
     cflags: [
@@ -12,21 +22,26 @@ cc_library_shared {
         "-Werror",
     ],
 
-    shared_libs: [
-        "android.hardware.audio.effect@2.0",
-        "android.hardware.audio.effect@4.0",
-        "android.hardware.audio.effect@5.0",
-        "android.hardware.audio@2.0",
-        "android.hardware.audio@4.0",
-        "android.hardware.audio@5.0",
-        "libaudiohal@2.0",
+    required: [
         "libaudiohal@4.0",
         "libaudiohal@5.0",
+        "libaudiohal@6.0",
+        "libaudiohal@7.0",
+        "libaudiohal@7.1",
+    ],
+
+    shared_libs: [
+        "audioclient-types-aidl-cpp",
+        "libdl",
+        "libhidlbase",
+        "liblog",
         "libutils",
     ],
 
     header_libs: [
-        "libaudiohal_headers"
+        "libaudiohal_headers",
+        "libbase_headers",
+        "libmediautils_headers",
     ]
 }
 
@@ -57,4 +72,8 @@ cc_library_headers {
     name: "libaudiohal_headers",
 
     export_include_dirs: ["include"],
+
+    // This is needed because the stream interface includes media/MicrophoneInfo.h
+    header_libs: ["av-headers"],
+    export_header_lib_headers: ["av-headers"],
 }

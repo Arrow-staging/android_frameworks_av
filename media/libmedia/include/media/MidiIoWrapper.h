@@ -18,13 +18,11 @@
 #define MIDI_IO_WRAPPER_H_
 
 #include <libsonivox/eas_types.h>
-
-#include <media/DataSourceBase.h>
+#include <utils/Mutex.h>
 
 namespace android {
 
 struct CDataSource;
-class DataSourceUnwrapper;
 
 class MidiIoWrapper {
 public:
@@ -35,16 +33,27 @@ public:
     ~MidiIoWrapper();
 
     int readAt(void *buffer, int offset, int size);
+    int unbufferedReadAt(void *buffer, int offset, int size);
     int size();
 
     EAS_FILE_LOCATOR getLocator();
 
 private:
+    enum {
+        kTotalCacheSize      = 1024 * 1024 + 512 * 1024,
+        kSingleCacheSize     = 65536,
+    };
+
     int mFd;
     off64_t mBase;
     int64_t  mLength;
+    class DataSourceUnwrapper;
     DataSourceUnwrapper *mDataSource;
     EAS_FILE mEasFile;
+    unsigned char *mCacheBuffer;
+    int64_t mCacheBufRangeLength;
+    static int sCacheBufferSize;
+    static Mutex mCacheLock;
 };
 
 

@@ -1,9 +1,29 @@
+package {
+    default_applicable_licenses: [
+        "frameworks_av_media_libstagefright_rtsp_license",
+    ],
+}
+
+// Added automatically by a large-scale-change
+// See: http://go/android-license-faq
+license {
+    name: "frameworks_av_media_libstagefright_rtsp_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+    ],
+    license_text: [
+        "NOTICE",
+    ],
+}
+
 cc_defaults {
     name: "libstagefright_rtsp_defaults",
 
     srcs: [
         "AAMRAssembler.cpp",
         "AAVCAssembler.cpp",
+        "AHEVCAssembler.cpp",
         "AH263Assembler.cpp",
         "AMPEG2TSAssembler.cpp",
         "AMPEG4AudioAssembler.cpp",
@@ -16,17 +36,20 @@ cc_defaults {
         "ARTPWriter.cpp",
         "ARTSPConnection.cpp",
         "ASessionDescription.cpp",
+        "JitterCalculator.cpp",
         "SDPLoader.cpp",
     ],
 
     shared_libs: [
+        "libandroid_net",
         "libcrypto",
+        "libdatasource",
         "libmedia",
     ],
 
-    include_dirs: [
-        "frameworks/av/media/libstagefright",
-        "frameworks/native/include/media/openmax",
+    header_libs: [
+        "libstagefright_headers",
+        "libstagefright_rtsp_headers",
     ],
 
     arch: {
@@ -49,6 +72,18 @@ cc_defaults {
     },
 }
 
+cc_library_headers {
+    name: "libstagefright_rtsp_headers",
+    export_include_dirs: ["include"],
+    vendor_available: true,
+    host_supported: true,
+    target: {
+        darwin: {
+            enabled: false,
+        },
+    },
+}
+
 cc_library_static {
     name: "libstagefright_rtsp",
 
@@ -66,6 +101,10 @@ cc_library_static {
 
 //###############################################################################
 
+// 2022-01-13: this is stale; it's been disabled for 5 years.
+// test references UDPPusher and ARTPSession, neither of which is built into
+// libstagefright_rtsp
+//
 cc_test {
     name: "rtp_test",
     gtest: false,
@@ -84,10 +123,9 @@ cc_test {
 
     static_libs: ["libstagefright_rtsp"],
 
-    include_dirs: [
-        "frameworks/av/media/libstagefright",
-        "frameworks/av/cmds/stagefright",
-        "frameworks/native/include/media/openmax",
+    header_libs: [
+        "libstagefright_headers",
+        "libstagefright_rtsp_headers",
     ],
 
     cflags: [

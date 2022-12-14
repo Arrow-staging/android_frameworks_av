@@ -62,8 +62,8 @@ status_t ClearKeyFetcher::ObtainKey(const sp<ABuffer>& buffer,
     }
     ALOGV("descriptor_size=%zu", container.descriptor_size());
 
-    // Sanity check to verify that the BroadcastEncryptor is sending a properly
-    // formed EcmContainer. If it contains two Ecms, the ids should have different
+    // Validate that the BroadcastEncryptor is sending a properly formed
+    // EcmContainer. If it contains two Ecms, the ids should have different
     // parity (one odd, one even). This does not necessarily affect decryption
     // but indicates a problem with Ecm generation.
     if (container.descriptor_size() == 2) {
@@ -89,7 +89,7 @@ status_t ClearKeyFetcher::ObtainKey(const sp<ABuffer>& buffer,
     // asset_id change. If it sends an EcmContainer with 2 Ecms with different
     // asset_ids (old and new) then it might be best to prefetch the Emm.
     if ((asset_.id() != 0) && (*asset_id != asset_.id())) {
-        ALOGW("Asset_id change from %llu to %" PRIu64, asset_.id(), *asset_id);
+        ALOGW("Asset_id change from %" PRIu64 " to %" PRIu64, asset_.id(), *asset_id);
         asset_.Clear();
     }
 

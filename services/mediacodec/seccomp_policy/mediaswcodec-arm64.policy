@@ -28,7 +28,6 @@ newfstatat: 1
 fstatfs: 1
 memfd_create: 1
 ftruncate: 1
-ftruncate64: 1
 
 # mremap: Ensure |flags| are (MREMAP_MAYMOVE | MREMAP_FIXED) TODO: Once minijail
 # parser support for '<' is in this needs to be modified to also prevent
@@ -36,7 +35,7 @@ ftruncate64: 1
 # on ARM is statically loaded at 0xffff 0000. See
 # http://infocenter.arm.com/help/index.jsp?topic=/com.arm.doc.ddi0211h/Babfeega.html
 # for more details.
-mremap: arg3 == 3
+mremap: arg3 == 3 || arg3 == MREMAP_MAYMOVE
 munmap: 1
 prctl: 1
 writev: 1
@@ -62,3 +61,33 @@ rt_sigreturn: 1
 getrandom: 1
 madvise: 1
 
+# crash dump policy additions
+clock_gettime: 1
+getpid: 1
+gettid: 1
+pipe2: 1
+recvmsg: 1
+process_vm_readv: 1
+tgkill: 1
+rt_sigaction: 1
+rt_tgsigqueueinfo: 1
+#mprotect: arg2 in 0x1|0x2
+munmap: 1
+#mmap: arg2 in 0x1|0x2
+geteuid: 1
+getgid: 1
+getegid: 1
+getgroups: 1
+sysinfo: 1
+
+# Android profiler (heapprofd, traced_perf) additions, where not already
+# covered by the rest of the file, or by builtin minijail allow-listing of
+# logging-related syscalls.
+# TODO(b/197184220): this is a targeted addition for a specific investigation,
+# and addresses just the arm64 framework av service policies. In the future, we
+# should make this more general (e.g. a central file that can be @included in
+# other policy files).
+setsockopt: 1
+sendmsg: 1
+
+@include /apex/com.android.media.swcodec/etc/seccomp_policy/code_coverage.arm64.policy

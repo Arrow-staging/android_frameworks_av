@@ -188,8 +188,8 @@ class VendorTagDescriptorCache : public Parcelable {
             sp<android::VendorTagDescriptor> *desc /*out*/);
 
     // Parcelable interface
-    status_t writeToParcel(Parcel* parcel) const override;
-    status_t readFromParcel(const Parcel* parcel) override;
+    status_t writeToParcel(android::Parcel* parcel) const override;
+    status_t readFromParcel(const android::Parcel* parcel) override;
 
     // Returns the number of vendor tags defined.
     int getTagCount(metadata_vendor_id_t id) const;
@@ -248,6 +248,12 @@ class VendorTagDescriptorCache :
      * Clears the global vendor tag cache used by this process.
      */
     static void clearGlobalVendorTagCache();
+
+    /**
+     * Return true if given vendor id is present in the vendor tag caches, return
+     * false otherwise.
+     */
+    static bool isVendorCachePresent(metadata_vendor_id_t vendorId);
 
 };
 

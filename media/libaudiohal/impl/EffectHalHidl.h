@@ -23,16 +23,17 @@
 #include <fmq/MessageQueue.h>
 #include <system/audio_effect.h>
 
+#include "EffectConversionHelperHidl.h"
+
 using ::android::hardware::EventFlag;
 using ::android::hardware::MessageQueue;
 
 namespace android {
 namespace effect {
-namespace CPP_VERSION {
 
 using namespace ::android::hardware::audio::effect::CPP_VERSION;
 
-class EffectHalHidl : public EffectHalInterface
+class EffectHalHidl : public EffectHalInterface, public EffectConversionHelperHidl
 {
   public:
     // Set the input buffer.
@@ -63,10 +64,7 @@ class EffectHalHidl : public EffectHalInterface
 
     virtual status_t dump(int fd);
 
-    uint64_t effectId() const { return mEffectId; }
-
-    static void effectDescriptorToHal(
-            const EffectDescriptor& descriptor, effect_descriptor_t* halDescriptor);
+    virtual uint64_t effectId() const { return mEffectId; }
 
   private:
     friend class EffectsFactoryHalHidl;
@@ -79,14 +77,7 @@ class EffectHalHidl : public EffectHalInterface
     bool mBuffersChanged;
     std::unique_ptr<StatusMQ> mStatusMQ;
     EventFlag* mEfGroup;
-
-    static status_t analyzeResult(const Result& result);
-    static void effectBufferConfigFromHal(
-            const buffer_config_t& halConfig, EffectBufferConfig* config);
-    static void effectBufferConfigToHal(
-            const EffectBufferConfig& config, buffer_config_t* halConfig);
-    static void effectConfigFromHal(const effect_config_t& halConfig, EffectConfig* config);
-    static void effectConfigToHal(const EffectConfig& config, effect_config_t* halConfig);
+    bool mIsInput = false;
 
     // Can not be constructed directly by clients.
     EffectHalHidl(const sp<IEffect>& effect, uint64_t effectId);
@@ -104,7 +95,6 @@ class EffectHalHidl : public EffectHalInterface
     status_t setProcessBuffers();
 };
 
-} // namespace CPP_VERSION
 } // namespace effect
 } // namespace android
 

@@ -24,14 +24,13 @@
 #include "NuPlayerRenderer.h"
 #include "NuPlayerSource.h"
 
-#include <media/ICrypto.h>
+#include <mediadrm/ICrypto.h>
 #include <media/MediaCodecBuffer.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/AMessage.h>
 #include <media/stagefright/MediaErrors.h>
-
-#include "ATSParser.h"
+#include <mpeg2ts/ATSParser.h>
 
 namespace android {
 

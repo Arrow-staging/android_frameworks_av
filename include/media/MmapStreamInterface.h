@@ -22,6 +22,8 @@
 #include <utils/Errors.h>
 #include <utils/RefBase.h>
 
+#include <time.h>
+
 namespace android {
 
 class MmapStreamCallback;
@@ -103,16 +105,32 @@ class MmapStreamInterface : public virtual RefBase
     virtual status_t getMmapPosition(struct audio_mmap_position *position) = 0;
 
     /**
+     * Get a recent count of the number of audio frames presented/received to/from an
+     * external observer.
+     *
+     * \param[out] position count of presented audio frames
+     * \param[out] timeNanos associated clock time
+     *
+     * \return OK if the external position is set correctly.
+     *         NO_INIT in case of initialization error
+     *         INVALID_OPERATION if the interface is not implemented
+     */
+    virtual status_t getExternalPosition(uint64_t* position, int64_t* timeNanos) = 0;
+
+    /**
      * Start a stream operating in mmap mode.
      * createMmapBuffer() must be called before calling start()
      *
      * \param[in] client a AudioClient struct describing the client starting on this stream.
+     * \param[in] attr audio attributes provided by the client.
      * \param[out] handle unique handle for this instance. Used with stop().
      * \return OK in case of success.
      *         NO_INIT in case of initialization error
      *         INVALID_OPERATION if called out of sequence
      */
-    virtual status_t start(const AudioClient& client, audio_port_handle_t *handle) = 0;
+    virtual status_t start(const AudioClient& client,
+                           const audio_attributes_t *attr,
+                           audio_port_handle_t *handle) = 0;
 
     /**
      * Stop a stream operating in mmap mode.

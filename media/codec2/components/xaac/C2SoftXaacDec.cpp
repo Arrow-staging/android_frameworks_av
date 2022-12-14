@@ -56,42 +56,39 @@
 
 namespace android {
 
+namespace {
+
 constexpr char COMPONENT_NAME[] = "c2.android.xaac.decoder";
 
-class C2SoftXaacDec::IntfImpl : public C2InterfaceHelper {
+}  // namespace
+
+class C2SoftXaacDec::IntfImpl : public SimpleInterface<void>::BaseParams {
 public:
     explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
-        : C2InterfaceHelper(helper) {
-
-        setDerivedInstance(this);
-
-        addParameter(
-                DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::input(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
-                .build());
+        : SimpleInterface<void>::BaseParams(
+                helper,
+                COMPONENT_NAME,
+                C2Component::KIND_DECODER,
+                C2Component::DOMAIN_AUDIO,
+                MEDIA_MIMETYPE_AUDIO_AAC) {
+        noPrivateBuffers();
+        noInputReferences();
+        noOutputReferences();
+        noInputLatency();
+        noTimeStretch();
 
         addParameter(
-                DefineParam(mInputMediaType, C2_PARAMKEY_INPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::input>(
-                        MEDIA_MIMETYPE_AUDIO_AAC))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputMediaType, C2_PARAMKEY_OUTPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::output>(
-                        MEDIA_MIMETYPE_AUDIO_RAW))
+                DefineParam(mAttrib, C2_PARAMKEY_COMPONENT_ATTRIBUTES)
+                .withConstValue(new C2ComponentAttributesSetting(
+                    C2Component::ATTRIB_IS_TEMPORAL))
                 .build());
 
         addParameter(
                 DefineParam(mSampleRate, C2_PARAMKEY_SAMPLE_RATE)
                 .withDefault(new C2StreamSampleRateInfo::output(0u, 44100))
                 .withFields({C2F(mSampleRate, value).oneOf({
-                    7350, 8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000
+                    7350, 8000, 11025, 12000, 16000, 22050, 24000, 32000,
+                    44100, 48000, 64000, 88200, 96000
                 })})
                 .withSetter((Setter<decltype(*mSampleRate)>::StrictValueWithNoDeps))
                 .build());
@@ -218,10 +215,6 @@ public:
     int32_t getDrcEffectType() const { return mDrcEffectType->value; }
 
 private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
     std::shared_ptr<C2StreamSampleRateInfo::output> mSampleRate;
     std::shared_ptr<C2StreamChannelCountInfo::output> mChannelCount;
     std::shared_ptr<C2StreamBitrateInfo::input> mBitrate;
@@ -368,9 +361,8 @@ void C2SoftXaacDec::finishWork(const std::unique_ptr<C2Work>& work,
     C2WriteView wView = block->map().get();
     int16_t* outBuffer = reinterpret_cast<int16_t*>(wView.data());
     memcpy(outBuffer, mOutputDrainBuffer, mOutputDrainBufferWritePos);
-    mOutputDrainBufferWritePos = 0;
 
-    auto fillWork = [buffer = createLinearBuffer(block)](
+    auto fillWork = [buffer = createLinearBuffer(block, 0, mOutputDrainBufferWritePos)](
         const std::unique_ptr<C2Work>& work) {
         uint32_t flags = 0;
         if (work->input.flags & C2FrameData::FLAG_END_OF_STREAM) {
@@ -383,6 +375,9 @@ void C2SoftXaacDec::finishWork(const std::unique_ptr<C2Work>& work,
         work->worklets.front()->output.ordinal = work->input.ordinal;
         work->workletsProcessed = 1u;
     };
+
+    mOutputDrainBufferWritePos = 0;
+
     if (work && work->input.ordinal.frameIndex == c2_cntr64_t(mCurFrameIndex)) {
         fillWork(work);
     } else {
@@ -1317,69 +1312,84 @@ IA_ERRORCODE C2SoftXaacDec::decodeXAACStream(uint8_t* inBuffer,
                                 &ui_exec_done);
     RETURN_IF_FATAL(err_code,  "IA_CMD_TYPE_DONE_QUERY");
 
-    if (ui_exec_done != 1) {
-        VOID* p_array;        // ITTIAM:buffer to handle gain payload
-        WORD32 buf_size = 0;  // ITTIAM:gain payload length
-        WORD32 bit_str_fmt = 1;
-        WORD32 gain_stream_flag = 1;
-
-        err_code = ixheaacd_dec_api(mXheaacCodecHandle, IA_API_CMD_GET_CONFIG_PARAM,
-                                    IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_LEN, &buf_size);
-        RETURN_IF_FATAL(err_code, "IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_LEN");
-
-        err_code = ixheaacd_dec_api(mXheaacCodecHandle, IA_API_CMD_GET_CONFIG_PARAM,
-                                    IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_BUF, &p_array);
-        RETURN_IF_FATAL(err_code, "IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_BUF");
-
-        if (buf_size > 0) {
-            /*Set bitstream_split_format */
-            err_code = ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_SET_CONFIG_PARAM,
-                                      IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT, &bit_str_fmt);
-            RETURN_IF_FATAL(err_code, "IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT");
-
-            memcpy(mDrcInBuf, p_array, buf_size);
-            /* Set number of bytes to be processed */
-            err_code =
-                ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_SET_INPUT_BYTES_BS, 0, &buf_size);
-            RETURN_IF_FATAL(err_code, "IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT");
-
-            err_code = ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_SET_CONFIG_PARAM,
-                                      IA_DRC_DEC_CONFIG_GAIN_STREAM_FLAG, &gain_stream_flag);
-            RETURN_IF_FATAL(err_code, "IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT");
-
-            /* Execute process */
-            err_code = ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_INIT,
-                                      IA_CMD_TYPE_INIT_CPY_BSF_BUFF, nullptr);
-            RETURN_IF_FATAL(err_code, "IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT");
-
-            mMpegDDRCPresent = 1;
-        }
-    }
-
-    /* How much buffer is used in input buffers */
+    int32_t num_preroll = 0;
     err_code = ixheaacd_dec_api(mXheaacCodecHandle,
-                                IA_API_CMD_GET_CURIDX_INPUT_BUF,
-                                0,
-                                bytesConsumed);
-    RETURN_IF_FATAL(err_code,  "IA_API_CMD_GET_CURIDX_INPUT_BUF");
+                                IA_API_CMD_GET_CONFIG_PARAM,
+                                IA_ENHAACPLUS_DEC_CONFIG_GET_NUM_PRE_ROLL_FRAMES,
+                                &num_preroll);
+    RETURN_IF_FATAL(err_code, "IA_ENHAACPLUS_DEC_CONFIG_GET_NUM_PRE_ROLL_FRAMES");
 
-    /* Get the output bytes */
-    err_code = ixheaacd_dec_api(mXheaacCodecHandle,
-                                IA_API_CMD_GET_OUTPUT_BYTES,
-                                0,
-                                outBytes);
-    RETURN_IF_FATAL(err_code,  "IA_API_CMD_GET_OUTPUT_BYTES");
+    {
+      int32_t preroll_frame_offset = 0;
 
-    if (mMpegDDRCPresent == 1) {
-        memcpy(mDrcInBuf, mOutputBuffer, *outBytes);
-        err_code = ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_SET_INPUT_BYTES, 0, outBytes);
-        RETURN_IF_FATAL(err_code, "IA_API_CMD_SET_INPUT_BYTES");
+        do {
+            if (ui_exec_done != 1) {
+                VOID* p_array;        // ITTIAM:buffer to handle gain payload
+                WORD32 buf_size = 0;  // ITTIAM:gain payload length
+                WORD32 bit_str_fmt = 1;
+                WORD32 gain_stream_flag = 1;
 
-        err_code =
-            ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_EXECUTE, IA_CMD_TYPE_DO_EXECUTE, nullptr);
-        RETURN_IF_FATAL(err_code, "IA_CMD_TYPE_DO_EXECUTE");
+                err_code = ixheaacd_dec_api(mXheaacCodecHandle, IA_API_CMD_GET_CONFIG_PARAM,
+                                            IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_LEN, &buf_size);
+                RETURN_IF_FATAL(err_code, "IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_LEN");
 
-        memcpy(mOutputBuffer, mDrcOutBuf, *outBytes);
+                err_code = ixheaacd_dec_api(mXheaacCodecHandle, IA_API_CMD_GET_CONFIG_PARAM,
+                                            IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_BUF, &p_array);
+                RETURN_IF_FATAL(err_code, "IA_ENHAACPLUS_DEC_CONFIG_GAIN_PAYLOAD_BUF");
+
+                if (buf_size > 0) {
+                    /*Set bitstream_split_format */
+                    err_code = ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_SET_CONFIG_PARAM,
+                                            IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT, &bit_str_fmt);
+                    RETURN_IF_FATAL(err_code, "IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT");
+
+                    memcpy(mDrcInBuf, p_array, buf_size);
+                    /* Set number of bytes to be processed */
+                    err_code =
+                        ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_SET_INPUT_BYTES_BS, 0, &buf_size);
+                    RETURN_IF_FATAL(err_code, "IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT");
+
+                    err_code = ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_SET_CONFIG_PARAM,
+                                            IA_DRC_DEC_CONFIG_GAIN_STREAM_FLAG, &gain_stream_flag);
+                    RETURN_IF_FATAL(err_code, "IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT");
+
+                    /* Execute process */
+                    err_code = ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_INIT,
+                                            IA_CMD_TYPE_INIT_CPY_BSF_BUFF, nullptr);
+                    RETURN_IF_FATAL(err_code, "IA_DRC_DEC_CONFIG_PARAM_BITS_FORMAT");
+
+                    mMpegDDRCPresent = 1;
+                }
+            }
+
+            /* How much buffer is used in input buffers */
+            err_code = ixheaacd_dec_api(mXheaacCodecHandle,
+                                        IA_API_CMD_GET_CURIDX_INPUT_BUF,
+                                        0,
+                                        bytesConsumed);
+            RETURN_IF_FATAL(err_code,  "IA_API_CMD_GET_CURIDX_INPUT_BUF");
+
+            /* Get the output bytes */
+            err_code = ixheaacd_dec_api(mXheaacCodecHandle,
+                                        IA_API_CMD_GET_OUTPUT_BYTES,
+                                        0,
+                                        outBytes);
+            RETURN_IF_FATAL(err_code,  "IA_API_CMD_GET_OUTPUT_BYTES");
+
+            if (mMpegDDRCPresent == 1) {
+                memcpy(mDrcInBuf, mOutputBuffer + preroll_frame_offset, *outBytes);
+                preroll_frame_offset += *outBytes;
+                err_code = ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_SET_INPUT_BYTES, 0, outBytes);
+                RETURN_IF_FATAL(err_code, "IA_API_CMD_SET_INPUT_BYTES");
+
+                err_code =
+                    ia_drc_dec_api(mMpegDDrcHandle, IA_API_CMD_EXECUTE, IA_CMD_TYPE_DO_EXECUTE, nullptr);
+                RETURN_IF_FATAL(err_code, "IA_CMD_TYPE_DO_EXECUTE");
+
+                memcpy(mOutputBuffer, mDrcOutBuf, *outBytes);
+            }
+            num_preroll--;
+        } while (num_preroll > 0);
     }
     return IA_NO_ERROR;
 }
@@ -1592,11 +1602,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftXaacDecFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

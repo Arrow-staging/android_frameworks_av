@@ -99,7 +99,7 @@ public:
      *             combination doesn't match what was registered, or this stream wasn't registered
      *             to this buffer manager before.
      */
-    status_t unregisterStream(int streamId, int streamSetId);
+    status_t unregisterStream(int streamId, int streamSetId, bool isMultiRes);
 
     /**
      * This method obtains a buffer for a stream from this buffer manager.
@@ -112,6 +112,10 @@ public:
      *
      * After this call, the client takes over the ownership of this buffer if it is not freed.
      *
+     * Sometimes free buffers are discarded from consumer side and the dequeueBuffer call returns
+     * TIMED_OUT, in this case calling getBufferForStream again with noFreeBufferAtConsumer set to
+     * true will notify buffer manager to update its states and also tries to allocate a new buffer.
+     *
      * Return values:
      *
      *  OK:        Getting buffer for this stream was successful.
@@ -122,7 +126,9 @@ public:
      *             to this buffer manager before.
      *  NO_MEMORY: Unable to allocate a buffer for this stream at this time.
      */
-    status_t getBufferForStream(int streamId, int streamSetId, sp<GraphicBuffer>* gb, int* fenceFd);
+    status_t getBufferForStream(
+            int streamId, int streamSetId, bool isMultiRes, sp<GraphicBuffer>* gb,
+            int* fenceFd, bool noFreeBufferAtConsumer = false);
 
     /**
      * This method notifies the manager that a buffer has been released by the consumer.
@@ -147,7 +153,8 @@ public:
      *             combination doesn't match what was registered, or this stream wasn't registered
      *             to this buffer manager before, or shouldFreeBuffer is null/
      */
-    status_t onBufferReleased(int streamId, int streamSetId, /*out*/bool* shouldFreeBuffer);
+    status_t onBufferReleased(int streamId, int streamSetId, bool isMultiRes,
+                              /*out*/bool* shouldFreeBuffer);
 
     /**
      * This method notifies the manager that certain buffers has been removed from the
@@ -165,13 +172,13 @@ public:
      *             to this buffer manager before, or the removed buffer count is larger than
      *             current total handoutCount or attachedCount.
      */
-    status_t onBuffersRemoved(int streamId, int streamSetId, size_t count);
+    status_t onBuffersRemoved(int streamId, int streamSetId, bool isMultiRes, size_t count);
 
     /**
      * This method notifiers the manager that a buffer is freed from the buffer queue, usually
      * because onBufferReleased signals the caller to free a buffer via the shouldFreeBuffer flag.
      */
-    void notifyBufferRemoved(int streamId, int streamSetId);
+    void notifyBufferRemoved(int streamId, int streamSetId, bool isMultiRes);
 
     /**
      * Dump the buffer manager statistics.
@@ -286,8 +293,20 @@ private:
     /**
      * Stream set map managed by this buffer manager.
      */
-    typedef int StreamSetId;
-    KeyedVector<StreamSetId, StreamSet> mStreamSetMap;
+    struct StreamSetKey {
+        // The stream set ID
+        int id;
+        // Whether this stream set is for multi-resolution output streams. It's
+        // valid for 2 stream sets to have the same stream set ID if: one is for
+        // multi-resolution output stream, and the other one is not.
+        bool isMultiRes;
+
+        inline bool operator<(const StreamSetKey& other) const {
+            return (isMultiRes < other.isMultiRes) ||
+                    ((isMultiRes == other.isMultiRes) && (id < other.id));
+        }
+    };
+    KeyedVector<StreamSetKey, StreamSet> mStreamSetMap;
     KeyedVector<StreamId, wp<Camera3OutputStream>> mStreamMap;
 
     // TODO: There is no easy way to query the Gralloc version in this code yet, we have different
@@ -298,13 +317,13 @@ private:
      * Check if this stream was successfully registered already. This method needs to be called with
      * mLock held.
      */
-    bool checkIfStreamRegisteredLocked(int streamId, int streamSetId) const;
+    bool checkIfStreamRegisteredLocked(int streamId, StreamSetKey streamSetKey) const;
 
     /**
      * Check if other streams in the stream set has extra buffer available to be freed, and
      * free one if so.
      */
-    status_t checkAndFreeBufferOnOtherStreamsLocked(int streamId, int streamSetId);
+    status_t checkAndFreeBufferOnOtherStreamsLocked(int streamId, StreamSetKey streamSetKey);
 };
 
 } // namespace camera3

@@ -1,12 +1,35 @@
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_av_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_av_license"],
+}
+
 cc_library_headers {
     name: "libcodec2_headers",
     vendor_available: true,
+    min_sdk_version: "29",
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.media.swcodec",
+    ],
     export_include_dirs: ["include"],
 }
 
-cc_library_shared {
+cc_library {
     name: "libcodec2",
     vendor_available: true,
+    min_sdk_version: "29",
+    apex_available: [
+        "//apex_available:platform",
+        "com.android.media.swcodec",
+    ],
+    vndk: {
+        enabled: true,
+    },
+    double_loadable: true,
 
     srcs: ["C2.cpp"],
 
@@ -14,6 +37,10 @@ cc_library_shared {
         "-Wall",
         "-Werror",
     ],
+
+    header_abi_checker: {
+        check_all_apis: true,
+    },
 
     header_libs: [
         "libcodec2_headers",
@@ -42,4 +69,3 @@ cc_library_shared {
 
     ldflags: ["-Wl,-Bsymbolic"],
 }
-

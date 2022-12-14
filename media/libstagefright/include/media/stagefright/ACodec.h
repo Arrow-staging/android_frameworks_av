@@ -31,12 +31,22 @@
 #include <OMX_Audio.h>
 #include <hardware/gralloc.h>
 #include <nativebase/nativebase.h>
+#include <android/hardware/graphics/common/1.2/types.h>
 #include <android/hidl/allocator/1.0/IAllocator.h>
 #include <android/hidl/memory/1.0/IMemory.h>
 
 #define TRACK_BUFFER_TIMING     0
 
 namespace android {
+namespace hardware {
+namespace media {
+namespace omx {
+namespace V1_0 {
+struct IGraphicBufferSource;
+}  // namespace V1_0
+}  // namespace omx
+}  // namespace media
+}  // namespace hardware
 
 struct ABuffer;
 class ACodecBufferChannel;
@@ -45,6 +55,7 @@ class MemoryDealer;
 struct DescribeColorFormat2Params;
 struct DataConverter;
 
+using android::hardware::graphics::common::V1_2::BufferUsage;
 typedef hidl::allocator::V1_0::IAllocator TAllocator;
 typedef hidl::memory::V1_0::IMemory TMemory;
 
@@ -60,6 +71,9 @@ struct ACodec : public AHierarchicalStateMachine, public CodecBase {
     virtual void initiateSetInputSurface(const sp<PersistentSurface> &surface);
     virtual void initiateStart();
     virtual void initiateShutdown(bool keepComponentAllocated = false);
+    virtual status_t querySupportedParameters(std::vector<std::string> *names) override;
+    virtual status_t subscribeToParameters(const std::vector<std::string> &names) override;
+    virtual status_t unsubscribeFromParameters(const std::vector<std::string> &names) override;
 
     status_t queryCapabilities(
             const char* owner, const char* name,
@@ -138,6 +152,7 @@ private:
         kWhatReleaseCodecInstance    = 'relC',
         kWhatForceStateTransition    = 'fstt',
         kWhatCheckIfStuck            = 'Cstk',
+        kWhatSubmitExtraOutputMetadataBuffer = 'sbxo',
     };
 
     enum {
@@ -149,12 +164,14 @@ private:
         kFlagIsSecure                                 = 1,
         kFlagPushBlankBuffersToNativeWindowOnShutdown = 2,
         kFlagIsGrallocUsageProtected                  = 4,
+        kFlagPreregisterMetadataBuffers               = 8,
     };
 
     enum {
         kVideoGrallocUsage = (GRALLOC_USAGE_HW_TEXTURE
                             | GRALLOC_USAGE_HW_COMPOSER
-                            | GRALLOC_USAGE_EXTERNAL_DISP),
+                            | GRALLOC_USAGE_EXTERNAL_DISP)
+                            | static_cast<uint64_t>(BufferUsage::VIDEO_DECODER),
     };
 
     struct BufferInfo {
@@ -262,6 +279,8 @@ private:
     bool mShutdownInProgress;
     bool mExplicitShutdown;
     bool mIsLegacyVP9Decoder;
+    bool mIsStreamCorruptFree;
+    bool mIsLowLatency;
 
     // If "mKeepComponentAllocated" we only transition back to Loaded state
     // and do not release the component instance.
@@ -279,14 +298,14 @@ private:
     size_t mNumUndequeuedBuffers;
     sp<DataConverter> mConverter[2];
 
-    sp<IGraphicBufferSource> mGraphicBufferSource;
+    sp<hardware::media::omx::V1_0::IGraphicBufferSource> mGraphicBufferSource;
     int64_t mRepeatFrameDelayUs;
     int64_t mMaxPtsGapUs;
     float mMaxFps;
     double mFps;
     double mCaptureFps;
     bool mCreateInputBuffersSuspended;
-    uint32_t mLatency;
+    std::optional<uint32_t> mLatency;
 
     bool mTunneled;
 
@@ -466,6 +485,8 @@ private:
         int32_t targetRefLevel;
         int32_t encodedTargetLevel;
         int32_t effectType;
+        int32_t albumMode;
+        int32_t outputLoudness;
     } drcParams_t;
 
     status_t setupAACCodec(
@@ -487,6 +508,7 @@ private:
     status_t setupAMRCodec(bool encoder, bool isWAMR, int32_t bitRate);
     status_t setupG711Codec(bool encoder, int32_t sampleRate, int32_t numChannels);
 
+    status_t setupOpusCodec(bool encoder, int32_t sampleRate, int32_t numChannels);
     status_t setupFlacCodec(
             bool encoder, int32_t numChannels, int32_t sampleRate, int32_t compressionLevel,
             AudioEncoding encoding);
@@ -496,8 +518,11 @@ private:
             AudioEncoding encoding = kAudioEncodingPcm16bit);
 
     status_t setPriority(int32_t priority);
+    status_t setLowLatency(int32_t lowLatency);
     status_t setLatency(uint32_t latency);
     status_t getLatency(uint32_t *latency);
+    status_t setTunnelPeek(int32_t tunnelPeek);
+    status_t setTunnelPeekLegacy(int32_t isLegacy);
     status_t setAudioPresentation(int32_t presentationId, int32_t programId);
     status_t setOperatingRate(float rateFloat, bool isVideo);
     status_t getIntraRefreshPeriod(uint32_t *intraRefreshPeriod);
@@ -557,6 +582,8 @@ private:
     // If |until| is NULL, or is not in the rendered queue, this method will check all frames.
     void notifyOfRenderedFrames(
             bool dropIncomplete = false, FrameRenderTracker::Info *until = NULL);
+
+    void onFirstTunnelFrameReady();
 
     // Pass |expectedFormat| to print a warning if the format differs from it.
     // Using sp<> instead of const sp<>& because expectedFormat is likely the current mOutputFormat

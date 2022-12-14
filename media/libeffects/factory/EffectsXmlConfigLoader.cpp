@@ -94,7 +94,7 @@ bool loadLibrary(const char* relativePath, lib_entry_t* libEntry) noexcept {
     }
 
     uint32_t majorVersion = EFFECT_API_VERSION_MAJOR(description->version);
-    uint32_t expectedMajorVersion = EFFECT_API_VERSION_MAJOR(EFFECT_LIBRARY_API_VERSION);
+    uint32_t expectedMajorVersion = EFFECT_API_VERSION_MAJOR(EFFECT_LIBRARY_API_VERSION_CURRENT);
     if (majorVersion != expectedMajorVersion) {
         ALOGE("Unsupported major version %#08x, expected %#08x for library %s",
               majorVersion, expectedMajorVersion, path);
@@ -283,7 +283,7 @@ size_t loadEffects(const Effects& effects, list_elem_t* libList, list_elem_t** s
             }
             listPush(effectLoadResult.effectDesc.get(), subEffectList);
 
-            // Since we return a dummy descriptor for the proxy during
+            // Since we return a stub descriptor for the proxy during
             // get_descriptor call, we replace it with the corresponding
             // sw effect descriptor, but keep the Proxy UUID
             *effectLoadResult.effectDesc = *swEffectLoadResult.effectDesc;

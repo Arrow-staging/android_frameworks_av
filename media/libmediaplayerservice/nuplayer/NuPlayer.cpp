@@ -31,12 +31,11 @@
 #include "NuPlayerDriver.h"
 #include "NuPlayerRenderer.h"
 #include "NuPlayerSource.h"
+#include "RTPSource.h"
 #include "RTSPSource.h"
 #include "StreamingSource.h"
 #include "GenericSource.h"
-#include "TextDescriptions.h"
-
-#include "ATSParser.h"
+#include <timedtext/TextDescriptions.h>
 
 #include <cutils/properties.h>
 
@@ -54,6 +53,8 @@
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/MetaData.h>
+
+#include <mpeg2ts/ATSParser.h>
 
 #include <gui/IGraphicBufferProducer.h>
 #include <gui/Surface.h>
@@ -366,6 +367,18 @@ status_t NuPlayer::setBufferingSettings(const BufferingSettings& buffering) {
         CHECK(response->findInt32("err", &err));
     }
     return err;
+}
+
+void NuPlayer::setDataSourceAsync(const String8& rtpParams) {
+    ALOGD("setDataSourceAsync for RTP = %s", rtpParams.string());
+    sp<AMessage> msg = new AMessage(kWhatSetDataSource, this);
+
+    sp<AMessage> notify = new AMessage(kWhatSourceNotify, this);
+    sp<Source> source = new RTPSource(notify, rtpParams);
+
+    msg->setObject("source", source);
+    msg->post();
+    mDataSourceType = DATA_SOURCE_TYPE_RTP;
 }
 
 void NuPlayer::prepareAsync() {
@@ -858,10 +871,12 @@ void NuPlayer::onMessageReceived(const sp<AMessage> &msg) {
             readFromAMessage(msg, &rate);
             status_t err = OK;
             if (mRenderer != NULL) {
-                // AudioSink allows only 1.f and 0.f for offload mode.
-                // For other speed, switch to non-offload mode.
-                if (mOffloadAudio && ((rate.mSpeed != 0.f && rate.mSpeed != 1.f)
-                        || rate.mPitch != 1.f)) {
+                // AudioSink allows only 1.f and 0.f for offload and direct modes.
+                // For other speeds, restart audio to fallback to supported paths
+                bool audioDirectOutput = (mAudioSink->getFlags() & AUDIO_OUTPUT_FLAG_DIRECT) != 0;
+                if ((mOffloadAudio || audioDirectOutput) &&
+                        ((rate.mSpeed != 0.f && rate.mSpeed != 1.f) || rate.mPitch != 1.f)) {
+
                     int64_t currentPositionUs;
                     if (getCurrentPosition(&currentPositionUs) != OK) {
                         currentPositionUs = mPreviousSeekTimeUs;
@@ -1689,6 +1704,12 @@ void NuPlayer::updateInternalTimers() {
     updateRebufferingTimer(false /* stopping */, false /* exiting */);
 }
 
+void NuPlayer::setTargetBitrate(int bitrate) {
+    if (mSource != NULL) {
+        mSource->setTargetBitrate(bitrate);
+    }
+}
+
 void NuPlayer::onPause() {
 
     updatePlaybackTimer(true /* stopping */, "onPause");
@@ -1798,7 +1819,9 @@ void NuPlayer::tryOpenAudioSinkForOffload(
 }
 
 void NuPlayer::closeAudioSink() {
-    mRenderer->closeAudioSink();
+    if (mRenderer != NULL) {
+        mRenderer->closeAudioSink();
+    }
 }
 
 void NuPlayer::restartAudio(
@@ -1912,6 +1935,11 @@ status_t NuPlayer::instantiateDecoder(
     }
 
     format->setInt32("priority", 0 /* realtime */);
+
+    if (mDataSourceType == DATA_SOURCE_TYPE_RTP) {
+        ALOGV("instantiateDecoder: set decoder error free on stream corrupt.");
+        format->setInt32("corrupt-free", true);
+    }
 
     if (!audio) {
         AString mime;
@@ -2713,6 +2741,14 @@ void NuPlayer::onSourceNotify(const sp<AMessage> &msg) {
             break;
         }
 
+        case Source::kWhatIMSRxNotice:
+        {
+            sp<AMessage> IMSRxNotice;
+            CHECK(msg->findMessage("message", &IMSRxNotice));
+            sendIMSRxNotice(IMSRxNotice);
+            break;
+        }
+
         default:
             TRESPASS();
     }
@@ -2815,10 +2851,150 @@ void NuPlayer::sendTimedTextData(const sp<ABuffer> &buffer) {
     }
 }
 
+void NuPlayer::sendIMSRxNotice(const sp<AMessage> &msg) {
+    int32_t payloadType;
+
+    CHECK(msg->findInt32("payload-type", &payloadType));
+
+    int32_t rtpSeq = 0, rtpTime = 0;
+    int64_t ntpTime = 0, recvTimeUs = 0;
+
+    Parcel in;
+    in.writeInt32(payloadType);
+
+    switch (payloadType) {
+        case ARTPSource::RTP_FIRST_PACKET:
+        {
+            CHECK(msg->findInt32("rtp-time", &rtpTime));
+            CHECK(msg->findInt32("rtp-seq-num", &rtpSeq));
+            CHECK(msg->findInt64("recv-time-us", &recvTimeUs));
+            in.writeInt32(rtpTime);
+            in.writeInt32(rtpSeq);
+            in.writeInt32(recvTimeUs >> 32);
+            in.writeInt32(recvTimeUs & 0xFFFFFFFF);
+            break;
+        }
+        case ARTPSource::RTCP_FIRST_PACKET:
+        {
+            CHECK(msg->findInt64("recv-time-us", &recvTimeUs));
+            in.writeInt32(recvTimeUs >> 32);
+            in.writeInt32(recvTimeUs & 0xFFFFFFFF);
+            break;
+        }
+        case ARTPSource::RTCP_SR:
+        {
+            CHECK(msg->findInt32("rtp-time", &rtpTime));
+            CHECK(msg->findInt64("ntp-time", &ntpTime));
+            CHECK(msg->findInt64("recv-time-us", &recvTimeUs));
+            in.writeInt32(rtpTime);
+            in.writeInt32(ntpTime >> 32);
+            in.writeInt32(ntpTime & 0xFFFFFFFF);
+            in.writeInt32(recvTimeUs >> 32);
+            in.writeInt32(recvTimeUs & 0xFFFFFFFF);
+            break;
+        }
+        case ARTPSource::RTCP_RR:
+        {
+            int64_t recvTimeUs;
+            int32_t senderId;
+            int32_t ssrc;
+            int32_t fraction;
+            int32_t lost;
+            int32_t lastSeq;
+            int32_t jitter;
+            int32_t lsr;
+            int32_t dlsr;
+            CHECK(msg->findInt64("recv-time-us", &recvTimeUs));
+            CHECK(msg->findInt32("rtcp-rr-ssrc", &senderId));
+            CHECK(msg->findInt32("rtcp-rrb-ssrc", &ssrc));
+            CHECK(msg->findInt32("rtcp-rrb-fraction", &fraction));
+            CHECK(msg->findInt32("rtcp-rrb-lost", &lost));
+            CHECK(msg->findInt32("rtcp-rrb-lastSeq", &lastSeq));
+            CHECK(msg->findInt32("rtcp-rrb-jitter", &jitter));
+            CHECK(msg->findInt32("rtcp-rrb-lsr", &lsr));
+            CHECK(msg->findInt32("rtcp-rrb-dlsr", &dlsr));
+            in.writeInt32(recvTimeUs >> 32);
+            in.writeInt32(recvTimeUs & 0xFFFFFFFF);
+            in.writeInt32(senderId);
+            in.writeInt32(ssrc);
+            in.writeInt32(fraction);
+            in.writeInt32(lost);
+            in.writeInt32(lastSeq);
+            in.writeInt32(jitter);
+            in.writeInt32(lsr);
+            in.writeInt32(dlsr);
+            break;
+        }
+        case ARTPSource::RTCP_TSFB:   // RTCP TSFB
+        case ARTPSource::RTCP_PSFB:   // RTCP PSFB
+        case ARTPSource::RTP_AUTODOWN:
+        {
+            int32_t feedbackType, id;
+            CHECK(msg->findInt32("feedback-type", &feedbackType));
+            CHECK(msg->findInt32("sender", &id));
+            in.writeInt32(feedbackType);
+            in.writeInt32(id);
+            if (payloadType == ARTPSource::RTCP_TSFB) {
+                int32_t bitrate;
+                CHECK(msg->findInt32("bit-rate", &bitrate));
+                in.writeInt32(bitrate);
+            }
+            break;
+        }
+        case ARTPSource::RTP_QUALITY:
+        case ARTPSource::RTP_QUALITY_EMC:
+        {
+            int32_t feedbackType, bitrate;
+            int32_t highestSeqNum, baseSeqNum, prevExpected;
+            int32_t numBufRecv, prevNumBufRecv;
+            int32_t latestRtpTime, jbTimeMs, rtpRtcpSrTimeGapMs;
+            int64_t recvTimeUs;
+            CHECK(msg->findInt32("feedback-type", &feedbackType));
+            CHECK(msg->findInt32("bit-rate", &bitrate));
+            CHECK(msg->findInt32("highest-seq-num", &highestSeqNum));
+            CHECK(msg->findInt32("base-seq-num", &baseSeqNum));
+            CHECK(msg->findInt32("prev-expected", &prevExpected));
+            CHECK(msg->findInt32("num-buf-recv", &numBufRecv));
+            CHECK(msg->findInt32("prev-num-buf-recv", &prevNumBufRecv));
+            CHECK(msg->findInt32("latest-rtp-time", &latestRtpTime));
+            CHECK(msg->findInt64("recv-time-us", &recvTimeUs));
+            CHECK(msg->findInt32("rtp-jitter-time-ms", &jbTimeMs));
+            CHECK(msg->findInt32("rtp-rtcpsr-time-gap-ms", &rtpRtcpSrTimeGapMs));
+            in.writeInt32(feedbackType);
+            in.writeInt32(bitrate);
+            in.writeInt32(highestSeqNum);
+            in.writeInt32(baseSeqNum);
+            in.writeInt32(prevExpected);
+            in.writeInt32(numBufRecv);
+            in.writeInt32(prevNumBufRecv);
+            in.writeInt32(latestRtpTime);
+            in.writeInt32(recvTimeUs >> 32);
+            in.writeInt32(recvTimeUs & 0xFFFFFFFF);
+            in.writeInt32(jbTimeMs);
+            in.writeInt32(rtpRtcpSrTimeGapMs);
+            break;
+        }
+        case ARTPSource::RTP_CVO:
+        {
+            int32_t cvo;
+            CHECK(msg->findInt32("cvo", &cvo));
+            in.writeInt32(cvo);
+            break;
+        }
+        default:
+        break;
+    }
+
+    notifyListener(MEDIA_IMS_RX_NOTICE, 0, 0, &in);
+}
+
 const char *NuPlayer::getDataSourceType() {
     switch (mDataSourceType) {
         case DATA_SOURCE_TYPE_HTTP_LIVE:
             return "HTTPLive";
+
+        case DATA_SOURCE_TYPE_RTP:
+            return "RTP";
 
         case DATA_SOURCE_TYPE_RTSP:
             return "RTSP";

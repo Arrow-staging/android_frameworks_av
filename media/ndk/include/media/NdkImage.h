@@ -50,7 +50,10 @@ __BEGIN_DECLS
  */
 typedef struct AImage AImage;
 
-// Formats not listed here will not be supported by AImageReader
+/**
+ * AImage supported formats: AImageReader only guarantees the support for the formats
+ * listed here.
+ */
 enum AIMAGE_FORMATS {
     /**
      * 32 bits RGBA format, 8 bits for each of the four channels.
@@ -559,8 +562,6 @@ typedef struct AImageCropRect {
     int32_t bottom;
 } AImageCropRect;
 
-#if __ANDROID_API__ >= 24
-
 /**
  * Return the image back the the system and delete the AImage object from memory.
  *
@@ -570,12 +571,16 @@ typedef struct AImageCropRect {
  * return {@link AMEDIA_ERROR_INVALID_OBJECT}. Application still needs to call this method on those
  * {@link AImage} objects to fully delete the {@link AImage} object from memory.</p>
  *
+ * Available since API level 24.
+ *
  * @param image The {@link AImage} to be deleted.
  */
 void AImage_delete(AImage* image) __INTRODUCED_IN(24);
 
 /**
  * Query the width of the input {@link AImage}.
+ *
+ * Available since API level 24.
  *
  * @param image the {@link AImage} of interest.
  * @param width the width of the image will be filled here if the method call succeeeds.
@@ -590,6 +595,8 @@ media_status_t AImage_getWidth(const AImage* image, /*out*/int32_t* width) __INT
 
 /**
  * Query the height of the input {@link AImage}.
+ *
+ * Available since API level 24.
  *
  * @param image the {@link AImage} of interest.
  * @param height the height of the image will be filled here if the method call succeeeds.
@@ -607,6 +614,8 @@ media_status_t AImage_getHeight(const AImage* image, /*out*/int32_t* height) __I
  *
  * <p>The format value will be one of AIMAGE_FORMAT_* enum value.</p>
  *
+ * Available since API level 24.
+ *
  * @param image the {@link AImage} of interest.
  * @param format the format of the image will be filled here if the method call succeeeds.
  *
@@ -623,6 +632,8 @@ media_status_t AImage_getFormat(const AImage* image, /*out*/int32_t* format) __I
  *
  * <p>The crop rectangle specifies the region of valid pixels in the image, using coordinates in the
  * largest-resolution plane.</p>
+ *
+ * Available since API level 24.
  *
  * @param image the {@link AImage} of interest.
  * @param rect the cropped rectangle of the image will be filled here if the method call succeeeds.
@@ -648,6 +659,8 @@ media_status_t AImage_getCropRect(const AImage* image, /*out*/AImageCropRect* re
  * {@link ACameraCaptureSession_captureCallbacks#onCaptureCompleted} callback.
  * </p>
  *
+ * Available since API level 24.
+ *
  * @param image the {@link AImage} of interest.
  * @param timestampNs the timestamp of the image will be filled here if the method call succeeeds.
  *
@@ -664,6 +677,8 @@ media_status_t AImage_getTimestamp(const AImage* image, /*out*/int64_t* timestam
  *
  * <p>The number of plane of an {@link AImage} is determined by its format, which can be queried by
  * {@link AImage_getFormat} method.</p>
+ *
+ * Available since API level 24.
  *
  * @param image the {@link AImage} of interest.
  * @param numPlanes the number of planes of the image will be filled here if the method call
@@ -686,6 +701,8 @@ media_status_t AImage_getNumberOfPlanes(const AImage* image, /*out*/int32_t* num
  * and calling this method on images of these formats will cause {@link AMEDIA_ERROR_UNSUPPORTED}
  * being returned.
  * For formats where pixel stride is well defined, the pixel stride is always greater than 0.</p>
+ *
+ * Available since API level 24.
  *
  * @param image the {@link AImage} of interest.
  * @param planeIdx the index of the plane. Must be less than the number of planes of input image.
@@ -714,6 +731,8 @@ media_status_t AImage_getPlanePixelStride(
  * being returned.
  * For formats where row stride is well defined, the row stride is always greater than 0.</p>
  *
+ * Available since API level 24.
+ *
  * @param image the {@link AImage} of interest.
  * @param planeIdx the index of the plane. Must be less than the number of planes of input image.
  * @param rowStride the row stride of the image will be filled here if the method call succeeeds.
@@ -739,6 +758,8 @@ media_status_t AImage_getPlaneRowStride(
  * pointer from previous AImage_getPlaneData call becomes invalid. Do NOT use it after the
  * {@link AImage} or the parent {@link AImageReader} is deleted.</p>
  *
+ * Available since API level 24.
+ *
  * @param image the {@link AImage} of interest.
  * @param planeIdx the index of the plane. Must be less than the number of planes of input image.
  * @param data the data pointer of the image will be filled here if the method call succeeeds.
@@ -757,10 +778,6 @@ media_status_t AImage_getPlaneData(
         const AImage* image, int planeIdx,
         /*out*/uint8_t** data, /*out*/int* dataLength) __INTRODUCED_IN(24);
 
-#endif /* __ANDROID_API__ >= 24 */
-
-#if __ANDROID_API__ >= 26
-
 /**
  * Return the image back the the system and delete the AImage object from memory asynchronously.
  *
@@ -768,6 +785,8 @@ media_status_t AImage_getPlaneData(
  * However, the caller can still hold on to the {@link AHardwareBuffer} returned from this image and
  * signal the release of the hardware buffer back to the {@link AImageReader}'s queue using
  * releaseFenceFd.</p>
+ *
+ * Available since API level 26.
  *
  * @param image The {@link AImage} to be deleted.
  * @param releaseFenceFd A sync fence fd defined in {@link sync.h}, which signals the release of
@@ -794,8 +813,10 @@ void AImage_deleteAsync(AImage* image, int releaseFenceFd) __INTRODUCED_IN(26);
  * {@link AImageReader_setBufferRemovedListener} to be notified when the buffer is no longer used
  * by {@link AImageReader}.</p>
  *
+ * Available since API level 26.
+ *
  * @param image the {@link AImage} of interest.
- * @param outBuffer The memory area pointed to by buffer will contain the acquired AHardwareBuffer
+ * @param buffer The memory area pointed to by buffer will contain the acquired AHardwareBuffer
  *         handle.
  * @return <ul>
  *         <li>{@link AMEDIA_OK} if the method call succeeds.</li>
@@ -804,8 +825,6 @@ void AImage_deleteAsync(AImage* image, int releaseFenceFd) __INTRODUCED_IN(26);
  * @see AImageReader_ImageCallback
  */
 media_status_t AImage_getHardwareBuffer(const AImage* image, /*out*/AHardwareBuffer** buffer) __INTRODUCED_IN(26);
-
-#endif /* __ANDROID_API__ >= 26 */
 
 __END_DECLS
 

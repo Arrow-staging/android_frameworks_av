@@ -39,6 +39,7 @@ AudioStreamOut::AudioStreamOut(AudioHwDevice *dev, audio_output_flags_t flags)
         , mRateMultiplier(1)
         , mHalFormatHasProportionalFrames(false)
         , mHalFrameSize(0)
+        , mExpectRetrograde(false)
 {
 }
 
@@ -69,8 +70,12 @@ status_t AudioStreamOut::getRenderPosition(uint64_t *frames)
     const uint32_t truncatedPosition = (uint32_t)mRenderPosition;
     int32_t deltaHalPosition; // initialization not needed, overwitten by __builtin_sub_overflow()
     (void) __builtin_sub_overflow(halPosition, truncatedPosition, &deltaHalPosition);
+
     if (deltaHalPosition > 0) {
         mRenderPosition += deltaHalPosition;
+    } else if (mExpectRetrograde) {
+        mExpectRetrograde = false;
+        mRenderPosition -= static_cast<uint64_t>(-deltaHalPosition);
     }
     // Scale from HAL sample rate to application rate.
     *frames = mRenderPosition / mRateMultiplier;
@@ -118,7 +123,7 @@ status_t AudioStreamOut::getPresentationPosition(uint64_t *frames, struct timesp
 
 status_t AudioStreamOut::open(
         audio_io_handle_t handle,
-        audio_devices_t devices,
+        audio_devices_t deviceType,
         struct audio_config *config,
         const char *address)
 {
@@ -130,7 +135,7 @@ status_t AudioStreamOut::open(
 
     int status = hwDev()->openOutputStream(
             handle,
-            devices,
+            deviceType,
             customFlags,
             config,
             address,
@@ -152,7 +157,7 @@ status_t AudioStreamOut::open(
 
         status = hwDev()->openOutputStream(
                 handle,
-                devices,
+                deviceType,
                 customFlags,
                 &customConfig,
                 address,
@@ -164,32 +169,30 @@ status_t AudioStreamOut::open(
         stream = outStream;
         mHalFormatHasProportionalFrames = audio_has_proportional_frames(config->format);
         status = stream->getFrameSize(&mHalFrameSize);
+        LOG_ALWAYS_FATAL_IF(status != OK, "Error retrieving frame size from HAL: %d", status);
+        LOG_ALWAYS_FATAL_IF(mHalFrameSize <= 0, "Error frame size was %zu but must be greater than"
+                " zero", mHalFrameSize);
+
     }
 
     return status;
 }
 
-audio_format_t AudioStreamOut::getFormat() const
+audio_config_base_t AudioStreamOut::getAudioProperties() const
 {
-    audio_format_t result;
-    return stream->getFormat(&result) == OK ? result : AUDIO_FORMAT_INVALID;
-}
-
-uint32_t AudioStreamOut::getSampleRate() const
-{
-    uint32_t result;
-    return stream->getSampleRate(&result) == OK ? result : 0;
-}
-
-audio_channel_mask_t AudioStreamOut::getChannelMask() const
-{
-    audio_channel_mask_t result;
-    return stream->getChannelMask(&result) == OK ? result : AUDIO_CHANNEL_INVALID;
+    audio_config_base_t result = AUDIO_CONFIG_BASE_INITIALIZER;
+    if (stream->getAudioProperties(&result) != OK) {
+        result.sample_rate = 0;
+        result.channel_mask = AUDIO_CHANNEL_INVALID;
+        result.format = AUDIO_FORMAT_INVALID;
+    }
+    return result;
 }
 
 int AudioStreamOut::flush()
 {
     mRenderPosition = 0;
+    mExpectRetrograde = false;
     mFramesWritten = 0;
     mFramesWrittenAtStandby = 0;
     status_t result = stream->flush();
@@ -199,6 +202,7 @@ int AudioStreamOut::flush()
 int AudioStreamOut::standby()
 {
     mRenderPosition = 0;
+    mExpectRetrograde = false;
     mFramesWrittenAtStandby = mFramesWritten;
     return stream->standby();
 }

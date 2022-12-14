@@ -25,7 +25,6 @@
 
 #include <cutils/compiler.h>
 #include <cutils/properties.h>
-#include <utils/Debug.h>
 #include <utils/Log.h>
 #include <audio_utils/primitives.h>
 
@@ -201,6 +200,8 @@ AudioResamplerDyn<TC, TI, TO>::AudioResamplerDyn(
             "ro.audio.resampler.psd.stopband", mPropertyStopbandAttenuation);
     mPropertyCutoffPercent = property_get_int32(
             "ro.audio.resampler.psd.cutoff_percent", mPropertyCutoffPercent);
+    mPropertyTransitionBandwidthCheat = property_get_int32(
+            "ro.audio.resampler.psd.tbwcheat", mPropertyTransitionBandwidthCheat);
 }
 
 template<typename TC, typename TI, typename TO>
@@ -243,7 +244,7 @@ void AudioResamplerDyn<TC, TI, TO>::createKaiserFir(Constants &c,
 {
     // compute the normalized transition bandwidth
     const double tbw = firKaiserTbw(c.mHalfNumCoefs, stopBandAtten);
-    const double halfbw = tbw / 2.;
+    const double halfbw = tbw * 0.5;
 
     double fcr; // compute fcr, the 3 dB amplitude cut-off.
     if (inSampleRate < outSampleRate) { // upsample
@@ -290,7 +291,7 @@ void AudioResamplerDyn<TC, TI, TO>::createKaiserFir(Constants &c,
 
 #if 0
     // Keep this debug code in case an app causes resampler design issues.
-    const double halfbw = tbw / 2.;
+    const double halfbw = tbw * 0.5;
     // print basic filter stats
     ALOGD("L:%d  hnc:%d  stopBandAtten:%lf  fcr:%lf  atten:%lf  tbw:%lf\n",
             c.mL, c.mHalfNumCoefs, stopBandAtten, fcr, attenuation, tbw);
@@ -305,7 +306,7 @@ void AudioResamplerDyn<TC, TI, TO>::createKaiserFir(Constants &c,
 
     const int32_t passSteps = 1000;
 
-    testFir(coefs, c.mL, c.mHalfNumCoefs, fp, fs, passSteps, passSteps * c.ML /*stopSteps*/,
+    testFir(coefs, c.mL, c.mHalfNumCoefs, fp, fs, passSteps, passSteps * c.mL /*stopSteps*/,
             passMin, passMax, passRipple, stopMax, stopRipple);
     ALOGD("passband(%lf, %lf): %.8lf %.8lf %.8lf\n", 0., fp, passMin, passMax, passRipple);
     ALOGD("stopband(%lf, %lf): %.8lf %.3lf\n", fs, 0.5, stopMax, stopRipple);
@@ -379,12 +380,28 @@ void AudioResamplerDyn<TC, TI, TO>::setSampleRate(int32_t inSampleRate)
             halfLength = mPropertyHalfFilterLength;
             stopBandAtten = mPropertyStopbandAttenuation;
             useS32 = true;
-            fcr = mInSampleRate <= mSampleRate
-                    ? 0.5 : 0.5 * mSampleRate / mInSampleRate;
-            fcr *= mPropertyCutoffPercent / 100.;
+
+            // Use either the stopband location for design (tbwCheat)
+            // or use the 3dB cutoff location for design (fcr).
+            // This choice is exclusive and based on whether fcr > 0.
+            if (mPropertyTransitionBandwidthCheat != 0) {
+                tbwCheat = mPropertyTransitionBandwidthCheat / 100.;
+            } else {
+                fcr = mInSampleRate <= mSampleRate
+                        ? 0.5 : 0.5 * mSampleRate / mInSampleRate;
+                fcr *= mPropertyCutoffPercent / 100.;
+            }
         } else {
+            // Voice quality devices have lower sampling rates
+            // (and may be a consequence of downstream AMR-WB / G.722 codecs).
+            // For these devices, we ensure a wider resampler passband
+            // at the expense of aliasing noise (stopband attenuation
+            // and stopband frequency).
+            //
+            constexpr uint32_t kVoiceDeviceSampleRate = 16000;
+
             if (mFilterQuality == DYN_HIGH_QUALITY) {
-                // 32b coefficients, 64 length
+                // float or 32b coefficients
                 useS32 = true;
                 stopBandAtten = 98.;
                 if (inSampleRate >= mSampleRate * 4) {
@@ -394,8 +411,18 @@ void AudioResamplerDyn<TC, TI, TO>::setSampleRate(int32_t inSampleRate)
                 } else {
                     halfLength = 32;
                 }
+
+                if (mSampleRate <= kVoiceDeviceSampleRate) {
+                    if (inSampleRate >= mSampleRate * 2) {
+                        halfLength += 16;
+                    } else {
+                        halfLength += 8;
+                    }
+                    stopBandAtten = 84.;
+                    tbwCheat = 1.05;
+                }
             } else if (mFilterQuality == DYN_LOW_QUALITY) {
-                // 16b coefficients, 16-32 length
+                // float or 16b coefficients
                 useS32 = false;
                 stopBandAtten = 80.;
                 if (inSampleRate >= mSampleRate * 4) {
@@ -405,13 +432,18 @@ void AudioResamplerDyn<TC, TI, TO>::setSampleRate(int32_t inSampleRate)
                 } else {
                     halfLength = 8;
                 }
-                if (inSampleRate <= mSampleRate) {
+                if (mSampleRate <= kVoiceDeviceSampleRate) {
+                    if (inSampleRate >= mSampleRate * 2) {
+                        halfLength += 8;
+                    }
+                    tbwCheat = 1.05;
+                } else if (inSampleRate <= mSampleRate) {
                     tbwCheat = 1.05;
                 } else {
                     tbwCheat = 1.03;
                 }
             } else { // DYN_MED_QUALITY
-                // 16b coefficients, 32-64 length
+                // float or 16b coefficients
                 // note: > 64 length filters with 16b coefs can have quantization noise problems
                 useS32 = false;
                 stopBandAtten = 84.;
@@ -422,13 +454,34 @@ void AudioResamplerDyn<TC, TI, TO>::setSampleRate(int32_t inSampleRate)
                 } else {
                     halfLength = 16;
                 }
-                if (inSampleRate <= mSampleRate) {
+
+                if (mSampleRate <= kVoiceDeviceSampleRate) {
+                    if (inSampleRate >= mSampleRate * 2) {
+                        halfLength += 16;
+                    } else {
+                        halfLength += 8;
+                    }
+                    tbwCheat = 1.05;
+                } else if (inSampleRate <= mSampleRate) {
                     tbwCheat = 1.03;
                 } else {
                     tbwCheat = 1.01;
                 }
             }
         }
+
+        if (fcr > 0.) {
+            ALOGV("%s: mFilterQuality:%d inSampleRate:%d mSampleRate:%d halfLength:%d "
+                    "stopBandAtten:%lf fcr:%lf",
+                    __func__, mFilterQuality, inSampleRate, mSampleRate, halfLength,
+                    stopBandAtten, fcr);
+        } else {
+            ALOGV("%s: mFilterQuality:%d inSampleRate:%d mSampleRate:%d halfLength:%d "
+                    "stopBandAtten:%lf tbwCheat:%lf",
+                    __func__, mFilterQuality, inSampleRate, mSampleRate, halfLength,
+                    stopBandAtten, tbwCheat);
+        }
+
 
         // determine the number of polyphases in the filterbank.
         // for 16b, it is desirable to have 2^(16/2) = 256 phases.
@@ -492,64 +545,76 @@ void AudioResamplerDyn<TC, TI, TO>::setSampleRate(int32_t inSampleRate)
     // Note: A stride of 2 is achieved with non-SIMD processing.
     int stride = ((c.mHalfNumCoefs & 7) == 0) ? 16 : 2;
     LOG_ALWAYS_FATAL_IF(stride < 16, "Resampler stride must be 16 or more");
-    LOG_ALWAYS_FATAL_IF(mChannelCount < 1 || mChannelCount > 8,
-            "Resampler channels(%d) must be between 1 to 8", mChannelCount);
+    LOG_ALWAYS_FATAL_IF(mChannelCount < 1 || mChannelCount > FCC_LIMIT,
+            "Resampler channels(%d) must be between 1 to %d", mChannelCount, FCC_LIMIT);
     // stride 16 (falls back to stride 2 for machines that do not support NEON)
+
+
+// For now use a #define as a compiler generated function table requires renaming.
+#pragma push_macro("AUDIORESAMPLERDYN_CASE")
+#undef AUDIORESAMPLERDYN_CASE
+#define AUDIORESAMPLERDYN_CASE(CHANNEL, LOCKED) \
+    case CHANNEL: if constexpr (CHANNEL <= FCC_LIMIT) {\
+        mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<CHANNEL, LOCKED, 16>; \
+    } break
+
     if (locked) {
         switch (mChannelCount) {
-        case 1:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<1, true, 16>;
-            break;
-        case 2:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<2, true, 16>;
-            break;
-        case 3:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<3, true, 16>;
-            break;
-        case 4:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<4, true, 16>;
-            break;
-        case 5:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<5, true, 16>;
-            break;
-        case 6:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<6, true, 16>;
-            break;
-        case 7:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<7, true, 16>;
-            break;
-        case 8:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<8, true, 16>;
-            break;
+        AUDIORESAMPLERDYN_CASE(1, true);
+        AUDIORESAMPLERDYN_CASE(2, true);
+        AUDIORESAMPLERDYN_CASE(3, true);
+        AUDIORESAMPLERDYN_CASE(4, true);
+        AUDIORESAMPLERDYN_CASE(5, true);
+        AUDIORESAMPLERDYN_CASE(6, true);
+        AUDIORESAMPLERDYN_CASE(7, true);
+        AUDIORESAMPLERDYN_CASE(8, true);
+        AUDIORESAMPLERDYN_CASE(9, true);
+        AUDIORESAMPLERDYN_CASE(10, true);
+        AUDIORESAMPLERDYN_CASE(11, true);
+        AUDIORESAMPLERDYN_CASE(12, true);
+        AUDIORESAMPLERDYN_CASE(13, true);
+        AUDIORESAMPLERDYN_CASE(14, true);
+        AUDIORESAMPLERDYN_CASE(15, true);
+        AUDIORESAMPLERDYN_CASE(16, true);
+        AUDIORESAMPLERDYN_CASE(17, true);
+        AUDIORESAMPLERDYN_CASE(18, true);
+        AUDIORESAMPLERDYN_CASE(19, true);
+        AUDIORESAMPLERDYN_CASE(20, true);
+        AUDIORESAMPLERDYN_CASE(21, true);
+        AUDIORESAMPLERDYN_CASE(22, true);
+        AUDIORESAMPLERDYN_CASE(23, true);
+        AUDIORESAMPLERDYN_CASE(24, true);
         }
     } else {
         switch (mChannelCount) {
-        case 1:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<1, false, 16>;
-            break;
-        case 2:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<2, false, 16>;
-            break;
-        case 3:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<3, false, 16>;
-            break;
-        case 4:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<4, false, 16>;
-            break;
-        case 5:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<5, false, 16>;
-            break;
-        case 6:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<6, false, 16>;
-            break;
-        case 7:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<7, false, 16>;
-            break;
-        case 8:
-            mResampleFunc = &AudioResamplerDyn<TC, TI, TO>::resample<8, false, 16>;
-            break;
+        AUDIORESAMPLERDYN_CASE(1, false);
+        AUDIORESAMPLERDYN_CASE(2, false);
+        AUDIORESAMPLERDYN_CASE(3, false);
+        AUDIORESAMPLERDYN_CASE(4, false);
+        AUDIORESAMPLERDYN_CASE(5, false);
+        AUDIORESAMPLERDYN_CASE(6, false);
+        AUDIORESAMPLERDYN_CASE(7, false);
+        AUDIORESAMPLERDYN_CASE(8, false);
+        AUDIORESAMPLERDYN_CASE(9, false);
+        AUDIORESAMPLERDYN_CASE(10, false);
+        AUDIORESAMPLERDYN_CASE(11, false);
+        AUDIORESAMPLERDYN_CASE(12, false);
+        AUDIORESAMPLERDYN_CASE(13, false);
+        AUDIORESAMPLERDYN_CASE(14, false);
+        AUDIORESAMPLERDYN_CASE(15, false);
+        AUDIORESAMPLERDYN_CASE(16, false);
+        AUDIORESAMPLERDYN_CASE(17, false);
+        AUDIORESAMPLERDYN_CASE(18, false);
+        AUDIORESAMPLERDYN_CASE(19, false);
+        AUDIORESAMPLERDYN_CASE(20, false);
+        AUDIORESAMPLERDYN_CASE(21, false);
+        AUDIORESAMPLERDYN_CASE(22, false);
+        AUDIORESAMPLERDYN_CASE(23, false);
+        AUDIORESAMPLERDYN_CASE(24, false);
         }
     }
+#pragma pop_macro("AUDIORESAMPLERDYN_CASE")
+
 #ifdef DEBUG_RESAMPLER
     printf("channels:%d  %s  stride:%d  %s  coef:%d  shift:%d\n",
             mChannelCount, locked ? "locked" : "interpolated",
@@ -582,7 +647,7 @@ size_t AudioResamplerDyn<TC, TI, TO>::resample(TO* out, size_t outFrameCount,
     const uint32_t phaseWrapLimit = c.mL << c.mShift;
     size_t inFrameCount = (phaseIncrement * (uint64_t)outFrameCount + phaseFraction)
             / phaseWrapLimit;
-    // sanity check that inFrameCount is in signed 32 bit integer range.
+    // validate that inFrameCount is in signed 32 bit integer range.
     ALOG_ASSERT(0 <= inFrameCount && inFrameCount < (1U << 31));
 
     //ALOGV("inFrameCount:%d  outFrameCount:%d"
@@ -592,7 +657,7 @@ size_t AudioResamplerDyn<TC, TI, TO>::resample(TO* out, size_t outFrameCount,
     // NOTE: be very careful when modifying the code here. register
     // pressure is very high and a small change might cause the compiler
     // to generate far less efficient code.
-    // Always sanity check the result with objdump or test-resample.
+    // Always validate the result with objdump or test-resample.
 
     // the following logic is a bit convoluted to keep the main processing loop
     // as tight as possible with register allocation.

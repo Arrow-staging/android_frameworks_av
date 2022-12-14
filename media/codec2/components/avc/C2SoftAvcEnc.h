@@ -18,14 +18,14 @@
 #define ANDROID_C2_SOFT_AVC_ENC_H__
 
 #include <map>
+#include <inttypes.h>
 
 #include <utils/Vector.h>
 
 #include <SimpleC2Component.h>
 
 #include "ih264_typedefs.h"
-#include "iv2.h"
-#include "ive2.h"
+#include "ih264e.h"
 
 namespace android {
 
@@ -33,12 +33,13 @@ namespace android {
 #define LEN_STATUS_BUFFER        (10  * 1024)
 #define MAX_VBV_BUFF_SIZE        (120 * 16384)
 #define MAX_NUM_IO_BUFS           3
+#define MAX_B_FRAMES              1
 
 #define DEFAULT_MAX_REF_FRM         2
 #define DEFAULT_MAX_REORDER_FRM     0
 #define DEFAULT_QP_MIN              10
 #define DEFAULT_QP_MAX              40
-#define DEFAULT_MAX_BITRATE         20000000
+#define DEFAULT_MAX_BITRATE         240000000
 #define DEFAULT_MAX_SRCH_RANGE_X    256
 #define DEFAULT_MAX_SRCH_RANGE_Y    256
 #define DEFAULT_MAX_FRAMERATE       120000
@@ -99,6 +100,13 @@ namespace android {
 #define STRLENGTH                   500
 #define DEFAULT_CONSTRAINED_INTRA   0
 
+/** limits as specified by h264
+ *  (QP_MIN==4 is actually a limitation of this SW codec, not the H.264 standard)
+ **/
+#define CODEC_QP_MIN                4
+#define CODEC_QP_MAX                51
+
+
 #define MIN(a, b) ((a) < (b))? (a) : (b)
 #define MAX(a, b) ((a) > (b))? (a) : (b)
 #define ALIGN16(x) ((((x) + 15) >> 4) << 4)
@@ -107,14 +115,6 @@ namespace android {
 
 /** Used to remove warnings about unused parameters */
 #define UNUSED(x) ((void)(x))
-
-/** Get time */
-#define GETTIME(a, b) gettimeofday(a, b);
-
-/** Compute difference between start and end */
-#define TIME_DIFF(start, end, diff) \
-    diff = (((end).tv_sec - (start).tv_sec) * 1000000) + \
-            ((end).tv_usec - (start).tv_usec);
 
 #define ive_aligned_malloc(alignment, size) memalign(alignment, size)
 #define ive_aligned_free(buf) free(buf)
@@ -141,6 +141,7 @@ protected:
     virtual ~C2SoftAvcEnc();
 
 private:
+    // RBE What does OMX have to do with the c2 plugin?
     // OMX input buffer's timestamp and flags
     typedef struct {
         int64_t mTimeUs;
@@ -151,8 +152,8 @@ private:
 
     int32_t mStride;
 
-    struct timeval mTimeStart;   // Time at the start of decode()
-    struct timeval mTimeEnd;     // Time at the end of decode()
+    nsecs_t mTimeStart = 0;   // Time at the start of decode()
+    nsecs_t mTimeEnd = 0;     // Time at the end of decode()
 
 #ifdef FILE_DUMP_ENABLE
     char mInFile[200];
@@ -167,7 +168,6 @@ private:
     bool     mSpsPpsHeaderReceived;
 
     bool     mSawInputEOS;
-    bool     mSawOutputEOS;
     bool     mSignalledError;
     bool     mIntra4x4;
     bool     mEnableFastSad;
@@ -183,6 +183,8 @@ private:
     size_t mNumMemRecords;       // Number of memory records requested by codec
     size_t mNumCores;            // Number of cores used by the codec
 
+    std::shared_ptr<C2LinearBlock> mOutBlock;
+
     // configurations used by component in process
     // (TODO: keep this in intf but make them internal only)
     std::shared_ptr<C2StreamPictureSizeInfo::input> mSize;
@@ -190,6 +192,7 @@ private:
     std::shared_ptr<C2StreamFrameRateInfo::output> mFrameRate;
     std::shared_ptr<C2StreamBitrateInfo::output> mBitrate;
     std::shared_ptr<C2StreamRequestSyncFrameTuning::output> mRequestSync;
+    std::shared_ptr<C2StreamColorAspectsInfo::output> mColorAspects;
 
     uint32_t mOutBufferSize;
     UWORD32 mHeaderGenerated;
@@ -223,6 +226,7 @@ private:
     c2_status_t setProfileParams();
     c2_status_t setDeblockParams();
     c2_status_t setVbvParams();
+    c2_status_t setVuiParams();
     void logVersion();
     c2_status_t setEncodeArgs(
             ive_video_encode_ip_t *ps_encode_ip,
@@ -230,7 +234,13 @@ private:
             const C2GraphicView *const input,
             uint8_t *base,
             uint32_t capacity,
-            uint64_t timestamp);
+            uint64_t workIndex);
+    void finishWork(uint64_t workIndex,
+            const std::unique_ptr<C2Work> &work,
+            ive_video_encode_op_t *ps_encode_op);
+    c2_status_t drainInternal(uint32_t drainMode,
+            const std::shared_ptr<C2BlockPool> &pool,
+            const std::unique_ptr<C2Work> &work);
 
     C2_DO_NOT_COPY(C2SoftAvcEnc);
 };
@@ -243,14 +253,14 @@ private:
 #define OUTPUT_DUMP_EXT     "h264"
 
 #define GENERATE_FILE_NAMES() {                         \
-    GETTIME(&mTimeStart, NULL);                         \
+    nsecs_t now = systemTime();                         \
     strcpy(mInFile, "");                                \
-    sprintf(mInFile, "%s_%ld.%ld.%s", INPUT_DUMP_PATH,  \
-            mTimeStart.tv_sec, mTimeStart.tv_usec,      \
+    sprintf(mInFile, "%s_%" PRId64 "d.%s",              \
+            INPUT_DUMP_PATH, now,                       \
             INPUT_DUMP_EXT);                            \
     strcpy(mOutFile, "");                               \
-    sprintf(mOutFile, "%s_%ld.%ld.%s", OUTPUT_DUMP_PATH,\
-            mTimeStart.tv_sec, mTimeStart.tv_usec,      \
+    sprintf(mOutFile, "%s_%" PRId64 "d.%s",             \
+            OUTPUT_DUMP_PATH, now,                      \
             OUTPUT_DUMP_EXT);                           \
 }
 

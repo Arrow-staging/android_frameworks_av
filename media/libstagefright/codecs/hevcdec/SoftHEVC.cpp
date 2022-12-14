@@ -569,7 +569,7 @@ void SoftHEVC::onQueueFilled(OMX_U32 portIndex) {
             status = ivdec_api_function(mCodecCtx, (void *)&s_dec_ip, (void *)&s_dec_op);
 
             bool unsupportedResolution =
-                (IVD_STREAM_WIDTH_HEIGHT_NOT_SUPPORTED == (s_dec_op.u4_error_code & 0xFF));
+                (IVD_STREAM_WIDTH_HEIGHT_NOT_SUPPORTED == (s_dec_op.u4_error_code & IVD_ERROR_MASK));
 
             /* Check for unsupported dimensions */
             if (unsupportedResolution) {
@@ -579,7 +579,8 @@ void SoftHEVC::onQueueFilled(OMX_U32 portIndex) {
                 return;
             }
 
-            bool allocationFailed = (IVD_MEM_ALLOC_FAILED == (s_dec_op.u4_error_code & 0xFF));
+            bool allocationFailed = 
+                (IVD_MEM_ALLOC_FAILED == (s_dec_op.u4_error_code & IVD_ERROR_MASK));
             if (allocationFailed) {
                 ALOGE("Allocation failure in decoder");
                 notify(OMX_EventError, OMX_ErrorUnsupportedSetting, 0, NULL);
@@ -587,7 +588,14 @@ void SoftHEVC::onQueueFilled(OMX_U32 portIndex) {
                 return;
             }
 
-            bool resChanged = (IVD_RES_CHANGED == (s_dec_op.u4_error_code & 0xFF));
+            if (IS_IVD_FATAL_ERROR(s_dec_op.u4_error_code)) {
+                ALOGE("Fatal Error : 0x%x", s_dec_op.u4_error_code);
+                notify(OMX_EventError, OMX_ErrorUnsupportedSetting, 0, NULL);
+                mSignalledError = true;
+                return;
+            }
+
+            bool resChanged = (IVD_RES_CHANGED == (s_dec_op.u4_error_code & IVD_ERROR_MASK));
 
             getVUIParams();
 
@@ -705,6 +713,7 @@ int SoftHEVC::getColorAspectPreference() {
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 android::SoftOMXComponent *createSoftOMXComponent(const char *name,
         const OMX_CALLBACKTYPE *callbacks, OMX_PTR appData,
         OMX_COMPONENTTYPE **component) {

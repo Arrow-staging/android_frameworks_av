@@ -18,10 +18,9 @@
 #define LOG_TAG "APacketSource"
 #include <utils/Log.h>
 
-#include "APacketSource.h"
-
-#include "ARawAudioAssembler.h"
-#include "ASessionDescription.h"
+#include <media/stagefright/rtsp/APacketSource.h>
+#include <media/stagefright/rtsp/ARawAudioAssembler.h>
+#include <media/stagefright/rtsp/ASessionDescription.h>
 
 #include <ctype.h>
 
@@ -112,7 +111,9 @@ static sp<ABuffer> MakeAVCCodecSpecificData(
     sp<ABuffer> profileLevelID = NULL;
     if (GetAttribute(params, "profile-level-id", &val)) {
         profileLevelID = decodeHex(val);
-        CHECK_EQ(profileLevelID->size(), 3u);
+        if (profileLevelID != NULL && profileLevelID->size() != 3u) {
+            profileLevelID = NULL;
+        }
     }
 
     Vector<sp<ABuffer> > paramSets;
@@ -376,8 +377,8 @@ static sp<ABuffer> MakeMPEG4VideoCodecSpecificData(
     ALOGI("VOL dimensions = %dx%d", *width, *height);
 
     size_t len1 = config->size() + GetSizeWidth(config->size()) + 1;
-    size_t len2 = len1 + GetSizeWidth(len1) + 1 + 13;
-    size_t len3 = len2 + GetSizeWidth(len2) + 1 + 3;
+    size_t len2 = len1 + GetSizeWidth(len1 + 13) + 1 + 13;
+    size_t len3 = len2 + GetSizeWidth(len2 + 3) + 1 + 3;
 
     sp<ABuffer> csd = new ABuffer(len3);
     uint8_t *dst = csd->data();
@@ -448,6 +449,17 @@ APacketSource::APacketSource(
         } else if (width < 0) {
             mInitCheck = ERROR_UNSUPPORTED;
             return;
+        }
+
+        mFormat->setInt32(kKeyWidth, width);
+        mFormat->setInt32(kKeyHeight, height);
+    } else if (!strncmp(desc.c_str(), "H265/", 5)) {
+        mFormat->setCString(kKeyMIMEType, MEDIA_MIMETYPE_VIDEO_HEVC);
+
+        int32_t width, height;
+        if (!sessionDesc->getDimensions(index, PT, &width, &height)) {
+            width = -1;
+            height = -1;
         }
 
         mFormat->setInt32(kKeyWidth, width);
@@ -579,6 +591,17 @@ status_t APacketSource::initCheck() const {
 
 sp<MetaData> APacketSource::getFormat() {
     return mFormat;
+}
+
+bool APacketSource::isVideo() {
+    bool isVideo = false;
+
+    const char *mime;
+    if (mFormat->findCString(kKeyMIMEType, &mime)) {
+        isVideo = !strncasecmp(mime, "video/", 6);
+    }
+
+    return isVideo;
 }
 
 }  // namespace android

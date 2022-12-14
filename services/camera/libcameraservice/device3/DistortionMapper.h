@@ -22,6 +22,7 @@
 #include <mutex>
 
 #include "camera/CameraMetadata.h"
+#include "device3/CoordinateMapper.h"
 
 namespace android {
 
@@ -31,9 +32,16 @@ namespace camera3 {
  * Utilities to transform between raw (distorted) and warped (corrected) coordinate systems
  * for cameras that support geometric distortion
  */
-class DistortionMapper {
+class DistortionMapper : public CoordinateMapper {
   public:
     DistortionMapper();
+
+    DistortionMapper(const DistortionMapper& other) :
+            mDistortionMapperInfo(other.mDistortionMapperInfo),
+            mDistortionMapperInfoMaximumResolution(other.mDistortionMapperInfoMaximumResolution) {
+            initRemappedKeys(); }
+
+    void initRemappedKeys() override;
 
     /**
      * Check whether distortion correction is supported by the camera HAL
@@ -62,10 +70,14 @@ class DistortionMapper {
 
 
   public: // Visible for testing. Not guarded by mutex; do not use concurrently
+
+    struct DistortionMapperInfo;
+
     /**
      * Update lens calibration from capture results or equivalent
      */
-    status_t updateCalibration(const CameraMetadata &result);
+    status_t updateCalibration(const CameraMetadata &result, bool isStatic = false,
+            bool maxResolution = false);
 
     /**
      * Transform from distorted (original) to corrected (warped) coordinates.
@@ -76,8 +88,8 @@ class DistortionMapper {
      *   clamp: Whether to clamp the result to the bounds of the active array
      *   simple: Whether to do complex correction or just a simple linear map
      */
-    status_t mapRawToCorrected(int32_t *coordPairs, int coordCount, bool clamp,
-            bool simple = true);
+    status_t mapRawToCorrected(int32_t *coordPairs, int coordCount,
+            DistortionMapperInfo *mapperInfo, bool clamp, bool simple = true);
 
     /**
      * Transform from distorted (original) to corrected (warped) coordinates.
@@ -88,8 +100,8 @@ class DistortionMapper {
      *   clamp: Whether to clamp the result to the bounds of the active array
      *   simple: Whether to do complex correction or just a simple linear map
      */
-    status_t mapRawRectToCorrected(int32_t *rects, int rectCount, bool clamp,
-            bool simple = true);
+    status_t mapRawRectToCorrected(int32_t *rects, int rectCount,
+          DistortionMapperInfo *mapperInfo, bool clamp, bool simple = true);
 
     /**
      * Transform from corrected (warped) to distorted (original) coordinates.
@@ -100,8 +112,8 @@ class DistortionMapper {
      *   clamp: Whether to clamp the result to the bounds of the precorrection active array
      *   simple: Whether to do complex correction or just a simple linear map
      */
-    status_t mapCorrectedToRaw(int32_t* coordPairs, int coordCount, bool clamp,
-            bool simple = true) const;
+    status_t mapCorrectedToRaw(int32_t* coordPairs, int coordCount,
+            const DistortionMapperInfo *mapperInfo, bool clamp, bool simple = true) const;
 
     /**
      * Transform from corrected (warped) to distorted (original) coordinates.
@@ -112,8 +124,8 @@ class DistortionMapper {
      *   clamp: Whether to clamp the result to the bounds of the precorrection active array
      *   simple: Whether to do complex correction or just a simple linear map
      */
-    status_t mapCorrectedRectToRaw(int32_t *rects, int rectCount, bool clamp,
-            bool simple = true) const;
+    status_t mapCorrectedRectToRaw(int32_t *rects, int rectCount,
+           const DistortionMapperInfo *mapperInfo, bool clamp, bool simple = true) const;
 
     struct GridQuad {
         // Source grid quad, or null
@@ -121,6 +133,28 @@ class DistortionMapper {
         // x,y coordinates of corners, in
         // clockwise order
         std::array<float, 8> coords;
+    };
+
+    struct DistortionMapperInfo {
+        bool mValidMapping = false;
+        bool mValidGrids = false;
+
+        // intrisic parameters, in pixels
+        float mFx, mFy, mCx, mCy, mS;
+        // pre-calculated inverses for speed
+        float mInvFx, mInvFy;
+        // radial/tangential distortion parameters
+        std::array<float, 5> mK;
+
+        // pre-correction active array dimensions
+        float mArrayWidth, mArrayHeight;
+        // active array dimensions
+        float mActiveWidth, mActiveHeight;
+        // corner offsets between pre-correction and active arrays
+        float mArrayDiffX, mArrayDiffY;
+
+        std::vector<GridQuad> mCorrectedGrid;
+        std::vector<GridQuad> mDistortedGrid;
     };
 
     // Find which grid quad encloses the point; returns null if none do
@@ -140,6 +174,11 @@ class DistortionMapper {
     // if it is false, then an interpolation coordinate for edges E14 and E23 is found.
     static float calculateUorV(const int32_t pt[2], const GridQuad& quad, bool calculateU);
 
+    DistortionMapperInfo *getMapperInfo(bool maxResolution = false) {
+          return maxResolution ? &mDistortionMapperInfoMaximumResolution :
+                  &mDistortionMapperInfo;
+    };
+
   private:
     mutable std::mutex mMutex;
 
@@ -150,53 +189,28 @@ class DistortionMapper {
     // Fuzziness for float inequality tests
     constexpr static float kFloatFuzz = 1e-4;
 
-    // Metadata key lists to correct
+    bool mMaxResolution = false;
 
-    // Both capture request and result
-    static const std::array<uint32_t, 3> kMeteringRegionsToCorrect;
-
-    // Only capture request
-    static const std::array<uint32_t, 1> kRequestRectsToCorrect;
-
-    // Only capture result
-    static const std::array<uint32_t, 1> kResultRectsToCorrect;
-
-    // Only for capture results; don't clamp
-    static const std::array<uint32_t, 2> kResultPointsToCorrectNoClamp;
+    status_t setupStaticInfoLocked(const CameraMetadata &deviceInfo, bool maxResolution);
 
     // Single implementation for various mapCorrectedToRaw methods
     template<typename T>
-    status_t mapCorrectedToRawImpl(T* coordPairs, int coordCount, bool clamp, bool simple) const;
+    status_t mapCorrectedToRawImpl(T* coordPairs, int coordCount,
+            const DistortionMapperInfo *mapperInfo, bool clamp, bool simple) const;
 
     // Simple linear interpolation option
     template<typename T>
-    status_t mapCorrectedToRawImplSimple(T* coordPairs, int coordCount, bool clamp) const;
+    status_t mapCorrectedToRawImplSimple(T* coordPairs, int coordCount,
+            const DistortionMapperInfo *mapperInfo, bool clamp) const;
 
-    status_t mapRawToCorrectedSimple(int32_t *coordPairs, int coordCount, bool clamp) const;
+    status_t mapRawToCorrectedSimple(int32_t *coordPairs, int coordCount,
+            const DistortionMapperInfo *mapperInfo, bool clamp) const;
 
     // Utility to create reverse mapping grids
-    status_t buildGrids();
+    status_t buildGrids(DistortionMapperInfo *mapperInfo);
 
-
-    bool mValidMapping;
-    bool mValidGrids;
-
-    // intrisic parameters, in pixels
-    float mFx, mFy, mCx, mCy, mS;
-    // pre-calculated inverses for speed
-    float mInvFx, mInvFy;
-    // radial/tangential distortion parameters
-    float mK[5];
-
-    // pre-correction active array dimensions
-    float mArrayWidth, mArrayHeight;
-    // active array dimensions
-    float mActiveWidth, mActiveHeight;
-    // corner offsets between pre-correction and active arrays
-    float mArrayDiffX, mArrayDiffY;
-
-    std::vector<GridQuad> mCorrectedGrid;
-    std::vector<GridQuad> mDistortedGrid;
+    DistortionMapperInfo mDistortionMapperInfo;
+    DistortionMapperInfo mDistortionMapperInfoMaximumResolution;
 
 }; // class DistortionMapper
 

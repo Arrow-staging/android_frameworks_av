@@ -39,8 +39,8 @@ struct DepthPhotoInputFrame {
     size_t                mMaxJpegSize;
     uint8_t               mJpegQuality;
     uint8_t               mIsLogical;
-    float                 mInstrinsicCalibration[5];
-    uint8_t               mIsInstrinsicCalibrationValid;
+    float                 mIntrinsicCalibration[5];
+    uint8_t               mIsIntrinsicCalibrationValid;
     float                 mLensDistortion[5];
     uint8_t               mIsLensDistortionValid;
     DepthPhotoOrientation mOrientation;
@@ -57,16 +57,14 @@ struct DepthPhotoInputFrame {
             mMaxJpegSize(0),
             mJpegQuality(100),
             mIsLogical(0),
-            mInstrinsicCalibration{0.f},
-            mIsInstrinsicCalibrationValid(0),
+            mIntrinsicCalibration{0.f},
+            mIsIntrinsicCalibrationValid(0),
             mLensDistortion{0.f},
             mIsLensDistortionValid(0),
             mOrientation(DepthPhotoOrientation::DEPTH_ORIENTATION_0_DEGREES) {}
 };
 
-static const char *kDepthPhotoLibrary = "libdepthphoto.so";
-static const char *kDepthPhotoProcessFunction = "processDepthPhotoFrame";
-typedef int (*process_depth_photo_frame) (DepthPhotoInputFrame /*inputFrame*/,
+int processDepthPhotoFrame(DepthPhotoInputFrame /*inputFrame*/,
         size_t /*depthPhotoBufferSize*/, void* /*depthPhotoBuffer out*/,
         size_t* /*depthPhotoActualSize out*/);
 

@@ -27,7 +27,6 @@
 
 #include "Configuration.h"
 #include <time.h>
-#include <utils/Debug.h>
 #include <utils/Log.h>
 #include <utils/Trace.h>
 #include <system/audio.h>
@@ -40,6 +39,7 @@
 #include <audio_utils/channels.h>
 #include <audio_utils/format.h>
 #include <audio_utils/mono_blend.h>
+#include <cutils/bitops.h>
 #include <media/AudioMixer.h>
 #include "FastMixer.h"
 #include "TypedLogger.h"
@@ -47,6 +47,15 @@
 namespace android {
 
 /*static*/ const FastMixerState FastMixer::sInitial;
+
+static audio_channel_mask_t getChannelMaskFromCount(size_t count) {
+    const audio_channel_mask_t mask = audio_channel_out_mask_from_count(count);
+    if (mask == AUDIO_CHANNEL_INVALID) {
+        // some counts have no positional masks. TODO: Update this to return index count?
+        return audio_channel_mask_for_index_assignment_from_count(count);
+    }
+    return mask;
+}
 
 FastMixer::FastMixer(audio_io_handle_t parentIoHandle)
     : FastThread("cycle_ms", "load_us"),
@@ -79,7 +88,8 @@ FastMixer::FastMixer(audio_io_handle_t parentIoHandle)
     mDummyDumpState = &mDummyFastMixerDumpState;
     // TODO: Add channel mask to NBAIO_Format.
     // We assume that the channel mask must be a valid positional channel mask.
-    mSinkChannelMask = audio_channel_out_mask_from_count(mSinkChannelCount);
+    mSinkChannelMask = getChannelMaskFromCount(mSinkChannelCount);
+    mBalance.setChannelMask(mSinkChannelMask);
 
     unsigned i;
     for (i = 0; i < FastMixerState::sMaxFastTracks; ++i) {
@@ -105,13 +115,8 @@ const FastThreadState *FastMixer::poll()
     return mSQ.poll();
 }
 
-void FastMixer::setNBLogWriter(NBLog::Writer *logWriter)
+void FastMixer::setNBLogWriter(NBLog::Writer *logWriter __unused)
 {
-    // FIXME If mMixer is set or changed prior to this, we don't inform correctly.
-    //       Should cache logWriter and re-apply it at the assignment to mMixer.
-    if (mMixer != NULL) {
-        mMixer->setNBLogWriter(logWriter);
-    }
 }
 
 void FastMixer::onIdle()
@@ -200,6 +205,8 @@ void FastMixer::updateMixerTrack(int index, Reason reason) {
                 (void *)(uintptr_t)fastTrack->mHapticPlaybackEnabled);
         mMixer->setParameter(index, AudioMixer::TRACK, AudioMixer::HAPTIC_INTENSITY,
                 (void *)(uintptr_t)fastTrack->mHapticIntensity);
+        mMixer->setParameter(index, AudioMixer::TRACK, AudioMixer::HAPTIC_MAX_AMPLITUDE,
+                (void *)(&(fastTrack->mHapticMaxAmplitude)));
 
         mMixer->enable(index);
         break;
@@ -243,7 +250,7 @@ void FastMixer::onStateChange()
             LOG_ALWAYS_FATAL_IF(mSinkChannelCount > AudioMixer::MAX_NUM_CHANNELS);
 
             if (mSinkChannelMask == AUDIO_CHANNEL_NONE) {
-                mSinkChannelMask = audio_channel_out_mask_from_count(mSinkChannelCount);
+                mSinkChannelMask = getChannelMaskFromCount(mSinkChannelCount);
             }
             mAudioChannelCount = mSinkChannelCount - audio_channel_count_from_out_mask(
                     mSinkChannelMask & AUDIO_CHANNEL_HAPTIC_ALL);
@@ -358,7 +365,8 @@ void FastMixer::onWork()
 #endif
         //ALOGD("Eric FastMixer::onWork() mIsWarm");
     } else {
-        dumpState->mTimestampVerifier.discontinuity();
+        dumpState->mTimestampVerifier.discontinuity(
+            dumpState->mTimestampVerifier.DISCONTINUITY_MODE_CONTINUOUS);
         // See comment in if block.
 #ifdef FASTMIXER_LOG_HIST_TS
         LOG_AUDIO_STATE();

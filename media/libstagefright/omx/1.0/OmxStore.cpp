@@ -17,6 +17,8 @@
 #include <ios>
 #include <list>
 
+#define LOG_TAG "OmxStore"
+
 #include <android-base/logging.h>
 
 #include <media/stagefright/omx/1.0/Conversion.h>
@@ -30,16 +32,51 @@ namespace omx {
 namespace V1_0 {
 namespace implementation {
 
+using ::android::hardware::media::omx::V1_0::Status;
+using ::android::hardware::media::omx::V1_0::IOmx;
+
 OmxStore::OmxStore(
+        const sp<IOmx> &omx,
         const char* owner,
-        const char* const* searchDirs,
-        const char* mainXmlName,
-        const char* performanceXmlName,
+        const std::vector<std::string> &searchDirs,
+        const std::vector<std::string> &xmlNames,
         const char* profilingResultsXmlPath) {
-    MediaCodecsXmlParser parser(searchDirs,
-            mainXmlName,
-            performanceXmlName,
-            profilingResultsXmlPath);
+    // retrieve list of omx nodes
+    std::set<std::string> nodes;
+    if (omx != nullptr) {
+        omx->listNodes([&nodes](const Status &status,
+                                const hidl_vec<IOmx::ComponentInfo> &nodeList) {
+            if (status == Status::OK) {
+                for (const IOmx::ComponentInfo& info : nodeList) {
+                    nodes.emplace(info.mName.c_str());
+                }
+            }
+        });
+    }
+
+    if (!nodes.empty()) {
+        auto anyNode = nodes.cbegin();
+        std::string::const_iterator first = anyNode->cbegin();
+        std::string::const_iterator last = anyNode->cend();
+        for (const std::string &name : nodes) {
+            std::string::const_iterator it1 = first;
+            for (std::string::const_iterator it2 = name.cbegin();
+                    it1 != last && it2 != name.cend() && tolower(*it1) == tolower(*it2);
+                    ++it1, ++it2) {
+            }
+            last = it1;
+        }
+        mPrefix = std::string(first, last);
+        LOG(INFO) << "omx common prefix: '" << mPrefix.c_str() << "'";
+    } else {
+        LOG(INFO) << "omx common prefix: no nodes";
+    }
+
+    MediaCodecsXmlParser parser;
+    parser.parseXmlFilesInSearchDirs(xmlNames, searchDirs);
+    if (profilingResultsXmlPath != nullptr) {
+        parser.parseXmlPath(profilingResultsXmlPath);
+    }
     mParsingStatus = toStatus(parser.getParsingStatus());
 
     const auto& serviceAttributeMap = parser.getServiceAttributeMap();
@@ -66,6 +103,13 @@ OmxStore::OmxStore(
         nodeList.resize(rolePair.second.nodeList.size());
         size_t j = 0;
         for (const auto& nodePair : rolePair.second.nodeList) {
+            if (!nodes.count(nodePair.second.name)) {
+                // not supported by this OMX instance
+                if (!strncasecmp(nodePair.second.name.c_str(), "omx.", 4)) {
+                    LOG(INFO) << "node [" << nodePair.second.name.c_str() << "] not found in IOmx";
+                }
+                continue;
+            }
             NodeInfo node;
             node.name = nodePair.second.name;
             node.owner = owner;
@@ -82,11 +126,10 @@ OmxStore::OmxStore(
             nodeList[j] = std::move(node);
             ++j;
         }
+        nodeList.resize(j);
         mRoleList[i] = std::move(role);
         ++i;
     }
-
-    mPrefix = parser.getCommonPrefix();
 }
 
 OmxStore::~OmxStore() {

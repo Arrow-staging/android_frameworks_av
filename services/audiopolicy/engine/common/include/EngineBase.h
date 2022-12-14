@@ -17,18 +17,19 @@
 #pragma once
 
 #include <EngineConfig.h>
-#include <AudioPolicyManagerInterface.h>
+#include <EngineInterface.h>
 #include <ProductStrategy.h>
 #include <VolumeGroup.h>
+#include <LastRemovableMediaDevices.h>
 
 namespace android {
 namespace audio_policy {
 
-class EngineBase : public AudioPolicyManagerInterface
+class EngineBase : public EngineInterface
 {
 public:
     ///
-    /// from AudioPolicyManagerInterface
+    /// from EngineInterface
     ///
     android::status_t initCheck() override;
 
@@ -49,12 +50,10 @@ public:
         return mForceUse[usage];
     }
     android::status_t setDeviceConnectionState(const sp<DeviceDescriptor> /*devDesc*/,
-                                               audio_policy_dev_state_t /*state*/) override
-    {
-        return NO_ERROR;
-    }
+                                               audio_policy_dev_state_t /*state*/) override;
+
     product_strategy_t getProductStrategyForAttributes(
-            const audio_attributes_t &attr) const override;
+            const audio_attributes_t &attr, bool fallbackOnDefault = true) const override;
 
     audio_stream_type_t getStreamTypeForAttributes(const audio_attributes_t &attr) const override;
 
@@ -80,18 +79,36 @@ public:
 
     VolumeGroupVector getVolumeGroups() const override;
 
-    volume_group_t getVolumeGroupForAttributes(const audio_attributes_t &attr) const override;
+    volume_group_t getVolumeGroupForAttributes(
+            const audio_attributes_t &attr, bool fallbackOnDefault = true) const override;
 
-    volume_group_t getVolumeGroupForStreamType(audio_stream_type_t stream) const override;
-
-    StreamTypeVector getStreamTypesForVolumeGroup(volume_group_t volumeGroup) const override;
-
-    AttributesVector getAllAttributesForVolumeGroup(volume_group_t volumeGroup) const override;
+    volume_group_t getVolumeGroupForStreamType(
+            audio_stream_type_t stream, bool fallbackOnDefault = true) const override;
 
     status_t listAudioVolumeGroups(AudioVolumeGroupVector &groups) const override;
 
+    /**
+     * Get the list of currently connected removable device types ordered from most recently
+     * connected to least recently connected.
+     * @param group the device group to consider: wired, a2dp... If none, consider all groups.
+     * @param excludedDevices list of device types to ignore
+     * @return a potentially empty ordered list of connected removable devices.
+     */
+    std::vector<audio_devices_t> getLastRemovableMediaDevices(
+            device_out_group_t group = GROUP_NONE,
+            std::vector<audio_devices_t> excludedDevices = {}) const {
+        return mLastRemovableMediaDevices.getLastRemovableMediaDevices(group, excludedDevices);
+    }
+
     void dump(String8 *dst) const override;
 
+    status_t setDevicesRoleForStrategy(product_strategy_t strategy, device_role_t role,
+            const AudioDeviceTypeAddrVector &devices) override;
+
+    status_t removeDevicesRoleForStrategy(product_strategy_t strategy, device_role_t role) override;
+
+    status_t getDevicesForRoleAndStrategy(product_strategy_t strategy, device_role_t role,
+            AudioDeviceTypeAddrVector &devices) const override;
 
     engineConfig::ParsingResult loadAudioPolicyEngineConfig();
 
@@ -112,18 +129,63 @@ public:
 
     VolumeSource toVolumeSource(audio_stream_type_t stream) const
     {
-        return static_cast<VolumeSource>(stream);
+        return static_cast<VolumeSource>(getVolumeGroupForStreamType(stream));
     }
 
     status_t switchVolumeCurve(audio_stream_type_t streamSrc, audio_stream_type_t streamDst);
 
     status_t restoreOriginVolumeCurve(audio_stream_type_t stream);
 
- private:
+    status_t setDevicesRoleForCapturePreset(audio_source_t audioSource, device_role_t role,
+            const AudioDeviceTypeAddrVector &devices) override;
+
+    status_t addDevicesRoleForCapturePreset(audio_source_t audioSource, device_role_t role,
+            const AudioDeviceTypeAddrVector &devices) override;
+
+    /**
+     * Remove devices role for capture preset. When `forceMatched` is true, the devices to be
+     * removed must all show as role for the capture preset. Otherwise, only devices that has shown
+     * as role for the capture preset will be remove.
+     */
+    status_t doRemoveDevicesRoleForCapturePreset(audio_source_t audioSource,
+            device_role_t role, const AudioDeviceTypeAddrVector& devices,
+            bool forceMatched=true);
+
+    status_t removeDevicesRoleForCapturePreset(audio_source_t audioSource,
+            device_role_t role, const AudioDeviceTypeAddrVector& devices) override;
+
+    status_t clearDevicesRoleForCapturePreset(audio_source_t audioSource,
+            device_role_t role) override;
+
+    status_t getDevicesForRoleAndCapturePreset(audio_source_t audioSource,
+            device_role_t role, AudioDeviceTypeAddrVector &devices) const override;
+
+    DeviceVector getActiveMediaDevices(const DeviceVector& availableDevices) const override;
+
+private:
+    /**
+     * Get media devices as the given role
+     *
+     * @param role the audio devices role
+     * @param availableDevices all available devices
+     * @param devices the DeviceVector to store devices as the given role
+     * @return NO_ERROR if all devices associated to the given role are present in available devices
+     *         NAME_NO_FOUND if there is no strategy for media or there are no devices associate to
+     *         the given role
+     *         NOT_ENOUGH_DATA if not all devices as given role are present in available devices
+     */
+    status_t getMediaDevicesForRole(device_role_t role, const DeviceVector& availableDevices,
+            DeviceVector& devices) const;
+
+    void dumpCapturePresetDevicesRoleMap(String8 *dst, int spaces) const;
+
     AudioPolicyManagerObserver *mApmObserver = nullptr;
 
     ProductStrategyMap mProductStrategies;
+    ProductStrategyDevicesRoleMap mProductStrategyDeviceRoleMap;
+    CapturePresetDevicesRoleMap mCapturePresetDevicesRoleMap;
     VolumeGroupMap mVolumeGroups;
+    LastRemovableMediaDevices mLastRemovableMediaDevices;
     audio_mode_t mPhoneState = AUDIO_MODE_NORMAL;  /**< current phone state. */
 
     /** current forced use configuration. */

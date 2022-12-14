@@ -17,12 +17,11 @@
 #include "SineSource.h"
 
 #include <binder/ProcessState.h>
+#include <datasource/FileSource.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/ALooper.h>
 #include <media/stagefright/foundation/AMessage.h>
-#include <media/stagefright/AudioPlayer.h>
 #include <media/stagefright/CameraSource.h>
-#include <media/stagefright/FileSource.h>
 #include <media/stagefright/MediaBufferGroup.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaCodecSource.h>
@@ -32,6 +31,7 @@
 #include <media/stagefright/MPEG4Writer.h>
 #include <media/stagefright/SimpleDecodingSource.h>
 #include <media/MediaPlayerInterface.h>
+
 
 using namespace android;
 
@@ -258,31 +258,6 @@ int main(int argc, char **argv) {
     printf("$\n");
 #endif
 
-#if 0
-    CameraSource *source = CameraSource::Create(
-            String16(argv[0], strlen(argv[0])));
-    source->start();
-
-    printf("source = %p\n", source);
-
-    for (int i = 0; i < 100; ++i) {
-        MediaBuffer *buffer;
-        status_t err = source->read(&buffer);
-        CHECK_EQ(err, (status_t)OK);
-
-        printf("got a frame, data=%p, size=%d\n",
-               buffer->data(), buffer->range_length());
-
-        buffer->release();
-        buffer = NULL;
-    }
-
-    err = source->stop();
-
-    delete source;
-    source = NULL;
-#endif
-
     if (err != OK && err != ERROR_END_OF_STREAM) {
         fprintf(stderr, "record failed: %d\n", err);
         return 1;
@@ -297,17 +272,6 @@ int main(int /* argc */, char ** /* argv */) {
     const int32_t kSampleRate = 22050;
     const int32_t kNumChannels = 2;
     sp<MediaSource> audioSource = new SineSource(kSampleRate, kNumChannels);
-
-#if 0
-    sp<MediaPlayerBase::AudioSink> audioSink;
-    AudioPlayer *player = new AudioPlayer(audioSink);
-    player->setSource(audioSource);
-    player->start();
-
-    sleep(10);
-
-    player->stop();
-#endif
 
     sp<AMessage> encMeta = new AMessage;
     encMeta->setString("mime",

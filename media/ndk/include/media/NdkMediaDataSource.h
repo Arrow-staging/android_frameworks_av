@@ -38,8 +38,6 @@ __BEGIN_DECLS
 struct AMediaDataSource;
 typedef struct AMediaDataSource AMediaDataSource;
 
-#if __ANDROID_API__ >= 28
-
 /*
  * AMediaDataSource's callbacks will be invoked on an implementation-defined thread
  * or thread pool. No guarantees are provided about which thread(s) will be used for
@@ -88,10 +86,10 @@ typedef void (*AMediaDataSourceClose)(void *userdata);
 /**
  * Create new media data source. Returns NULL if memory allocation
  * for the new data source object fails.
+ *
+ * Available since API level 28.
  */
 AMediaDataSource* AMediaDataSource_new() __INTRODUCED_IN(28);
-
-#if __ANDROID_API__ >= 29
 
 /**
  * Called to get an estimate of the number of bytes that can be read from this data source
@@ -116,21 +114,24 @@ typedef ssize_t (*AMediaDataSourceGetAvailableSize)(void *userdata, off64_t offs
  * ...
  * key_values[(numheaders - 1) * 2]:key_values[(numheaders - 1) * 2 + 1]
  *
+ * Available since API level 29.
  */
 AMediaDataSource* AMediaDataSource_newUri(const char *uri,
         int numheaders,
         const char * const *key_values) __INTRODUCED_IN(29);
 
-#endif  /*__ANDROID_API__ >= 29 */
-
 /**
  * Delete a previously created media data source.
+ *
+ * Available since API level 28.
  */
 void AMediaDataSource_delete(AMediaDataSource*) __INTRODUCED_IN(28);
 
 /**
  * Set an user provided opaque handle. This opaque handle is passed as
  * the first argument to the data source callbacks.
+ *
+ * Available since API level 28.
  */
 void AMediaDataSource_setUserdata(
         AMediaDataSource*, void *userdata) __INTRODUCED_IN(28);
@@ -145,6 +146,8 @@ void AMediaDataSource_setUserdata(
  *
  * Please refer to the definition of AMediaDataSourceReadAt for
  * additional details.
+ *
+ * Available since API level 28.
  */
 void AMediaDataSource_setReadAt(
         AMediaDataSource*,
@@ -156,6 +159,8 @@ void AMediaDataSource_setReadAt(
  *
  * Please refer to the definition of AMediaDataSourceGetSize for
  * additional details.
+ *
+ * Available since API level 28.
  */
 void AMediaDataSource_setGetSize(
         AMediaDataSource*,
@@ -167,20 +172,20 @@ void AMediaDataSource_setGetSize(
  *
  * Please refer to the definition of AMediaDataSourceClose for
  * additional details.
+ *
+ * Available since API level 28.
  */
 void AMediaDataSource_setClose(
         AMediaDataSource*,
         AMediaDataSourceClose) __INTRODUCED_IN(28);
-
-#endif  /*__ANDROID_API__ >= 28 */
-
-#if __ANDROID_API__ >= 29
 
 /**
  * Close the data source, unblock reads, and release associated resources.
  *
  * Please refer to the definition of AMediaDataSourceClose for
  * additional details.
+ *
+ * Available since API level 29.
  */
 void AMediaDataSource_close(AMediaDataSource*) __INTRODUCED_IN(29);
 
@@ -191,12 +196,12 @@ void AMediaDataSource_close(AMediaDataSource*) __INTRODUCED_IN(29);
  *
  * Please refer to the definition of AMediaDataSourceGetAvailableSize
  * for additional details.
+ *
+ * Available since API level 29.
  */
 void AMediaDataSource_setGetAvailableSize(
         AMediaDataSource*,
         AMediaDataSourceGetAvailableSize) __INTRODUCED_IN(29);
-
-#endif  /*__ANDROID_API__ >= 29 */
 
 __END_DECLS
 

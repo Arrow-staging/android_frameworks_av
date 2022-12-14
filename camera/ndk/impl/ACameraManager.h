@@ -54,6 +54,11 @@ class CameraManagerGlobal final : public RefBase {
     void unregisterAvailabilityCallback(
             const ACameraManager_AvailabilityCallbacks *callback);
 
+    void registerExtendedAvailabilityCallback(
+            const ACameraManager_ExtendedAvailabilityCallbacks* callback);
+    void unregisterExtendedAvailabilityCallback(
+            const ACameraManager_ExtendedAvailabilityCallbacks* callback);
+
     /**
      * Return camera IDs that support camera2
      */
@@ -61,9 +66,12 @@ class CameraManagerGlobal final : public RefBase {
 
   private:
     sp<hardware::ICameraService> mCameraService;
-    const int          kCameraServicePollDelay = 500000; // 0.5s
-    const char*        kCameraServiceName      = "media.camera";
-    Mutex              mLock;
+    const int                    kCameraServicePollDelay = 500000; // 0.5s
+    const char*                  kCameraServiceName      = "media.camera";
+    Mutex                        mLock;
+
+    template<class T>
+    void registerAvailCallback(const T *callback);
 
     class DeathNotifier : public IBinder::DeathRecipient {
       public:
@@ -80,9 +88,22 @@ class CameraManagerGlobal final : public RefBase {
       public:
         explicit CameraServiceListener(CameraManagerGlobal* cm) : mCameraManager(cm) {}
         virtual binder::Status onStatusChanged(int32_t status, const String16& cameraId);
+        virtual binder::Status onPhysicalCameraStatusChanged(int32_t status,
+                const String16& cameraId, const String16& physicalCameraId);
 
         // Torch API not implemented yet
         virtual binder::Status onTorchStatusChanged(int32_t, const String16&) {
+            return binder::Status::ok();
+        }
+        virtual binder::Status onTorchStrengthLevelChanged(const String16&, int32_t) {
+            return binder::Status::ok();
+        }
+
+        virtual binder::Status onCameraAccessPrioritiesChanged();
+        virtual binder::Status onCameraOpened(const String16&, const String16&) {
+            return binder::Status::ok();
+        }
+        virtual binder::Status onCameraClosed(const String16&) {
             return binder::Status::ok();
         }
 
@@ -96,51 +117,101 @@ class CameraManagerGlobal final : public RefBase {
         explicit Callback(const ACameraManager_AvailabilityCallbacks *callback) :
             mAvailable(callback->onCameraAvailable),
             mUnavailable(callback->onCameraUnavailable),
+            mAccessPriorityChanged(nullptr),
+            mPhysicalCamAvailable(nullptr),
+            mPhysicalCamUnavailable(nullptr),
             mContext(callback->context) {}
+
+        explicit Callback(const ACameraManager_ExtendedAvailabilityCallbacks *callback) :
+            mAvailable(callback->availabilityCallbacks.onCameraAvailable),
+            mUnavailable(callback->availabilityCallbacks.onCameraUnavailable),
+            mAccessPriorityChanged(callback->onCameraAccessPrioritiesChanged),
+            mPhysicalCamAvailable(callback->onPhysicalCameraAvailable),
+            mPhysicalCamUnavailable(callback->onPhysicalCameraUnavailable),
+            mContext(callback->availabilityCallbacks.context) {}
 
         bool operator == (const Callback& other) const {
             return (mAvailable == other.mAvailable &&
                     mUnavailable == other.mUnavailable &&
+                    mAccessPriorityChanged == other.mAccessPriorityChanged &&
+                    mPhysicalCamAvailable == other.mPhysicalCamAvailable &&
+                    mPhysicalCamUnavailable == other.mPhysicalCamUnavailable &&
                     mContext == other.mContext);
         }
         bool operator != (const Callback& other) const {
             return !(*this == other);
         }
         bool operator < (const Callback& other) const {
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wordered-compare-function-pointers"
             if (*this == other) return false;
             if (mContext != other.mContext) return mContext < other.mContext;
+            if (mPhysicalCamAvailable != other.mPhysicalCamAvailable) {
+                return mPhysicalCamAvailable < other.mPhysicalCamAvailable;
+            }
+            if (mPhysicalCamUnavailable != other.mPhysicalCamUnavailable) {
+                return mPhysicalCamUnavailable < other.mPhysicalCamUnavailable;
+            }
+            if (mAccessPriorityChanged != other.mAccessPriorityChanged) {
+                return mAccessPriorityChanged < other.mAccessPriorityChanged;
+            }
             if (mAvailable != other.mAvailable) return mAvailable < other.mAvailable;
             return mUnavailable < other.mUnavailable;
+#pragma GCC diagnostic pop
         }
         bool operator > (const Callback& other) const {
             return (*this != other && !(*this < other));
         }
         ACameraManager_AvailabilityCallback mAvailable;
         ACameraManager_AvailabilityCallback mUnavailable;
+        ACameraManager_AccessPrioritiesChangedCallback mAccessPriorityChanged;
+        ACameraManager_PhysicalCameraAvailabilityCallback mPhysicalCamAvailable;
+        ACameraManager_PhysicalCameraAvailabilityCallback mPhysicalCamUnavailable;
         void*                               mContext;
     };
+
+    android::Condition mCallbacksCond;
+    size_t mPendingCallbackCnt = 0;
+    void onCallbackCalled();
+    void drainPendingCallbacksLocked();
+
     std::set<Callback> mCallbacks;
 
     // definition of handler and message
     enum {
-        kWhatSendSingleCallback
+        kWhatSendSingleCallback,
+        kWhatSendSingleAccessCallback,
+        kWhatSendSinglePhysicalCameraCallback,
     };
     static const char* kCameraIdKey;
+    static const char* kPhysicalCameraIdKey;
     static const char* kCallbackFpKey;
     static const char* kContextKey;
+    static const nsecs_t kCallbackDrainTimeout;
     class CallbackHandler : public AHandler {
       public:
-        CallbackHandler() {}
+        CallbackHandler(wp<CameraManagerGlobal> parent) : mParent(parent) {}
         void onMessageReceived(const sp<AMessage> &msg) override;
+
+      private:
+        wp<CameraManagerGlobal> mParent;
+        void notifyParent();
+        void onMessageReceivedInternal(const sp<AMessage> &msg);
     };
     sp<CallbackHandler> mHandler;
     sp<ALooper>         mCbLooper; // Looper thread where callbacks actually happen on
 
+    sp<hardware::ICameraService> getCameraServiceLocked();
+    void onCameraAccessPrioritiesChanged();
     void onStatusChanged(int32_t status, const String8& cameraId);
     void onStatusChangedLocked(int32_t status, const String8& cameraId);
+    void onStatusChanged(int32_t status, const String8& cameraId, const String8& physicalCameraId);
+    void onStatusChangedLocked(int32_t status, const String8& cameraId,
+           const String8& physicalCameraId);
     // Utils for status
     static bool validStatus(int32_t status);
     static bool isStatusAvailable(int32_t status);
+    bool supportsCamera2ApiLocked(const String8 &cameraId);
 
     // The sort logic must match the logic in
     // libcameraservice/common/CameraProviderManager.cpp::getAPI1CompatibleCameraDeviceIds
@@ -163,8 +234,26 @@ class CameraManagerGlobal final : public RefBase {
         }
     };
 
+    struct StatusAndHAL3Support {
+      private:
+        int32_t status = hardware::ICameraServiceListener::STATUS_NOT_PRESENT;
+        mutable std::mutex mLock;
+        std::set<String8> unavailablePhysicalIds;
+      public:
+        const bool supportsHAL3 = false;
+        StatusAndHAL3Support(int32_t st, bool HAL3support):
+                status(st), supportsHAL3(HAL3support) { };
+        StatusAndHAL3Support() = default;
+
+        bool addUnavailablePhysicalId(const String8& physicalCameraId);
+        bool removeUnavailablePhysicalId(const String8& physicalCameraId);
+        int32_t getStatus();
+        void updateStatus(int32_t newStatus);
+        std::set<String8> getUnavailablePhysicalIds();
+    };
+
     // Map camera_id -> status
-    std::map<String8, int32_t, CameraIdComparator> mDeviceStatusMap;
+    std::map<String8, StatusAndHAL3Support, CameraIdComparator> mDeviceStatusMap;
 
     // For the singleton instance
     static Mutex sLock;

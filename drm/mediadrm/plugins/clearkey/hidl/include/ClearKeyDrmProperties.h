@@ -22,7 +22,7 @@
 namespace android {
 namespace hardware {
 namespace drm {
-namespace V1_2 {
+namespace V1_4 {
 namespace clearkey {
 
 static const std::string kVendorKey("vendor");
@@ -40,6 +40,7 @@ static const std::string kDrmErrorTestValue("");
 static const std::string kResourceContentionValue("resourceContention");
 static const std::string kLostStateValue("lostState");
 static const std::string kFrameTooLargeValue("frameTooLarge");
+static const std::string kInvalidStateValue("invalidState");
 
 static const std::string kDeviceIdKey("deviceId");
 static const uint8_t kTestDeviceIdData[] =
@@ -54,7 +55,7 @@ static const std::string kMetricsKey("metrics");
 static const uint8_t kMetricsData[] = { 0 };
 
 } // namespace clearkey
-} // namespace V1_2
+} // namespace V1_4
 } // namespace drm
 } // namespace hardware
 } // namespace android

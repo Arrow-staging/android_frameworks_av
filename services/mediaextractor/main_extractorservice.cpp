@@ -15,44 +15,46 @@
 ** limitations under the License.
 */
 
+//#define LOG_NDEBUG 0
+#define LOG_TAG "main_extractorservice"
+
 #include <fcntl.h>
 #include <sys/prctl.h>
 #include <sys/wait.h>
 #include <binder/IPCThreadState.h>
 #include <binder/ProcessState.h>
 #include <binder/IServiceManager.h>
-
+#include <mediautils/LimitProcessMemory.h>
 #include <string>
 
 #include <android-base/logging.h>
 #include <android-base/properties.h>
+#include <utils/Log.h>
 #include <utils/misc.h>
 
 // from LOCAL_C_INCLUDES
-#include "IcuUtils.h"
 #include "MediaExtractorService.h"
-#include "MediaUtils.h"
 #include "minijail.h"
 
 using namespace android;
 
 static const char kSystemSeccompPolicyPath[] =
-        "/system/etc/seccomp_policy/mediaextractor.policy";
+        "/apex/com.android.media/etc/seccomp_policy/mediaextractor.policy";
 static const char kVendorSeccompPolicyPath[] =
         "/vendor/etc/seccomp_policy/mediaextractor.policy";
 
-// Disable Scudo's mismatch allocation check, as it is being triggered
-// by some third party code.
-extern "C" const char *__scudo_default_options() {
-    return "DeallocationTypeMismatch=false";
-}
-
 int main(int argc __unused, char** argv)
 {
+
+#if __has_feature(hwaddress_sanitizer)
+    ALOGI("disable media.extractor memory limits (hwasan enabled)");
+#else
+    ALOGI("enable media.extractor memory limits");
     limitProcessMemory(
         "ro.media.maxmem", /* property that defines limit */
         SIZE_MAX, /* upper limit in bytes */
         20 /* upper limit as percentage of physical RAM */);
+#endif
 
     signal(SIGPIPE, SIG_IGN);
 
@@ -63,8 +65,6 @@ int main(int argc __unused, char** argv)
     android::report_sysprop_change();
 
     SetUpMinijail(kSystemSeccompPolicyPath, kVendorSeccompPolicyPath);
-
-    InitializeIcuOrDie();
 
     strcpy(argv[0], "media.extractor");
     sp<ProcessState> proc(ProcessState::self());

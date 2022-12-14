@@ -20,7 +20,6 @@
 #include <stdint.h>
 #include <aaudio/AAudio.h>
 
-#include "binding/IAAudioService.h"
 #include "binding/AudioEndpointParcelable.h"
 #include "binding/AAudioServiceInterface.h"
 #include "client/IsochronousClockModel.h"
@@ -29,7 +28,6 @@
 #include "utility/AudioClock.h"
 
 using android::sp;
-using android::IAAudioService;
 
 namespace aaudio {
 
@@ -46,10 +44,6 @@ public:
     AudioStreamInternal(AAudioServiceInterface  &serviceInterface, bool inService);
     virtual ~AudioStreamInternal();
 
-    aaudio_result_t requestStart() override;
-
-    aaudio_result_t requestStop() override;
-
     aaudio_result_t getTimestamp(clockid_t clockId,
                                        int64_t *framePosition,
                                        int64_t *timeNanoseconds) override;
@@ -58,15 +52,11 @@ public:
 
     aaudio_result_t open(const AudioStreamBuilder &builder) override;
 
-    aaudio_result_t close() override;
-
     aaudio_result_t setBufferSize(int32_t requestedFrames) override;
 
     int32_t getBufferSize() const override;
 
     int32_t getBufferCapacity() const override;
-
-    int32_t getFramesPerBurst() const override;
 
     int32_t getXRunCount() const override {
         return mXRunCount;
@@ -76,11 +66,8 @@ public:
 
     aaudio_result_t unregisterThread() override;
 
-    aaudio_result_t joinThread(void** returnArg);
-
     // Called internally from 'C'
     virtual void *callbackLoop() = 0;
-
 
     bool isMMap() override {
         return true;
@@ -90,6 +77,7 @@ public:
     int64_t calculateReasonableTimeout();
 
     aaudio_result_t startClient(const android::AudioClient& client,
+                                const audio_attributes_t *attr,
                                 audio_port_handle_t *clientHandle);
 
     aaudio_result_t stopClient(audio_port_handle_t clientHandle);
@@ -99,6 +87,10 @@ public:
     }
 
 protected:
+    aaudio_result_t requestStart_l() REQUIRES(mStreamLock) override;
+    aaudio_result_t requestStop_l() REQUIRES(mStreamLock) override;
+
+    aaudio_result_t release_l() REQUIRES(mStreamLock) override;
 
     aaudio_result_t processData(void *buffer,
                          int32_t numFrames,
@@ -120,9 +112,11 @@ protected:
 
     aaudio_result_t processCommands();
 
-    aaudio_result_t stopCallback();
+    aaudio_result_t stopCallback_l();
 
-    virtual void advanceClientToMatchServerPosition() = 0;
+    virtual void prepareBuffersForStart() {}
+
+    virtual void advanceClientToMatchServerPosition(int32_t serverMargin) = 0;
 
     virtual void onFlushFromServer() {}
 
@@ -154,16 +148,16 @@ protected:
 
     IsochronousClockModel    mClockModel;      // timing model for chasing the HAL
 
-    AudioEndpoint            mAudioEndpoint;   // source for reads or sink for writes
+    std::unique_ptr<AudioEndpoint> mAudioEndpoint;   // source for reads or sink for writes
+
     aaudio_handle_t          mServiceStreamHandle; // opaque handle returned from service
 
-    int32_t                  mFramesPerBurst = MIN_FRAMES_PER_BURST; // frames per HAL transfer
     int32_t                  mXRunCount = 0;      // how many underrun events?
 
     // Offset from underlying frame position.
     int64_t                  mFramesOffsetFromService = 0; // offset for timestamps
 
-    uint8_t                 *mCallbackBuffer = nullptr;
+    std::unique_ptr<uint8_t[]> mCallbackBuffer;
     int32_t                  mCallbackFrames = 0;
 
     // The service uses this for SHARED mode.
@@ -177,6 +171,9 @@ protected:
 
     float                    mStreamVolume = 1.0f;
 
+    int64_t                  mLastFramesWritten = 0;
+    int64_t                  mLastFramesRead = 0;
+
 private:
     /*
      * Asynchronous write with data conversion.
@@ -187,13 +184,19 @@ private:
     aaudio_result_t writeNowWithConversion(const void *buffer,
                                      int32_t numFrames);
 
+    // Exit the stream from standby, will reconstruct data path.
+    aaudio_result_t exitStandby_l() REQUIRES(mStreamLock);
+
     // Adjust timing model based on timestamp from service.
     void processTimestamp(uint64_t position, int64_t time);
+
+    aaudio_result_t configureDataInformation(int32_t callbackFrames);
 
     // Thread on other side of FIFO will have wakeup jitter.
     // By delaying slightly we can avoid waking up before other side is ready.
     const int32_t            mWakeupDelayNanos; // delay past typical wakeup jitter
     const int32_t            mMinimumSleepNanos; // minimum sleep while polling
+    int32_t                  mTimeOffsetNanos = 0; // add to time part of an MMAP timestamp
 
     AudioEndpointParcelable  mEndPointParcelable; // description of the buffers filled by service
     EndpointDescriptor       mEndpointDescriptor; // buffer description with resolved addresses
@@ -203,6 +206,11 @@ private:
     // Sometimes the hardware is operating with a different channel count from the app.
     // Then we require conversion in AAudio.
     int32_t                  mDeviceChannelCount = 0;
+
+    int32_t                  mBufferSizeInFrames = 0; // local threshold to control latency
+    int32_t                  mBufferCapacityInFrames = 0;
+
+
 };
 
 } /* namespace aaudio */

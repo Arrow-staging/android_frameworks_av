@@ -29,22 +29,41 @@
 #include "binding/AudioEndpointParcelable.h"
 
 using android::base::unique_fd;
-using android::NO_ERROR;
 using android::status_t;
-using android::Parcel;
-using android::Parcelable;
 
 using namespace aaudio;
 
-/**
- * Container for information about the message queues plus
- * general stream information needed by AAudio clients.
- * It contains no addresses, just sizes, offsets and file descriptors for
- * shared memory that can be passed through Binder.
- */
-AudioEndpointParcelable::AudioEndpointParcelable() {}
+AudioEndpointParcelable::AudioEndpointParcelable(Endpoint&& parcelable)
+        : mUpMessageQueueParcelable(parcelable.upMessageQueueParcelable),
+          mDownMessageQueueParcelable(parcelable.downMessageQueueParcelable),
+          mUpDataQueueParcelable(parcelable.upDataQueueParcelable),
+          mDownDataQueueParcelable(parcelable.downDataQueueParcelable),
+          mNumSharedMemories(parcelable.sharedMemories.size()) {
+    for (size_t i = 0; i < parcelable.sharedMemories.size() && i < MAX_SHARED_MEMORIES; ++i) {
+        // Re-construct.
+        mSharedMemories[i].~SharedMemoryParcelable();
+        new(&mSharedMemories[i]) SharedMemoryParcelable(std::move(parcelable.sharedMemories[i]));
+    }
+}
 
-AudioEndpointParcelable::~AudioEndpointParcelable() {}
+AudioEndpointParcelable& AudioEndpointParcelable::operator=(Endpoint&& parcelable) {
+    this->~AudioEndpointParcelable();
+    new(this) AudioEndpointParcelable(std::move(parcelable));
+    return *this;
+}
+
+Endpoint AudioEndpointParcelable::parcelable()&& {
+    Endpoint result;
+    result.upMessageQueueParcelable = mUpMessageQueueParcelable.parcelable();
+    result.downMessageQueueParcelable = mDownMessageQueueParcelable.parcelable();
+    result.upDataQueueParcelable = mUpDataQueueParcelable.parcelable();
+    result.downDataQueueParcelable = mDownDataQueueParcelable.parcelable();
+    result.sharedMemories.reserve(std::min(mNumSharedMemories, MAX_SHARED_MEMORIES));
+    for (size_t i = 0; i < mNumSharedMemories && i < MAX_SHARED_MEMORIES; ++i) {
+        result.sharedMemories.emplace_back(std::move(mSharedMemories[i]).parcelable());
+    }
+    return result;
+}
 
 /**
  * Add the file descriptor to the table.
@@ -60,58 +79,20 @@ int32_t AudioEndpointParcelable::addFileDescriptor(const unique_fd& fd,
     return index;
 }
 
-/**
- * The read and write must be symmetric.
- */
-status_t AudioEndpointParcelable::writeToParcel(Parcel* parcel) const {
-    status_t status = AAudioConvert_aaudioToAndroidStatus(validate());
-    if (status != NO_ERROR) goto error;
-
-    status = parcel->writeInt32(mNumSharedMemories);
-    if (status != NO_ERROR) goto error;
-
-    for (int i = 0; i < mNumSharedMemories; i++) {
-        status = mSharedMemories[i].writeToParcel(parcel);
-        if (status != NO_ERROR) goto error;
-    }
-    status = mUpMessageQueueParcelable.writeToParcel(parcel);
-    if (status != NO_ERROR) goto error;
-    status = mDownMessageQueueParcelable.writeToParcel(parcel);
-    if (status != NO_ERROR) goto error;
-    status = mUpDataQueueParcelable.writeToParcel(parcel);
-    if (status != NO_ERROR) goto error;
-    status = mDownDataQueueParcelable.writeToParcel(parcel);
-    if (status != NO_ERROR) goto error;
-
-    return NO_ERROR;
-
-error:
-    ALOGE("%s returning %d", __func__, status);
-    return status;
+void AudioEndpointParcelable::closeDataFileDescriptor() {
+    const int32_t curDataMemoryIndex = mDownDataQueueParcelable.getSharedMemoryIndex();
+    mSharedMemories[curDataMemoryIndex].closeAndReleaseFd();
 }
 
-status_t AudioEndpointParcelable::readFromParcel(const Parcel* parcel) {
-    status_t status = parcel->readInt32(&mNumSharedMemories);
-    if (status != NO_ERROR) goto error;
-
-    for (int i = 0; i < mNumSharedMemories; i++) {
-        mSharedMemories[i].readFromParcel(parcel);
-        if (status != NO_ERROR) goto error;
-    }
-    status = mUpMessageQueueParcelable.readFromParcel(parcel);
-    if (status != NO_ERROR) goto error;
-    status = mDownMessageQueueParcelable.readFromParcel(parcel);
-    if (status != NO_ERROR) goto error;
-    status = mUpDataQueueParcelable.readFromParcel(parcel);
-    if (status != NO_ERROR) goto error;
-    status = mDownDataQueueParcelable.readFromParcel(parcel);
-    if (status != NO_ERROR) goto error;
-
-    return AAudioConvert_aaudioToAndroidStatus(validate());
-
-error:
-    ALOGE("%s returning %d", __func__, status);
-    return status;
+void AudioEndpointParcelable::updateDataFileDescriptor(
+        AudioEndpointParcelable* endpointParcelable) {
+    const int32_t curDataMemoryIndex = mDownDataQueueParcelable.getSharedMemoryIndex();
+    const int32_t newDataMemoryIndex =
+            endpointParcelable->mDownDataQueueParcelable.getSharedMemoryIndex();
+    mSharedMemories[curDataMemoryIndex].close();
+    mSharedMemories[curDataMemoryIndex].setup(
+            endpointParcelable->mSharedMemories[newDataMemoryIndex]);
+    mDownDataQueueParcelable.updateMemory(endpointParcelable->mDownDataQueueParcelable);
 }
 
 aaudio_result_t AudioEndpointParcelable::resolve(EndpointDescriptor *descriptor) {
@@ -125,6 +106,10 @@ aaudio_result_t AudioEndpointParcelable::resolve(EndpointDescriptor *descriptor)
     result = mDownDataQueueParcelable.resolve(mSharedMemories,
                                               &descriptor->dataQueueDescriptor);
     return result;
+}
+
+aaudio_result_t AudioEndpointParcelable::resolveDataQueue(RingBufferDescriptor *descriptor) {
+    return mDownDataQueueParcelable.resolve(mSharedMemories, descriptor);
 }
 
 aaudio_result_t AudioEndpointParcelable::close() {

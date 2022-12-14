@@ -16,6 +16,7 @@
 
 //#define LOG_NDEBUG 0
 #define LOG_TAG "C2SoftMp3Dec"
+#include <inttypes.h>
 #include <log/log.h>
 
 #include <numeric>
@@ -30,35 +31,32 @@
 
 namespace android {
 
+namespace {
+
 constexpr char COMPONENT_NAME[] = "c2.android.mp3.decoder";
 
-class C2SoftMP3::IntfImpl : public C2InterfaceHelper {
+}  // namespace
+
+class C2SoftMP3::IntfImpl : public SimpleInterface<void>::BaseParams {
 public:
     explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
-        : C2InterfaceHelper(helper) {
-
+        : SimpleInterface<void>::BaseParams(
+                helper,
+                COMPONENT_NAME,
+                C2Component::KIND_DECODER,
+                C2Component::DOMAIN_AUDIO,
+                MEDIA_MIMETYPE_AUDIO_MPEG) {
+        noPrivateBuffers();
+        noInputReferences();
+        noOutputReferences();
+        noInputLatency();
+        noTimeStretch();
         setDerivedInstance(this);
 
         addParameter(
-                DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::input(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mInputMediaType, C2_PARAMKEY_INPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::input>(
-                        MEDIA_MIMETYPE_AUDIO_MPEG))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputMediaType, C2_PARAMKEY_OUTPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::output>(
-                        MEDIA_MIMETYPE_AUDIO_RAW))
+                DefineParam(mAttrib, C2_PARAMKEY_COMPONENT_ATTRIBUTES)
+                .withConstValue(new C2ComponentAttributesSetting(
+                    C2Component::ATTRIB_IS_TEMPORAL))
                 .build());
 
         addParameter(
@@ -90,10 +88,6 @@ public:
     }
 
 private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
     std::shared_ptr<C2StreamSampleRateInfo::output> mSampleRate;
     std::shared_ptr<C2StreamChannelCountInfo::output> mChannelCount;
     std::shared_ptr<C2StreamBitrateInfo::input> mBitrate;
@@ -327,6 +321,13 @@ c2_status_t C2SoftMP3::drain(
     return C2_OK;
 }
 
+static void fillEmptyWork(const std::unique_ptr<C2Work> &work) {
+    work->worklets.front()->output.flags = work->input.flags;
+    work->worklets.front()->output.buffers.clear();
+    work->worklets.front()->output.ordinal = work->input.ordinal;
+    work->workletsProcessed = 1u;
+}
+
 // TODO: Can overall error checking be improved? As in the check for validity of
 //       work, pool ptr, work->input.buffers.size() == 1, ...
 // TODO: Blind removal of 529 samples from the output may not work. Because
@@ -412,7 +413,7 @@ void C2SoftMP3::process(
         mConfig->inputBufferCurrentLength = (inSize - inPos);
         mConfig->inputBufferMaxLength = 0;
         mConfig->inputBufferUsedLength = 0;
-        mConfig->outputFrameSize = (calOutSize - outSize);
+        mConfig->outputFrameSize = (calOutSize - outSize) / sizeof(int16_t);
         mConfig->pOutputBuffer = reinterpret_cast<int16_t *> (wView.data() + outSize);
 
         ERROR_CODE decoderErr;
@@ -492,17 +493,17 @@ void C2SoftMP3::process(
         }
     }
 
-    uint64_t outTimeStamp = mProcessedSamples * 1000000ll / samplingRate;
-    mProcessedSamples += ((outSize - outOffset) / (numChannels * sizeof(int16_t)));
-    ALOGV("out buffer attr. offset %d size %d timestamp %u", outOffset, outSize - outOffset,
-          (uint32_t)(mAnchorTimeStamp + outTimeStamp));
-    decodedSizes.clear();
-    work->worklets.front()->output.flags = work->input.flags;
-    work->worklets.front()->output.buffers.clear();
-    work->worklets.front()->output.buffers.push_back(
-            createLinearBuffer(block, outOffset, outSize - outOffset));
-    work->worklets.front()->output.ordinal = work->input.ordinal;
-    work->worklets.front()->output.ordinal.timestamp = mAnchorTimeStamp + outTimeStamp;
+    fillEmptyWork(work);
+    if (samplingRate && numChannels) {
+        int64_t outTimeStamp = mProcessedSamples * 1000000ll / samplingRate;
+        mProcessedSamples += ((outSize - outOffset) / (numChannels * sizeof(int16_t)));
+        ALOGV("out buffer attr. offset %d size %d timestamp %" PRId64 " ", outOffset,
+               outSize - outOffset, mAnchorTimeStamp + outTimeStamp);
+        decodedSizes.clear();
+        work->worklets.front()->output.buffers.push_back(
+                createLinearBuffer(block, outOffset, outSize - outOffset));
+        work->worklets.front()->output.ordinal.timestamp = mAnchorTimeStamp + outTimeStamp;
+    }
     if (eos) {
         mSignalledOutputEos = true;
         ALOGV("signalled EOS");
@@ -546,11 +547,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftMp3DecFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

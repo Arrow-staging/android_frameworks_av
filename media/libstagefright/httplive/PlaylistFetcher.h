@@ -21,7 +21,7 @@
 #include <media/stagefright/foundation/AHandler.h>
 #include <openssl/aes.h>
 
-#include "mpeg2ts/ATSParser.h"
+#include <mpeg2ts/ATSParser.h>
 #include "LiveSession.h"
 
 namespace android {
@@ -145,6 +145,7 @@ private:
     sp<M3UParser> mPlaylist;
     int32_t mSeqNumber;
     int32_t mNumRetries;
+    int32_t mNumRetriesForMonitorQueue;
     bool mStartup;
     bool mIDRFound;
     int32_t mSeekMode;

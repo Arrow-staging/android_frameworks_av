@@ -24,19 +24,22 @@
 
 #include <utils/String16.h>
 
+#include <android/content/AttributionSourceState.h>
 #include <binder/ProcessState.h>
 #include <media/mediarecorder.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/AMessage.h>
 #include <media/stagefright/AMRWriter.h>
-#include <media/stagefright/AudioPlayer.h>
 #include <media/stagefright/AudioSource.h>
 #include <media/stagefright/MediaCodecSource.h>
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/SimpleDecodingSource.h>
+#include "AudioPlayer.h"
 #include "SineSource.h"
 
 using namespace android;
+
+using content::AttributionSourceState;
 
 static void usage(const char* name)
 {
@@ -107,9 +110,13 @@ int main(int argc, char* argv[])
 
     if (useMic) {
         // talk into the appropriate microphone for the duration
+        audio_attributes_t attr = AUDIO_ATTRIBUTES_INITIALIZER;
+        attr.source = AUDIO_SOURCE_MIC;
+
+        // TODO b/182392769: use attribution source util
         source = new AudioSource(
-                AUDIO_SOURCE_MIC,
-                String16(),
+                &attr,
+                AttributionSourceState(),
                 sampleRate,
                 channels);
     } else {
@@ -159,9 +166,9 @@ int main(int argc, char* argv[])
         sp<MediaSource> decoder = SimpleDecodingSource::Create(encoder);
 
         if (playToSpeaker) {
-            AudioPlayer player(NULL);
-            player.setSource(decoder);
-            player.start();
+            sp<AudioPlayer> player = sp<AudioPlayer>::make(nullptr);
+            player->setSource(decoder);
+            player->start();
             sleep(duration);
 
 ALOGI("Line: %d", __LINE__);

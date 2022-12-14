@@ -20,15 +20,15 @@
 #include <gui/bufferqueue/1.0/H2BGraphicBufferProducer.h>
 
 #include <hidl/AidlCameraDeviceCallbacks.h>
-#include <hidl/Convert.h>
 #include <hidl/HidlCameraDeviceUser.h>
+#include <hidl/Utils.h>
 #include <android/hardware/camera/device/3.2/types.h>
 
 namespace android {
 namespace frameworks {
 namespace cameraservice {
 namespace device {
-namespace V2_0 {
+namespace V2_1 {
 namespace implementation {
 
 using hardware::cameraservice::utils::conversion::convertToHidl;
@@ -41,6 +41,7 @@ using hardware::Return;
 using hardware::Void;
 using HSubmitInfo = device::V2_0::SubmitInfo;
 using hardware::camera2::params::OutputConfiguration;
+using hardware::camera2::params::SessionConfiguration;
 
 static constexpr int32_t CAMERA_REQUEST_METADATA_QUEUE_SIZE = 1 << 20 /* 1 MB */;
 static constexpr int32_t CAMERA_RESULT_METADATA_QUEUE_SIZE = 1 << 20 /* 1 MB */;
@@ -114,7 +115,7 @@ bool HidlCameraDeviceUser::copyPhysicalCameraSettings(
         // is guaranteed to be called serially by the client if it decides to
         // use fmq.
         if (e.settings.getDiscriminator() ==
-            FmqSizeOrMetadata::hidl_discriminator::fmqMetadataSize) {
+            V2_0::FmqSizeOrMetadata::hidl_discriminator::fmqMetadataSize) {
             /**
              * Get settings from the fmq.
              */
@@ -195,13 +196,21 @@ Return<HStatus> HidlCameraDeviceUser::beginConfigure() {
 
 Return<HStatus> HidlCameraDeviceUser::endConfigure(StreamConfigurationMode operatingMode,
                                                    const hidl_vec<uint8_t>& sessionParams) {
+    return endConfigure_2_1(operatingMode, sessionParams, systemTime());
+}
+
+Return<HStatus> HidlCameraDeviceUser::endConfigure_2_1(StreamConfigurationMode operatingMode,
+                                                   const hidl_vec<uint8_t>& sessionParams,
+                                                   nsecs_t startTimeNs) {
     android::CameraMetadata cameraMetadata;
     if (!convertFromHidl(sessionParams, &cameraMetadata)) {
         return HStatus::ILLEGAL_ARGUMENT;
     }
 
+    std::vector<int> offlineStreamIds;
     binder::Status ret = mDeviceRemote->endConfigure(convertFromHidl(operatingMode),
-                                                     cameraMetadata);
+                                                     cameraMetadata, ns2ms(startTimeNs),
+                                                     &offlineStreamIds);
     return B2HStatus(ret);
 }
 
@@ -253,6 +262,18 @@ Return<HStatus> HidlCameraDeviceUser::updateOutputConfiguration(
     OutputConfiguration outputConfiguration = convertFromHidl(hOutputConfiguration);
     binder::Status ret = mDeviceRemote->updateOutputConfiguration(streamId, outputConfiguration);
     return B2HStatus(ret);
+}
+
+Return<void> HidlCameraDeviceUser::isSessionConfigurationSupported(
+    const HSessionConfiguration& hSessionConfiguration,
+    isSessionConfigurationSupported_cb _hidl_cb) {
+    bool supported = false;
+    SessionConfiguration sessionConfiguration = convertFromHidl(hSessionConfiguration);
+    binder::Status ret = mDeviceRemote->isSessionConfigurationSupported(
+            sessionConfiguration, &supported);
+    HStatus status = B2HStatus(ret);
+    _hidl_cb(status, supported);
+    return Void();
 }
 
 } // implementation

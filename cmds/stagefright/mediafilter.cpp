@@ -24,9 +24,9 @@
 #include <gui/ISurfaceComposer.h>
 #include <gui/SurfaceComposerClient.h>
 #include <gui/Surface.h>
-#include <media/ICrypto.h>
 #include <media/IMediaHTTPService.h>
 #include <media/MediaCodecBuffer.h>
+#include <mediadrm/ICrypto.h>
 #include <media/stagefright/foundation/ABuffer.h>
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/foundation/AMessage.h>
@@ -34,7 +34,7 @@
 #include <media/stagefright/NuMediaExtractor.h>
 #include <media/stagefright/RenderScriptWrapper.h>
 #include <OMX_IVCommon.h>
-#include <ui/DisplayInfo.h>
+#include <ui/DisplayMode.h>
 
 #include "RenderScript.h"
 #include "ScriptC_argbtorgba.h"
@@ -319,7 +319,8 @@ static int decode(
 
     static int64_t kTimeout = 500ll;
 
-    sp<NuMediaExtractor> extractor = new NuMediaExtractor;
+    sp<NuMediaExtractor> extractor = new NuMediaExtractor(NuMediaExtractor::EntryPoint::OTHER);
+
     if (extractor->setDataSource(NULL /* httpService */, path) != OK) {
         fprintf(stderr, "unable to instantiate extractor.\n");
         return 1;
@@ -751,11 +752,12 @@ int main(int argc, char **argv) {
         const android::sp<IBinder> display = SurfaceComposerClient::getInternalDisplayToken();
         CHECK(display != nullptr);
 
-        DisplayInfo info;
-        CHECK_EQ(SurfaceComposerClient::getDisplayInfo(display, &info), NO_ERROR);
+        ui::DisplayMode mode;
+        CHECK_EQ(SurfaceComposerClient::getActiveDisplayMode(display, &mode), NO_ERROR);
 
-        ssize_t displayWidth = info.w;
-        ssize_t displayHeight = info.h;
+        const ui::Size& resolution = mode.resolution;
+        const ssize_t displayWidth = resolution.getWidth();
+        const ssize_t displayHeight = resolution.getHeight();
 
         ALOGV("display is %zd x %zd", displayWidth, displayHeight);
 

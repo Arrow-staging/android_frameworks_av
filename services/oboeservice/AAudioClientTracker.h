@@ -21,10 +21,11 @@
 #include <mutex>
 #include <set>
 
+#include <android-base/thread_annotations.h>
 #include <utils/Singleton.h>
 
 #include <aaudio/AAudio.h>
-#include "binding/IAAudioClient.h"
+#include <aaudio/IAAudioClient.h>
 #include "AAudioService.h"
 
 namespace aaudio {
@@ -46,7 +47,7 @@ public:
      */
     std::string dump() const;
 
-    aaudio_result_t registerClient(pid_t pid, const android::sp<android::IAAudioClient>& client);
+    aaudio_result_t registerClient(pid_t pid, const android::sp<IAAudioClient>& client);
 
     void unregisterClient(pid_t pid);
 
@@ -57,6 +58,15 @@ public:
 
     aaudio_result_t unregisterClientStream(pid_t pid,
                                            android::sp<AAudioServiceStreamBase> serviceStream);
+
+    /**
+     * Specify whether a process is allowed to create an EXCLUSIVE MMAP stream.
+     * @param pid
+     * @param enabled
+     */
+    void setExclusiveEnabled(pid_t pid, bool enabled);
+
+    bool isExclusiveEnabled(pid_t pid);
 
     android::AAudioService *getAAudioService() const {
         return mAAudioService;
@@ -73,7 +83,7 @@ private:
      */
     class NotificationClient : public IBinder::DeathRecipient {
     public:
-        NotificationClient(pid_t pid);
+        NotificationClient(pid_t pid, const android::sp<IBinder>& binder);
         virtual ~NotificationClient();
 
         int32_t getStreamCount();
@@ -84,17 +94,33 @@ private:
 
         aaudio_result_t unregisterClientStream(android::sp<AAudioServiceStreamBase> serviceStream);
 
+        void setExclusiveEnabled(bool enabled) {
+            mExclusiveEnabled = enabled;
+        }
+
+        bool isExclusiveEnabled() {
+            return mExclusiveEnabled;
+        }
+
         // IBinder::DeathRecipient
         virtual     void    binderDied(const android::wp<IBinder>& who);
 
-    protected:
+    private:
         mutable std::mutex                              mLock;
         const pid_t                                     mProcessId;
         std::set<android::sp<AAudioServiceStreamBase>>  mStreams;
+        // hold onto binder to receive death notifications
+        android::sp<IBinder>                            mBinder;
+        bool                                            mExclusiveEnabled = true;
     };
 
+    // This must be called under mLock
+    android::sp<NotificationClient> getNotificationClient_l(pid_t pid)
+            REQUIRES(mLock);
+
     mutable std::mutex                               mLock;
-    std::map<pid_t, android::sp<NotificationClient>> mNotificationClients;
+    std::map<pid_t, android::sp<NotificationClient>> mNotificationClients
+            GUARDED_BY(mLock);
     android::AAudioService                          *mAAudioService = nullptr;
 };
 

@@ -95,6 +95,7 @@ void PipelineWatcher::onWorkDone(uint64_t frameIndex) {
 }
 
 void PipelineWatcher::flush() {
+    ALOGV("flush");
     mFramesInPipeline.clear();
 }
 
@@ -121,6 +122,13 @@ bool PipelineWatcher::pipelineFull() const {
               sizeWithInputReleased);
         return true;
     }
+
+    size_t sizeWithInputsPending = mFramesInPipeline.size() - sizeWithInputReleased;
+    if (sizeWithInputsPending > mPipelineDelay + mInputDelay + mSmoothnessFactor) {
+        ALOGV("pipelineFull: too many inputs pending (%zu) in pipeline, with inputs released (%zu)",
+              sizeWithInputsPending, sizeWithInputReleased);
+        return true;
+    }
     ALOGV("pipeline has room (total: %zu, input released: %zu)",
           mFramesInPipeline.size(), sizeWithInputReleased);
     return false;
@@ -139,7 +147,7 @@ PipelineWatcher::Clock::duration PipelineWatcher::elapsed(
               std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count());
         durations.push_back(elapsed);
     }
-    std::nth_element(durations.begin(), durations.end(), durations.begin() + n,
+    std::nth_element(durations.begin(), durations.begin() + n, durations.end(),
                      std::greater<Clock::duration>());
     return durations[n];
 }

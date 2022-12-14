@@ -28,14 +28,56 @@
 #include <utils/List.h>
 
 #include "hardware/camera2.h"
-#include "hardware/camera3.h"
 #include "camera/CameraMetadata.h"
 #include "camera/CaptureResult.h"
 #include "gui/IGraphicBufferProducer.h"
 #include "device3/Camera3StreamInterface.h"
+#include "device3/StatusTracker.h"
 #include "binder/Status.h"
+#include "FrameProducer.h"
+#include "utils/IPCTransport.h"
+
+#include "CameraOfflineSessionBase.h"
 
 namespace android {
+
+namespace camera3 {
+
+typedef enum camera_request_template {
+    CAMERA_TEMPLATE_PREVIEW = 1,
+    CAMERA_TEMPLATE_STILL_CAPTURE = 2,
+    CAMERA_TEMPLATE_VIDEO_RECORD = 3,
+    CAMERA_TEMPLATE_VIDEO_SNAPSHOT = 4,
+    CAMERA_TEMPLATE_ZERO_SHUTTER_LAG = 5,
+    CAMERA_TEMPLATE_MANUAL = 6,
+    CAMERA_TEMPLATE_COUNT,
+    CAMERA_VENDOR_TEMPLATE_START = 0x40000000
+} camera_request_template_t;
+
+typedef enum camera_stream_configuration_mode {
+    CAMERA_STREAM_CONFIGURATION_NORMAL_MODE = 0,
+    CAMERA_STREAM_CONFIGURATION_CONSTRAINED_HIGH_SPEED_MODE = 1,
+    CAMERA_VENDOR_STREAM_CONFIGURATION_MODE_START = 0x8000
+} camera_stream_configuration_mode_t;
+
+// Matches definition of camera3_jpeg_blob in camera3.h and HIDL definition
+// device@3.2:types.hal, needs to stay around till HIDL support is removed (for
+// HIDL -> AIDL cameraBlob translation)
+typedef struct camera_jpeg_blob {
+    uint16_t jpeg_blob_id;
+    uint32_t jpeg_size;
+} camera_jpeg_blob_t;
+
+enum {
+    CAMERA_JPEG_BLOB_ID = 0x00FF,
+    CAMERA_JPEG_APP_SEGMENTS_BLOB_ID = 0x0100,
+};
+
+} // namespace camera3
+
+using camera3::camera_request_template_t;;
+using camera3::camera_stream_configuration_mode_t;
+using camera3::camera_stream_rotation_t;
 
 class CameraProviderManager;
 
@@ -46,14 +88,11 @@ typedef std::unordered_map<int, std::vector<size_t> > SurfaceMap;
  * Base interface for version >= 2 camera device classes, which interface to
  * camera HAL device versions >= 2.
  */
-class CameraDeviceBase : public virtual RefBase {
+class CameraDeviceBase : public virtual FrameProducer {
   public:
     virtual ~CameraDeviceBase();
 
-    /**
-     * The device's camera ID
-     */
-    virtual const String8& getId() const = 0;
+    virtual IPCTransport getTransportType() const = 0;
 
     /**
      * The device vendor tag ID
@@ -64,19 +103,29 @@ class CameraDeviceBase : public virtual RefBase {
     virtual status_t disconnect() = 0;
 
     virtual status_t dump(int fd, const Vector<String16> &args) = 0;
+    virtual status_t startWatchingTags(const String8 &tags) = 0;
+    virtual status_t stopWatchingTags() = 0;
+    virtual status_t dumpWatchedEventsToVector(std::vector<std::string> &out) = 0;
 
     /**
-     * The device's static characteristics metadata buffer
+     * The physical camera device's static characteristics metadata buffer, or
+     * the logical camera's static characteristics if physical id is empty.
      */
-    virtual const CameraMetadata& info() const = 0;
-    /**
-     * The physical camera device's static characteristics metadata buffer
-     */
-    virtual const CameraMetadata& info(const String8& physicalId) const = 0;
+    virtual const CameraMetadata& infoPhysical(const String8& physicalId) const = 0;
 
     struct PhysicalCameraSettings {
         std::string cameraId;
         CameraMetadata metadata;
+
+        // Whether the physical camera supports testPatternMode/testPatternData
+        bool mHasTestPatternModeTag = true;
+        bool mHasTestPatternDataTag = true;
+
+        // Original value of TEST_PATTERN_MODE and DATA so that they can be
+        // restored when sensor muting is turned off
+        int32_t mOriginalTestPatternMode = 0;
+        int32_t mOriginalTestPatternData[4] = {};
+
     };
     typedef List<PhysicalCameraSettings> PhysicalCameraSettingsList;
 
@@ -133,11 +182,17 @@ class CameraDeviceBase : public virtual RefBase {
      */
     virtual status_t createStream(sp<Surface> consumer,
             uint32_t width, uint32_t height, int format,
-            android_dataspace dataSpace, camera3_stream_rotation_t rotation, int *id,
+            android_dataspace dataSpace, camera_stream_rotation_t rotation, int *id,
             const String8& physicalCameraId,
+            const std::unordered_set<int32_t>  &sensorPixelModesUsed,
             std::vector<int> *surfaceIds = nullptr,
             int streamSetId = camera3::CAMERA3_STREAM_SET_ID_INVALID,
-            bool isShared = false, uint64_t consumerUsage = 0) = 0;
+            bool isShared = false, bool isMultiResolution = false,
+            uint64_t consumerUsage = 0,
+            int64_t dynamicProfile = ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
+            int64_t streamUseCase = ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
+            int timestampBase = OutputConfiguration::TIMESTAMP_BASE_DEFAULT,
+            int mirrorMode = OutputConfiguration::MIRROR_MODE_AUTO) = 0;
 
     /**
      * Create an output stream of the requested size, format, rotation and
@@ -148,11 +203,17 @@ class CameraDeviceBase : public virtual RefBase {
      */
     virtual status_t createStream(const std::vector<sp<Surface>>& consumers,
             bool hasDeferredConsumer, uint32_t width, uint32_t height, int format,
-            android_dataspace dataSpace, camera3_stream_rotation_t rotation, int *id,
+            android_dataspace dataSpace, camera_stream_rotation_t rotation, int *id,
             const String8& physicalCameraId,
+            const std::unordered_set<int32_t> &sensorPixelModesUsed,
             std::vector<int> *surfaceIds = nullptr,
             int streamSetId = camera3::CAMERA3_STREAM_SET_ID_INVALID,
-            bool isShared = false, uint64_t consumerUsage = 0) = 0;
+            bool isShared = false, bool isMultiResolution = false,
+            uint64_t consumerUsage = 0,
+            int64_t dynamicProfile = ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD,
+            int64_t streamUseCase = ANDROID_SCALER_AVAILABLE_STREAM_USE_CASES_DEFAULT,
+            int timestampBase = OutputConfiguration::TIMESTAMP_BASE_DEFAULT,
+            int mirrorMode = OutputConfiguration::MIRROR_MODE_AUTO) = 0;
 
     /**
      * Create an input stream of width, height, and format.
@@ -160,7 +221,7 @@ class CameraDeviceBase : public virtual RefBase {
      * Return value is the stream ID if non-negative and an error if negative.
      */
     virtual status_t createInputStream(uint32_t width, uint32_t height,
-            int32_t format, /*out*/ int32_t *id) = 0;
+            int32_t format, bool multiResolution, /*out*/ int32_t *id) = 0;
 
     struct StreamInfo {
         uint32_t width;
@@ -173,10 +234,12 @@ class CameraDeviceBase : public virtual RefBase {
         android_dataspace dataSpace;
         bool dataSpaceOverridden;
         android_dataspace originalDataSpace;
+        int64_t dynamicRangeProfile;
 
         StreamInfo() : width(0), height(0), format(0), formatOverridden(false), originalFormat(0),
                 dataSpace(HAL_DATASPACE_UNKNOWN), dataSpaceOverridden(false),
-                originalDataSpace(HAL_DATASPACE_UNKNOWN) {}
+                originalDataSpace(HAL_DATASPACE_UNKNOWN),
+                dynamicRangeProfile(ANDROID_REQUEST_AVAILABLE_DYNAMIC_RANGE_PROFILES_MAP_STANDARD){}
         /**
          * Check whether the format matches the current or the original one in case
          * it got overridden.
@@ -230,7 +293,14 @@ class CameraDeviceBase : public virtual RefBase {
      * - INVALID_OPERATION if the device was in the wrong state
      */
     virtual status_t configureStreams(const CameraMetadata& sessionParams,
-            int operatingMode = 0) = 0;
+            int operatingMode =
+            camera_stream_configuration_mode_t::CAMERA_STREAM_CONFIGURATION_NORMAL_MODE) = 0;
+
+    /**
+     * Retrieve a list of all stream ids that were advertised as capable of
+     * supporting offline processing mode by Hal after the last stream configuration.
+     */
+    virtual void getOfflineStreamIds(std::vector<int> *offlineStreamIds) = 0;
 
     // get the buffer producer of the input stream
     virtual status_t getInputBufferProducer(
@@ -240,7 +310,7 @@ class CameraDeviceBase : public virtual RefBase {
      * Create a metadata buffer with fields that the HAL device believes are
      * best for the given use case
      */
-    virtual status_t createDefaultRequest(int templateId,
+    virtual status_t createDefaultRequest(camera_request_template_t templateId,
             CameraMetadata *request) = 0;
 
     /**
@@ -254,36 +324,8 @@ class CameraDeviceBase : public virtual RefBase {
      * Get Jpeg buffer size for a given jpeg resolution.
      * Negative values are error codes.
      */
-    virtual ssize_t getJpegBufferSize(uint32_t width, uint32_t height) const = 0;
-
-    /**
-     * Abstract class for HAL notification listeners
-     */
-    class NotificationListener : public virtual RefBase {
-      public:
-        // The set of notifications is a merge of the notifications required for
-        // API1 and API2.
-
-        // Required for API 1 and 2
-        virtual void notifyError(int32_t errorCode,
-                                 const CaptureResultExtras &resultExtras) = 0;
-
-        // Required only for API2
-        virtual void notifyIdle() = 0;
-        virtual void notifyShutter(const CaptureResultExtras &resultExtras,
-                nsecs_t timestamp) = 0;
-        virtual void notifyPrepared(int streamId) = 0;
-        virtual void notifyRequestQueueEmpty() = 0;
-
-        // Required only for API1
-        virtual void notifyAutoFocus(uint8_t newState, int triggerId) = 0;
-        virtual void notifyAutoExposure(uint8_t newState, int triggerId) = 0;
-        virtual void notifyAutoWhitebalance(uint8_t newState,
-                int triggerId) = 0;
-        virtual void notifyRepeatingRequestError(long lastFrameNumber) = 0;
-      protected:
-        virtual ~NotificationListener();
-    };
+    virtual ssize_t getJpegBufferSize(const CameraMetadata &info, uint32_t width,
+            uint32_t height) const = 0;
 
     /**
      * Connect HAL notifications to a listener. Overwrites previous
@@ -297,21 +339,6 @@ class CameraDeviceBase : public virtual RefBase {
      * synthesize these notifications from received frame metadata.
      */
     virtual bool     willNotify3A() = 0;
-
-    /**
-     * Wait for a new frame to be produced, with timeout in nanoseconds.
-     * Returns TIMED_OUT when no frame produced within the specified duration
-     * May be called concurrently to most methods, except for getNextFrame
-     */
-    virtual status_t waitForNextFrame(nsecs_t timeout) = 0;
-
-    /**
-     * Get next capture result frame from the result queue. Returns NOT_ENOUGH_DATA
-     * if the queue is empty; caller takes ownership of the metadata buffer inside
-     * the capture result object's metadata field.
-     * May be called concurrently to most methods, except for waitForNextFrame.
-     */
-    virtual status_t getNextResult(CaptureResult *frame) = 0;
 
     /**
      * Trigger auto-focus. The latest ID used in a trigger autofocus or cancel
@@ -383,6 +410,73 @@ class CameraDeviceBase : public virtual RefBase {
      * drop buffers for stream of streamId.
      */
     virtual status_t dropStreamBuffers(bool /*dropping*/, int /*streamId*/) = 0;
+
+    /**
+     * Returns the maximum expected time it'll take for all currently in-flight
+     * requests to complete, based on their settings
+     */
+    virtual nsecs_t getExpectedInFlightDuration() = 0;
+
+    /**
+     * switch to offline session
+     */
+    virtual status_t switchToOffline(
+            const std::vector<int32_t>& streamsToKeep,
+            /*out*/ sp<CameraOfflineSessionBase>* session) = 0;
+
+    /**
+     * Set the current behavior for the ROTATE_AND_CROP control when in AUTO.
+     *
+     * The value must be one of the ROTATE_AND_CROP_* values besides AUTO,
+     * and defaults to NONE.
+     */
+    virtual status_t setRotateAndCropAutoBehavior(
+            camera_metadata_enum_android_scaler_rotate_and_crop_t rotateAndCropValue) = 0;
+
+    /**
+     * Whether camera muting (producing black-only output) is supported.
+     *
+     * Calling setCameraMute(true) when this returns false will return an
+     * INVALID_OPERATION error.
+     */
+    virtual bool supportsCameraMute() = 0;
+
+    /**
+     * Mute the camera.
+     *
+     * When muted, black image data is output on all output streams.
+     */
+    virtual status_t setCameraMute(bool enabled) = 0;
+
+    /**
+     * Enable/disable camera service watchdog
+     */
+    virtual status_t setCameraServiceWatchdog(bool enabled) = 0;
+
+    /**
+     * Get the status tracker of the camera device
+     */
+    virtual wp<camera3::StatusTracker> getStatusTracker() = 0;
+
+    /**
+     * Set bitmask for image dump flag
+     */
+    void setImageDumpMask(int mask) { mImageDumpMask = mask; }
+
+    /**
+     * The injection camera session to replace the internal camera
+     * session.
+     */
+    virtual status_t injectCamera(const String8& injectedCamId,
+            sp<CameraProviderManager> manager) = 0;
+
+    /**
+     * Stop the injection camera and restore to internal camera session.
+     */
+    virtual status_t stopInjection() = 0;
+
+protected:
+    bool mImageDumpMask = 0;
 };
 
 }; // namespace android

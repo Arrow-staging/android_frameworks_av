@@ -14,6 +14,15 @@
 // limitations under the License.
 //
 
+package {
+    // See: http://go/android-license-faq
+    // A large-scale-change added 'default_applicable_licenses' to import
+    // all of the 'license_kinds' from "frameworks_av_license"
+    // to get the below license kinds:
+    //   SPDX-license-identifier-Apache-2.0
+    default_applicable_licenses: ["frameworks_av_license"],
+}
+
 cc_library_static {
     name: "libclearkeycommon",
     vendor: true,
@@ -36,3 +45,55 @@ cc_library_static {
     },
 }
 
+cc_library_static {
+    name: "libclearkeydevicefiles-protos.common",
+    vendor: true,
+
+    proto: {
+        export_proto_headers: true,
+        type: "lite",
+    },
+    srcs: ["protos/DeviceFiles.proto"],
+}
+
+cc_library_static {
+    name: "libclearkeybase",
+    vendor: true,
+
+    srcs: [
+        "AesCtrDecryptor.cpp",
+        "Base64.cpp",
+        "Buffer.cpp",
+        "ClearKeyUUID.cpp",
+        "DeviceFiles.cpp",
+        "InitDataParser.cpp",
+        "JsonWebKey.cpp",
+        "MemoryFileSystem.cpp",
+        "Session.cpp",
+        "SessionLibrary.cpp",
+        "Utils.cpp",
+    ],
+
+    cflags: ["-Wall", "-Werror"],
+
+    include_dirs: ["frameworks/av/include"],
+
+    shared_libs: [
+        "libutils",
+        "libcrypto",
+    ],
+
+    whole_static_libs: [
+        "libjsmn",
+        "libclearkeydevicefiles-protos.common",
+    ],
+
+    export_include_dirs: [
+        "include",
+        "include/clearkeydrm",
+    ],
+
+    sanitize: {
+        integer_overflow: true,
+    },
+}

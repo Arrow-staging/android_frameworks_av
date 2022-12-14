@@ -17,6 +17,9 @@
 #ifndef ANDROID_HARDWARE_DEVICES_FACTORY_HAL_HIDL_H
 #define ANDROID_HARDWARE_DEVICES_FACTORY_HAL_HIDL_H
 
+#include <mutex>
+#include <vector>
+
 #include PATH(android/hardware/audio/FILE_VERSION/IDevicesFactory.h)
 #include <media/audiohal/DevicesFactoryHalInterface.h>
 #include <utils/Errors.h>
@@ -27,27 +30,36 @@
 using ::android::hardware::audio::CPP_VERSION::IDevicesFactory;
 
 namespace android {
-namespace CPP_VERSION {
 
 class DevicesFactoryHalHidl : public DevicesFactoryHalInterface
 {
   public:
+    explicit DevicesFactoryHalHidl(sp<IDevicesFactory> devicesFactory);
+    void onFirstRef() override;
+
     // Opens a device with the specified name. To close the device, it is
     // necessary to release references to the returned object.
-    virtual status_t openDevice(const char *name, sp<DeviceHalInterface> *device);
+    status_t openDevice(const char *name, sp<DeviceHalInterface> *device) override;
+
+    status_t getHalPids(std::vector<pid_t> *pids) override;
+
+    status_t setCallbackOnce(sp<DevicesFactoryHalCallback> callback) override;
+
+    float getHalVersion() const override { return MAJOR_VERSION + (float)MINOR_VERSION / 10; }
 
   private:
-    friend class DevicesFactoryHalHybrid;
+    friend class ServiceNotificationListener;
+    void addDeviceFactory(sp<IDevicesFactory> factory, bool needToNotify);
+    std::vector<sp<IDevicesFactory>> copyDeviceFactories();
 
-    std::vector<sp<IDevicesFactory>> mDeviceFactories;
-
-    // Can not be constructed directly by clients.
-    DevicesFactoryHalHidl();
+    std::mutex mLock;
+    std::vector<sp<IDevicesFactory>> mDeviceFactories;  // GUARDED_BY(mLock)
+    wp<DevicesFactoryHalCallback> mCallback;  // GUARDED_BY(mLock)
+    bool mHaveUndeliveredNotifications = false;  // GUARDED_BY(mLock)
 
     virtual ~DevicesFactoryHalHidl() = default;
 };
 
-} // namespace CPP_VERSION
 } // namespace android
 
 #endif // ANDROID_HARDWARE_DEVICES_FACTORY_HAL_HIDL_H

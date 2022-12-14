@@ -37,6 +37,8 @@
 #include <vector>
 
 namespace android {
+class FilterWrapper;
+
 namespace hardware {
 namespace media {
 namespace c2 {
@@ -54,7 +56,7 @@ using ::android::sp;
 
 struct ComponentStore : public IComponentStore {
     ComponentStore(const std::shared_ptr<C2ComponentStore>& store);
-    virtual ~ComponentStore() = default;
+    virtual ~ComponentStore();
 
     /**
      * Returns the status of the construction of this object.
@@ -67,6 +69,14 @@ struct ComponentStore : public IComponentStore {
      */
     c2_status_t validateSupportedParams(
             const std::vector<std::shared_ptr<C2ParamDescriptor>>& params);
+
+    /**
+     * Returns the store's ParameterCache. This is used for validation by
+     * Configurable::init().
+     */
+    std::shared_ptr<ParameterCache> getParameterCache() const;
+
+    static std::shared_ptr<FilterWrapper> GetFilterWrapper();
 
     // Methods from ::android::hardware::media::c2::V1_0::IComponentStore.
     virtual Return<void> createComponent(
@@ -98,6 +108,8 @@ struct ComponentStore : public IComponentStore {
 
 protected:
     sp<CachedConfigurable> mConfigurable;
+    struct StoreParameterCache;
+    std::shared_ptr<StoreParameterCache> mParameterCache;
 
     // Does bookkeeping for an interface that has been loaded.
     void onInterfaceLoaded(const std::shared_ptr<C2ComponentInterface> &intf);

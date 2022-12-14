@@ -112,6 +112,41 @@ typedef enum AMediaDrmKeyType {
 } AMediaDrmKeyType;
 
 /**
+ * Introduced in API 33.
+ */
+typedef enum AMediaDrmKeyRequestType : int32_t {
+    /**
+     * Key request type is initial license request.
+     * An initial license request is necessary to load keys.
+     */
+    KEY_REQUEST_TYPE_INITIAL,
+
+    /**
+     * Key request type is license renewal.
+     * A renewal license request is necessary to prevent the keys from expiring.
+     */
+    KEY_REQUEST_TYPE_RENEWAL,
+
+    /**
+     * Key request type is license release.
+     * A license release request indicates that keys are removed.
+     */
+    KEY_REQUEST_TYPE_RELEASE,
+
+    /**
+     * Keys are already loaded and are available for use. No license request is necessary, and
+     * no key request data is returned.
+     */
+    KEY_REQUEST_TYPE_NONE,
+
+    /**
+     * Keys have been loaded but an additional license request is needed
+     * to update their values.
+     */
+    KEY_REQUEST_TYPE_UPDATE
+} AMediaDrmKeyRequestType;
+
+/**
  *  Data type containing {key, value} pair
  */
 typedef struct AMediaDrmKeyValuePair {
@@ -165,8 +200,6 @@ typedef void (*AMediaDrmKeysChangeListener)(AMediaDrm *,
         const AMediaDrmSessionId *sessionId, const AMediaDrmKeyStatus *keyStatus,
         size_t numKeys, bool hasNewUsableKey);
 
-#if __ANDROID_API__ >= 21
-
 /**
  * Query if the given scheme identified by its UUID is supported on this device, and
  * whether the drm plugin is able to handle the media container format specified by mimeType.
@@ -174,41 +207,53 @@ typedef void (*AMediaDrmKeysChangeListener)(AMediaDrm *,
  * uuid identifies the universal unique ID of the crypto scheme. uuid must be 16 bytes.
  * mimeType is the MIME type of the media container, e.g. "video/mp4".  If mimeType
  * is not known or required, it can be provided as NULL.
+ *
+ * Available since API level 21.
  */
 bool AMediaDrm_isCryptoSchemeSupported(const uint8_t *uuid,
         const char *mimeType) __INTRODUCED_IN(21);
 
 /**
- * Create a MediaDrm instance from a UUID
+ * Create a MediaDrm instance from a UUID.
  * uuid identifies the universal unique ID of the crypto scheme. uuid must be 16 bytes.
+ *
+ * Available since API level 21.
  */
 AMediaDrm* AMediaDrm_createByUUID(const uint8_t *uuid) __INTRODUCED_IN(21);
 
 /**
- * Release a MediaDrm object
+ * Release a MediaDrm object.
+ *
+ * Available since API level 21.
  */
 void AMediaDrm_release(AMediaDrm *) __INTRODUCED_IN(21);
 
 /**
- * Register a callback to be invoked when an event occurs
+ * Register a callback to be invoked when an event occurs.
  *
- * listener is the callback that will be invoked on event
+ * listener is the callback that will be invoked on event.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_setOnEventListener(AMediaDrm *,
         AMediaDrmEventListener listener) __INTRODUCED_IN(21);
 
 /**
- * Register a callback to be invoked when an expiration update event occurs
+ * Register a callback to be invoked when an expiration update event occurs.
  *
- * listener is the callback that will be invoked on event
+ * listener is the callback that will be invoked on event.
+ *
+ * Available since API level 29.
  */
 media_status_t AMediaDrm_setOnExpirationUpdateListener(AMediaDrm *,
         AMediaDrmExpirationUpdateListener listener) __INTRODUCED_IN(29);
 
 /**
- * Register a callback to be invoked when a key status change event occurs
+ * Register a callback to be invoked when a key status change event occurs.
  *
- * listener is the callback that will be invoked on event
+ * listener is the callback that will be invoked on event.
+ *
+ * Available since API level 29.
  */
 media_status_t AMediaDrm_setOnKeysChangeListener(AMediaDrm *,
         AMediaDrmKeysChangeListener listener) __INTRODUCED_IN(29);
@@ -216,8 +261,10 @@ media_status_t AMediaDrm_setOnKeysChangeListener(AMediaDrm *,
 /**
  * Open a new session with the MediaDrm object.  A session ID is returned.
  *
- * returns MEDIADRM_NOT_PROVISIONED_ERROR if provisioning is needed
- * returns MEDIADRM_RESOURCE_BUSY_ERROR if required resources are in use
+ * Returns MEDIADRM_NOT_PROVISIONED_ERROR if provisioning is needed.
+ * Returns MEDIADRM_RESOURCE_BUSY_ERROR if required resources are in use.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_openSession(AMediaDrm *,
         AMediaDrmSessionId *sessionId) __INTRODUCED_IN(21);
@@ -225,6 +272,8 @@ media_status_t AMediaDrm_openSession(AMediaDrm *,
 /**
  * Close a session on the MediaDrm object that was previously opened
  * with AMediaDrm_openSession.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_closeSession(AMediaDrm *,
         const AMediaDrmSessionId *sessionId) __INTRODUCED_IN(21);
@@ -234,7 +283,10 @@ media_status_t AMediaDrm_closeSession(AMediaDrm *,
  * to obtain or release keys used to decrypt encrypted content.
  * AMediaDrm_getKeyRequest is used to obtain an opaque key request byte array that
  * is delivered to the license server.  The opaque key request byte array is
- * returned in KeyRequest.data.
+ * returned in *keyRequest and the number of bytes in the request is
+ * returned in *keyRequestSize.
+ * This API has same functionality as AMediaDrm_getKeyRequestWithDefaultUrlAndType()
+ * when defaultUrl and keyRequestType are passed in as NULL.
  *
  * After the app has received the key request response from the server,
  * it should deliver to the response to the DRM engine plugin using the method
@@ -266,19 +318,90 @@ media_status_t AMediaDrm_closeSession(AMediaDrm *,
  *   by the caller
  *
  * On exit:
+ *   If this returns AMEDIA_OK,
  *   1. The keyRequest pointer will reference the opaque key request data.  It
  *       will reside in memory owned by the AMediaDrm object, and will remain
- *       accessible until the next call to AMediaDrm_getKeyRequest or until the
+ *       accessible until the next call to AMediaDrm_getKeyRequest
+ *       or AMediaDrm_getKeyRequestWithDefaultUrlAndType or until the
  *       MediaDrm object is released.
  *   2. keyRequestSize will be set to the size of the request
+ *   If this does not return AMEDIA_OK, value of these parameters should not be used.
  *
- * returns MEDIADRM_NOT_PROVISIONED_ERROR if reprovisioning is needed, due to a
+ * Returns MEDIADRM_NOT_PROVISIONED_ERROR if reprovisioning is needed, due to a
  * problem with the device certificate.
-*/
+ *
+ * Available since API level 21.
+ */
 media_status_t AMediaDrm_getKeyRequest(AMediaDrm *, const AMediaDrmScope *scope,
         const uint8_t *init, size_t initSize, const char *mimeType, AMediaDrmKeyType keyType,
         const AMediaDrmKeyValue *optionalParameters, size_t numOptionalParameters,
         const uint8_t **keyRequest, size_t *keyRequestSize) __INTRODUCED_IN(21);
+
+/**
+ * A key request/response exchange occurs between the app and a license server
+ * to obtain or release keys used to decrypt encrypted content.
+ * AMediaDrm_getKeyRequest is used to obtain an opaque key request byte array that
+ * is delivered to the license server.  The opaque key request byte array is
+ * returned in *keyRequest and the number of bytes in the request is
+ * returned in *keyRequestSize.
+ *
+ * After the app has received the key request response from the server,
+ * it should deliver to the response to the DRM engine plugin using the method
+ * AMediaDrm_provideKeyResponse.
+ *
+ * scope may be a sessionId or a keySetId, depending on the specified keyType.
+ * When the keyType is KEY_TYPE_STREAMING or KEY_TYPE_OFFLINE, scope should be set
+ * to the sessionId the keys will be provided to.  When the keyType is
+ * KEY_TYPE_RELEASE, scope should be set to the keySetId of the keys being released.
+ * Releasing keys from a device invalidates them for all sessions.
+ *
+ * init container-specific data, its meaning is interpreted based on the mime type
+ * provided in the mimeType parameter.  It could contain, for example, the content
+ * ID, key ID or other data obtained from the content metadata that is required in
+ * generating the key request. init may be null when keyType is KEY_TYPE_RELEASE.
+ *
+ * initSize is the number of bytes of initData
+ *
+ * mimeType identifies the mime type of the content.
+ *
+ * keyType specifes the type of the request. The request may be to acquire keys for
+ *   streaming or offline content, or to release previously acquired keys, which are
+ *   identified by a keySetId.
+ *
+ * optionalParameters are included in the key request message to allow a client
+ *   application to provide additional message parameters to the server.
+ *
+ * numOptionalParameters indicates the number of optional parameters provided
+ *   by the caller
+ *
+ * On exit:
+ *   If this returns AMEDIA_OK,
+ *   1. The keyRequest pointer will reference the opaque key request data.  It
+ *       will reside in memory owned by the AMediaDrm object, and will remain
+ *       accessible until the next call to either AMediaDrm_getKeyRequest
+ *       or AMediaDrm_getKeyRequestWithDefaultUrlAndType or until the
+ *       MediaDrm object is released.
+ *   2. keyRequestSize will be set to the size of the request.
+ *   3. defaultUrl will be set to the recommended URL to deliver the key request.
+ *      The defaultUrl pointer will reference a NULL terminated URL string.
+ *      It will be UTF-8 encoded and have same lifetime with the key request data
+ *      KeyRequest pointer references to. Passing in NULL means you don't need it
+ *      to be reported.
+ *   4. keyRequestType will be set to the key request type. Passing in NULL means
+*       you don't need it to be reported.
+ *
+ * Returns MEDIADRM_NOT_PROVISIONED_ERROR if reprovisioning is needed, due to a
+ * problem with the device certificate.
+ *
+ * Available since API level 33.
+ */
+media_status_t AMediaDrm_getKeyRequestWithDefaultUrlAndType(AMediaDrm *,
+        const AMediaDrmScope *scope, const uint8_t *init, size_t initSize,
+        const char *mimeType, AMediaDrmKeyType keyType,
+        const AMediaDrmKeyValue *optionalParameters,
+        size_t numOptionalParameters, const uint8_t **keyRequest,
+        size_t *keyRequestSize, const char **defaultUrl,
+        AMediaDrmKeyRequestType *keyRequestType) __INTRODUCED_IN(__ANDROID_API_T__);
 
 /**
  * A key response is received from the license server by the app, then it is
@@ -295,8 +418,9 @@ media_status_t AMediaDrm_getKeyRequest(AMediaDrm *, const AMediaDrmScope *scope,
  *
  * response points to the opaque response from the server
  * responseSize should be set to the size of the response in bytes
+ *
+ * Available since API level 21.
  */
-
 media_status_t AMediaDrm_provideKeyResponse(AMediaDrm *, const AMediaDrmScope *scope,
         const uint8_t *response, size_t responseSize,
         AMediaDrmKeySetId *keySetId) __INTRODUCED_IN(21);
@@ -305,8 +429,10 @@ media_status_t AMediaDrm_provideKeyResponse(AMediaDrm *, const AMediaDrmScope *s
  * Restore persisted offline keys into a new session.  keySetId identifies the
  * keys to load, obtained from a prior call to AMediaDrm_provideKeyResponse.
  *
- * sessionId is the session ID for the DRM session
- * keySetId identifies the saved key set to restore
+ * sessionId is the session ID for the DRM session.
+ * keySetId identifies the saved key set to restore.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_restoreKeys(AMediaDrm *, const AMediaDrmSessionId *sessionId,
         const AMediaDrmKeySetId *keySetId) __INTRODUCED_IN(21);
@@ -314,7 +440,9 @@ media_status_t AMediaDrm_restoreKeys(AMediaDrm *, const AMediaDrmSessionId *sess
 /**
  * Remove the current keys from a session.
  *
- * keySetId identifies keys to remove
+ * keySetId identifies keys to remove.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_removeKeys(AMediaDrm *,
         const AMediaDrmSessionId *keySetId) __INTRODUCED_IN(21);
@@ -331,6 +459,8 @@ media_status_t AMediaDrm_removeKeys(AMediaDrm *,
  * to the number of entries written to the array.  If the number of {key, value} pairs
  * to be returned is greater than *numPairs, MEDIADRM_SHORT_BUFFER will be returned
  * and numPairs will be set to the number of pairs available.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_queryKeyStatus(AMediaDrm *, const AMediaDrmSessionId *sessionId,
         AMediaDrmKeyValue *keyValuePairs, size_t *numPairs) __INTRODUCED_IN(21);
@@ -350,6 +480,8 @@ media_status_t AMediaDrm_queryKeyStatus(AMediaDrm *, const AMediaDrmSessionId *s
  *    3. serverUrl will reference a NULL terminated string containing the URL
  *       the provisioning request should be sent to.  It will remain accessible until
  *       the next call to getProvisionRequest.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_getProvisionRequest(AMediaDrm *, const uint8_t **provisionRequest,
         size_t *provisionRequestSize, const char **serverUrl) __INTRODUCED_IN(21);
@@ -363,8 +495,10 @@ media_status_t AMediaDrm_getProvisionRequest(AMediaDrm *, const uint8_t **provis
  *   DRM engine plugin.
  * responseSize is the length of the provisioning response in bytes.
  *
- * returns MEDIADRM_DEVICE_REVOKED_ERROR if the response indicates that the
+ * Returns MEDIADRM_DEVICE_REVOKED_ERROR if the response indicates that the
  * server rejected the request
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_provideProvisionResponse(AMediaDrm *,
         const uint8_t *response, size_t responseSize) __INTRODUCED_IN(21);
@@ -390,6 +524,8 @@ media_status_t AMediaDrm_provideProvisionResponse(AMediaDrm *,
  * If *numSecureStops is too small for the number of secure stops available,
  * MEDIADRM_SHORT_BUFFER will be returned and *numSecureStops will be set to the
  * number required.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_getSecureStops(AMediaDrm *,
         AMediaDrmSecureStop *secureStops, size_t *numSecureStops) __INTRODUCED_IN(21);
@@ -399,6 +535,8 @@ media_status_t AMediaDrm_getSecureStops(AMediaDrm *,
  * the message, remove the SecureStops identified in the response.
  *
  * ssRelease is the server response indicating which secure stops to release
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_releaseSecureStops(AMediaDrm *,
         const AMediaDrmSecureStop *ssRelease) __INTRODUCED_IN(21);
@@ -432,6 +570,8 @@ media_status_t AMediaDrm_releaseSecureStops(AMediaDrm *,
  * On return, propertyValue will be set to point to the property value.  The
  * memory that the value resides in is owned by the NDK MediaDrm API and
  * will remain valid until the next call to AMediaDrm_getPropertyString.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_getPropertyString(AMediaDrm *, const char *propertyName,
         const char **propertyValue) __INTRODUCED_IN(21);
@@ -447,18 +587,24 @@ media_status_t AMediaDrm_getPropertyString(AMediaDrm *, const char *propertyName
  * On return, *propertyValue will be set to point to the property value.  The
  * memory that the value resides in is owned by the NDK MediaDrm API and
  * will remain valid until the next call to AMediaDrm_getPropertyByteArray.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_getPropertyByteArray(AMediaDrm *, const char *propertyName,
         AMediaDrmByteArray *propertyValue) __INTRODUCED_IN(21);
 
 /**
  * Set a DRM engine plugin String property value.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_setPropertyString(AMediaDrm *, const char *propertyName,
         const char *value) __INTRODUCED_IN(21);
 
 /**
  * Set a DRM engine plugin byte array property value.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_setPropertyByteArray(AMediaDrm *, const char *propertyName,
         const uint8_t *value, size_t valueSize) __INTRODUCED_IN(21);
@@ -487,6 +633,8 @@ media_status_t AMediaDrm_setPropertyByteArray(AMediaDrm *, const char *propertyN
  * ensure that the output buffer is large enough to accept dataSize bytes. The key
  * to use is identified by the 16 byte keyId.  The key must have been loaded into
  * the session using provideKeyResponse.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_encrypt(AMediaDrm *, const AMediaDrmSessionId *sessionId,
         const char *cipherAlgorithm, uint8_t *keyId, uint8_t *iv,
@@ -498,6 +646,8 @@ media_status_t AMediaDrm_encrypt(AMediaDrm *, const AMediaDrmSessionId *sessionI
  * ensure that the output buffer is large enough to accept dataSize bytes.  The key
  * to use is identified by the 16 byte keyId.  The key must have been loaded into
  * the session using provideKeyResponse.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_decrypt(AMediaDrm *, const AMediaDrmSessionId *sessionId,
         const char *cipherAlgorithm, uint8_t *keyId, uint8_t *iv,
@@ -511,6 +661,8 @@ media_status_t AMediaDrm_decrypt(AMediaDrm *, const AMediaDrmSessionId *sessionI
  * *signatureSize is set to the buffer size required.  The key to use is identified
  * by the 16 byte keyId.  The key must have been loaded into the session using
  * provideKeyResponse.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_sign(AMediaDrm *, const AMediaDrmSessionId *sessionId,
         const char *macAlgorithm, uint8_t *keyId, uint8_t *message, size_t messageSize,
@@ -522,12 +674,12 @@ media_status_t AMediaDrm_sign(AMediaDrm *, const AMediaDrmSessionId *sessionId,
  * if the signature matches, otherwise MEDAIDRM_VERIFY_FAILED is returned. The key to
  * use is identified by the 16 byte keyId.  The key must have been loaded into the
  * session using provideKeyResponse.
+ *
+ * Available since API level 21.
  */
 media_status_t AMediaDrm_verify(AMediaDrm *, const AMediaDrmSessionId *sessionId,
         const char *macAlgorithm, uint8_t *keyId, const uint8_t *message, size_t messageSize,
         const uint8_t *signature, size_t signatureSize) __INTRODUCED_IN(21);
-
-#endif /* __ANDROID_API__ >= 21 */
 
 __END_DECLS
 

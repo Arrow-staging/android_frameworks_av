@@ -356,16 +356,18 @@ inline static const char *asString_VP9Level(int32_t i, const char *def = "??") {
     }
 }
 
-constexpr int32_t AV1Profile0 = 0x01;
-constexpr int32_t AV1Profile1 = 0x02;
-constexpr int32_t AV1Profile2 = 0x04;
+constexpr int32_t AV1ProfileMain8 = 0x1;
+constexpr int32_t AV1ProfileMain10 = 0x2;
+constexpr int32_t AV1ProfileMain10HDR10 = 0x1000;
+constexpr int32_t AV1ProfileMain10HDR10Plus = 0x2000;
 
 inline static const char *asString_AV1Profile(int32_t i, const char *def = "??") {
     switch (i) {
-        case AV1Profile0:       return "0";
-        case AV1Profile1:       return "1";
-        case AV1Profile2:       return "2";
-        default:                return def;
+        case AV1ProfileMain8:           return "Main8";
+        case AV1ProfileMain10:          return "Main10";
+        case AV1ProfileMain10HDR10:     return "Main10HDR10";
+        case AV1ProfileMain10HDR10Plus: return "Main10HDRPlus";
+        default:                        return def;
     }
 }
 
@@ -508,22 +510,24 @@ constexpr int32_t DolbyVisionProfileDvheDtr = 0x10;
 constexpr int32_t DolbyVisionProfileDvheStn = 0x20;
 constexpr int32_t DolbyVisionProfileDvheDth = 0x40;
 constexpr int32_t DolbyVisionProfileDvheDtb = 0x80;
-constexpr int32_t DolbyVisionProfileDvheSt = 0x100;
-constexpr int32_t DolbyVisionProfileDvavSe = 0x200;
+constexpr int32_t DolbyVisionProfileDvheSt  = 0x100;
+constexpr int32_t DolbyVisionProfileDvavSe  = 0x200;
+constexpr int32_t DolbyVisionProfileDvav110 = 0x400;
 
 inline static const char *asString_DolbyVisionProfile(int32_t i, const char *def = "??") {
     switch (i) {
-        case DolbyVisionProfileDvavPer: return "DvavPer";
-        case DolbyVisionProfileDvavPen: return "DvavPen";
-        case DolbyVisionProfileDvheDer: return "DvheDer";
-        case DolbyVisionProfileDvheDen: return "DvheDen";
-        case DolbyVisionProfileDvheDtr: return "DvheDtr";
-        case DolbyVisionProfileDvheStn: return "DvheStn";
-        case DolbyVisionProfileDvheDth: return "DvheDth";
-        case DolbyVisionProfileDvheDtb: return "DvheDtb";
-        case DolbyVisionProfileDvheSt:  return "DvheSt";
-        case DolbyVisionProfileDvavSe:  return "DvavSe";
-        default:                        return def;
+        case DolbyVisionProfileDvavPer:  return "DvavPer";
+        case DolbyVisionProfileDvavPen:  return "DvavPen";
+        case DolbyVisionProfileDvheDer:  return "DvheDer";
+        case DolbyVisionProfileDvheDen:  return "DvheDen";
+        case DolbyVisionProfileDvheDtr:  return "DvheDtr";
+        case DolbyVisionProfileDvheStn:  return "DvheStn";
+        case DolbyVisionProfileDvheDth:  return "DvheDth";
+        case DolbyVisionProfileDvheDtb:  return "DvheDtb";
+        case DolbyVisionProfileDvheSt:   return "DvheSt";
+        case DolbyVisionProfileDvavSe:   return "DvavSe";
+        case DolbyVisionProfileDvav110:  return "Dav110";
+        default:                         return def;
     }
 }
 
@@ -536,6 +540,9 @@ constexpr int32_t DolbyVisionLevelUhd24   = 0x20;
 constexpr int32_t DolbyVisionLevelUhd30   = 0x40;
 constexpr int32_t DolbyVisionLevelUhd48   = 0x80;
 constexpr int32_t DolbyVisionLevelUhd60   = 0x100;
+constexpr int32_t DolbyVisionLevelUhd120  = 0x200;
+constexpr int32_t DolbyVisionLevel8k30    = 0x400;
+constexpr int32_t DolbyVisionLevel8k60    = 0x800;
 
 inline static const char *asString_DolbyVisionLevel(int32_t i, const char *def = "??") {
     switch (i) {
@@ -548,17 +555,22 @@ inline static const char *asString_DolbyVisionLevel(int32_t i, const char *def =
         case DolbyVisionLevelUhd30: return "Uhd30";
         case DolbyVisionLevelUhd48: return "Uhd48";
         case DolbyVisionLevelUhd60: return "Uhd60";
+        case DolbyVisionLevelUhd120: return "Uhd120";
+        case DolbyVisionLevel8k30:  return "8k30";
+        case DolbyVisionLevel8k60:  return "8k60";
         default:                    return def;
     }
 }
 
 constexpr int32_t BITRATE_MODE_CBR = 2;
+constexpr int32_t BITRATE_MODE_CBR_FD = 3;
 constexpr int32_t BITRATE_MODE_CQ = 0;
 constexpr int32_t BITRATE_MODE_VBR = 1;
 
 inline static const char *asString_BitrateMode(int32_t i, const char *def = "??") {
     switch (i) {
         case BITRATE_MODE_CBR:  return "CBR";
+        case BITRATE_MODE_CBR_FD: return "CBR_FD";
         case BITRATE_MODE_CQ:   return "CQ";
         case BITRATE_MODE_VBR:  return "VBR";
         default:                return def;
@@ -580,9 +592,11 @@ constexpr int32_t COLOR_Format24BitARGB6666           = 42;
 constexpr int32_t COLOR_Format24bitBGR888             = 12;
 constexpr int32_t COLOR_Format24bitRGB888             = 11;
 constexpr int32_t COLOR_Format25bitARGB1888           = 14;
+constexpr int32_t COLOR_Format32bitABGR2101010        = 0x7F00AAA2;
 constexpr int32_t COLOR_Format32bitABGR8888           = 0x7F00A000;
 constexpr int32_t COLOR_Format32bitARGB8888           = 16;
 constexpr int32_t COLOR_Format32bitBGRA8888           = 15;
+constexpr int32_t COLOR_Format64bitABGRFloat          = 0x7F000F16;
 constexpr int32_t COLOR_Format8bitRGB332              = 2;
 constexpr int32_t COLOR_FormatCbYCrY                  = 27;
 constexpr int32_t COLOR_FormatCrYCbY                  = 28;
@@ -615,6 +629,7 @@ constexpr int32_t COLOR_FormatYUV422Planar            = 22;
 constexpr int32_t COLOR_FormatYUV422SemiPlanar        = 24;
 constexpr int32_t COLOR_FormatYUV444Flexible          = 0x7F444888;
 constexpr int32_t COLOR_FormatYUV444Interleaved       = 29;
+constexpr int32_t COLOR_FormatYUVP010                 = 54;
 constexpr int32_t COLOR_QCOM_FormatYUV420SemiPlanar   = 0x7fa30c00;
 constexpr int32_t COLOR_TI_FormatYUV420PackedSemiPlanar = 0x7f000100;
 
@@ -635,9 +650,11 @@ inline static const char *asString_ColorFormat(int32_t i, const char *def = "??"
         case COLOR_Format24bitBGR888:               return "24bitBGR888";
         case COLOR_Format24bitRGB888:               return "24bitRGB888";
         case COLOR_Format25bitARGB1888:             return "25bitARGB1888";
+        case COLOR_Format32bitABGR2101010:          return "32bitABGR2101010";
         case COLOR_Format32bitABGR8888:             return "32bitABGR8888";
         case COLOR_Format32bitARGB8888:             return "32bitARGB8888";
         case COLOR_Format32bitBGRA8888:             return "32bitBGRA8888";
+        case COLOR_Format64bitABGRFloat:            return "64bitABGRFloat";
         case COLOR_Format8bitRGB332:                return "8bitRGB332";
         case COLOR_FormatCbYCrY:                    return "CbYCrY";
         case COLOR_FormatCrYCbY:                    return "CrYCbY";
@@ -670,6 +687,7 @@ inline static const char *asString_ColorFormat(int32_t i, const char *def = "??"
         case COLOR_FormatYUV422SemiPlanar:          return "YUV422SemiPlanar";
         case COLOR_FormatYUV444Flexible:            return "YUV444Flexible";
         case COLOR_FormatYUV444Interleaved:         return "YUV444Interleaved";
+        case COLOR_FormatYUVP010:                   return "YUVP010";
         case COLOR_QCOM_FormatYUV420SemiPlanar:     return "QCOM_YUV420SemiPlanar";
         case COLOR_TI_FormatYUV420PackedSemiPlanar: return "TI_YUV420PackedSemiPlanar";
         default:                                    return def;
@@ -677,8 +695,10 @@ inline static const char *asString_ColorFormat(int32_t i, const char *def = "??"
 }
 
 constexpr char FEATURE_AdaptivePlayback[]       = "adaptive-playback";
+constexpr char FEATURE_EncodingStatistics[]     = "encoding-statistics";
 constexpr char FEATURE_IntraRefresh[] = "intra-refresh";
 constexpr char FEATURE_PartialFrame[] = "partial-frame";
+constexpr char FEATURE_QpBounds[] = "qp-bounds";
 constexpr char FEATURE_SecurePlayback[]         = "secure-playback";
 constexpr char FEATURE_TunneledPlayback[]       = "tunneled-playback";
 
@@ -729,15 +749,26 @@ constexpr int32_t COLOR_TRANSFER_LINEAR = 1;
 constexpr int32_t COLOR_TRANSFER_SDR_VIDEO = 3;
 constexpr int32_t COLOR_TRANSFER_ST2084 = 6;
 
+constexpr int32_t PICTURE_TYPE_I = 1;
+constexpr int32_t PICTURE_TYPE_P = 2;
+constexpr int32_t PICTURE_TYPE_B = 3;
+constexpr int32_t PICTURE_TYPE_UNKNOWN = 0;
+
+constexpr int32_t VIDEO_ENCODING_STATISTICS_LEVEL_1 = 1;
+constexpr int32_t VIDEO_ENCODING_STATISTICS_LEVEL_NONE = 0;
+
+constexpr char KEY_AAC_DRC_ALBUM_MODE[] = "aac-drc-album-mode";
 constexpr char KEY_AAC_DRC_ATTENUATION_FACTOR[] = "aac-drc-cut-level";
 constexpr char KEY_AAC_DRC_BOOST_FACTOR[] = "aac-drc-boost-level";
 constexpr char KEY_AAC_DRC_EFFECT_TYPE[] = "aac-drc-effect-type";
 constexpr char KEY_AAC_DRC_HEAVY_COMPRESSION[] = "aac-drc-heavy-compression";
+constexpr char KEY_AAC_DRC_OUTPUT_LOUDNESS[] = "aac-drc-output-loudness";
 constexpr char KEY_AAC_DRC_TARGET_REFERENCE_LEVEL[] = "aac-target-ref-level";
 constexpr char KEY_AAC_ENCODED_TARGET_LEVEL[] = "aac-encoded-target-level";
 constexpr char KEY_AAC_MAX_OUTPUT_CHANNEL_COUNT[] = "aac-max-output-channel_count";
 constexpr char KEY_AAC_PROFILE[] = "aac-profile";
 constexpr char KEY_AAC_SBR_MODE[] = "aac-sbr-mode";
+constexpr char KEY_ALLOW_FRAME_DROP[] = "allow-frame-drop";
 constexpr char KEY_AUDIO_SESSION_ID[] = "audio-session-id";
 constexpr char KEY_BIT_RATE[] = "bitrate";
 constexpr char KEY_BITRATE_MODE[] = "bitrate-mode";
@@ -745,7 +776,7 @@ constexpr char KEY_CA_SESSION_ID[] = "ca-session-id";
 constexpr char KEY_CA_SYSTEM_ID[] = "ca-system-id";
 constexpr char KEY_CA_PRIVATE_DATA[] = "ca-private-data";
 constexpr char KEY_CAPTURE_RATE[] = "capture-rate";
-constexpr char KEY_CHANNEL_COUNT[] = "channel-count";
+constexpr char KEY_CHANNEL_COUNT[] = "channel-count";   // value N, eq to range 1..N
 constexpr char KEY_CHANNEL_MASK[] = "channel-mask";
 constexpr char KEY_COLOR_FORMAT[] = "color-format";
 constexpr char KEY_COLOR_RANGE[] = "color-range";
@@ -772,16 +803,23 @@ constexpr char KEY_IS_TIMED_TEXT[] = "is-timed-text";
 constexpr char KEY_LANGUAGE[] = "language";
 constexpr char KEY_LATENCY[] = "latency";
 constexpr char KEY_LEVEL[] = "level";
+constexpr char KEY_LOW_LATENCY[] = "low-latency";
+constexpr char KEY_MAX_B_FRAMES[] = "max-bframes";
 constexpr char KEY_MAX_BIT_RATE[] = "max-bitrate";
 constexpr char KEY_MAX_FPS_TO_ENCODER[] = "max-fps-to-encoder";
 constexpr char KEY_MAX_HEIGHT[] = "max-height";
 constexpr char KEY_MAX_INPUT_SIZE[] = "max-input-size";
+constexpr char KEY_MAX_OUTPUT_CHANNEL_COUNT[] = "max-output-channel-count";
 constexpr char KEY_MAX_PTS_GAP_TO_ENCODER[] = "max-pts-gap-to-encoder";
 constexpr char KEY_MAX_WIDTH[] = "max-width";
 constexpr char KEY_MIME[] = "mime";
 constexpr char KEY_OPERATING_RATE[] = "operating-rate";
 constexpr char KEY_OUTPUT_REORDER_DEPTH[] = "output-reorder-depth";
 constexpr char KEY_PCM_ENCODING[] = "pcm-encoding";
+constexpr char KEY_PICTURE_TYPE[] = "picture-type";
+constexpr char KEY_PIXEL_ASPECT_RATIO_HEIGHT[] = "sar-height";
+constexpr char KEY_PIXEL_ASPECT_RATIO_WIDTH[] = "sar-width";
+constexpr char KEY_PREPEND_HEADER_TO_SYNC_FRAMES[] = "prepend-sps-pps-to-idr-frames";
 constexpr char KEY_PRIORITY[] = "priority";
 constexpr char KEY_PROFILE[] = "profile";
 constexpr char KEY_PUSH_BLANK_BUFFERS_ON_STOP[] = "push-blank-buffers-on-shutdown";
@@ -795,6 +833,16 @@ constexpr char KEY_TEMPORAL_LAYERING[] = "ts-schema";
 constexpr char KEY_TILE_HEIGHT[] = "tile-height";
 constexpr char KEY_TILE_WIDTH[] = "tile-width";
 constexpr char KEY_TRACK_ID[] = "track-id";
+constexpr char KEY_VIDEO_ENCODING_STATISTICS_LEVEL[] = "video-encoding-statistics-level";
+constexpr char KEY_VIDEO_QP_AVERAGE[] = "video-qp-average";
+constexpr char KEY_VIDEO_QP_B_MAX[] = "video-qp-b-max";
+constexpr char KEY_VIDEO_QP_B_MIN[] = "video-qp-b-min";
+constexpr char KEY_VIDEO_QP_I_MAX[] = "video-qp-i-max";
+constexpr char KEY_VIDEO_QP_I_MIN[] = "video-qp-i-min";
+constexpr char KEY_VIDEO_QP_MAX[] = "video-qp-max";
+constexpr char KEY_VIDEO_QP_MIN[] = "video-qp-min";
+constexpr char KEY_VIDEO_QP_P_MAX[] = "video-qp-p-max";
+constexpr char KEY_VIDEO_QP_P_MIN[] = "video-qp-p-min";
 constexpr char KEY_WIDTH[] = "width";
 
 // from MediaCodec.java
@@ -823,6 +871,7 @@ constexpr int32_t BUFFER_FLAG_KEY_FRAME = 1;
 constexpr int32_t BUFFER_FLAG_PARTIAL_FRAME = 8;
 constexpr int32_t BUFFER_FLAG_SYNC_FRAME = 1;
 constexpr int32_t CONFIGURE_FLAG_ENCODE = 1;
+constexpr int32_t CONFIGURE_FLAG_USE_BLOCK_MODEL = 2;
 constexpr int32_t CRYPTO_MODE_AES_CBC     = 2;
 constexpr int32_t CRYPTO_MODE_AES_CTR     = 1;
 constexpr int32_t CRYPTO_MODE_UNENCRYPTED = 0;
@@ -835,9 +884,9 @@ constexpr char PARAMETER_KEY_OFFSET_TIME[] = "time-offset-us";
 constexpr char PARAMETER_KEY_REQUEST_SYNC_FRAME[] = "request-sync";
 constexpr char PARAMETER_KEY_SUSPEND[] = "drop-input-frames";
 constexpr char PARAMETER_KEY_SUSPEND_TIME[] = "drop-start-time-us";
+constexpr char PARAMETER_KEY_TUNNEL_PEEK[] =  "tunnel-peek";
 constexpr char PARAMETER_KEY_VIDEO_BITRATE[] = "video-bitrate";
 
 }
 
 #endif  // MEDIA_CODEC_CONSTANTS_H_
-

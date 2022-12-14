@@ -39,7 +39,7 @@ SpdifStreamOut::SpdifStreamOut(AudioHwDevice *dev,
         , mSpdifEncoder(this, format)
         , mApplicationFormat(AUDIO_FORMAT_DEFAULT)
         , mApplicationSampleRate(0)
-        , mApplicationChannelMask(0)
+        , mApplicationChannelMask(AUDIO_CHANNEL_NONE)
 {
 }
 
@@ -59,6 +59,7 @@ status_t SpdifStreamOut::open(
     // TODO Move this into the audio_utils as a static method.
     switch(config->format) {
         case AUDIO_FORMAT_E_AC3:
+        case AUDIO_FORMAT_E_AC3_JOC:
             mRateMultiplier = 4;
             break;
         case AUDIO_FORMAT_AC3:

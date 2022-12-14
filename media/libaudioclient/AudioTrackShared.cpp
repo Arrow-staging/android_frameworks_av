@@ -17,37 +17,36 @@
 #define LOG_TAG "AudioTrackShared"
 //#define LOG_NDEBUG 0
 
+#include <atomic>
 #include <android-base/macros.h>
 #include <private/media/AudioTrackShared.h>
 #include <utils/Log.h>
+#include <audio_utils/safe_math.h>
 
 #include <linux/futex.h>
 #include <sys/syscall.h>
 
 namespace android {
 
-// TODO: consider pulling this into a shared header.
-// safe_sub_overflow is used ensure that subtraction occurs in the same native type
-// with proper 2's complement overflow.  Without calling this function, it is possible,
-// for example, that optimizing compilers may elect to treat 32 bit subtraction
-// as 64 bit subtraction when storing into a 64 bit destination as integer overflow is
-// technically undefined.
-template<typename T,
-         typename U,
-         typename = std::enable_if_t<std::is_same<std::decay_t<T>,
-                                       std::decay_t<U>>{}>>
-         // ensure arguments are same type (ignoring volatile, which is used in cblk variables).
-auto safe_sub_overflow(const T& a, const U& b) {
-    std::decay_t<T> result;
-    (void)__builtin_sub_overflow(a, b, &result);
-    // note if __builtin_sub_overflow returns true, an overflow occurred.
-    return result;
-}
-
 // used to clamp a value to size_t.  TODO: move to another file.
 template <typename T>
 size_t clampToSize(T x) {
     return sizeof(T) > sizeof(size_t) && x > (T) SIZE_MAX ? SIZE_MAX : x < 0 ? 0 : (size_t) x;
+}
+
+// compile-time safe atomics. TODO: update all methods to use it
+template <typename T>
+T android_atomic_load(const volatile T* addr) {
+    static_assert(sizeof(T) == sizeof(std::atomic<T>)); // no extra sync data required.
+    static_assert(std::atomic<T>::is_always_lock_free); // no hash lock somewhere.
+    return atomic_load((std::atomic<T>*)addr);          // memory_order_seq_cst
+}
+
+template <typename T>
+void android_atomic_store(const volatile T* addr, T value) {
+    static_assert(sizeof(T) == sizeof(std::atomic<T>)); // no extra sync data required.
+    static_assert(std::atomic<T>::is_always_lock_free); // no hash lock somewhere.
+    atomic_store((std::atomic<T>*)addr, value);         // memory_order_seq_cst
 }
 
 // incrementSequence is used to determine the next sequence value
@@ -68,6 +67,7 @@ audio_track_cblk_t::audio_track_cblk_t()
     : mServer(0), mFutex(0), mMinimum(0)
     , mVolumeLR(GAIN_MINIFLOAT_PACKED_UNITY), mSampleRate(0), mSendLevel(0)
     , mBufferSizeInFrames(0)
+    , mStartThresholdInFrames(0) // filled in by the server.
     , mFlags(0)
 {
     memset(&u, 0, sizeof(u));
@@ -81,6 +81,26 @@ Proxy::Proxy(audio_track_cblk_t* cblk, void *buffers, size_t frameCount, size_t 
       mFrameCountP2(roundup(frameCount)), mIsOut(isOut), mClientInServer(clientInServer),
       mIsShutdown(false), mUnreleased(0)
 {
+}
+
+uint32_t Proxy::getStartThresholdInFrames() const
+{
+    const uint32_t startThresholdInFrames =
+           android_atomic_load(&mCblk->mStartThresholdInFrames);
+    if (startThresholdInFrames == 0 || startThresholdInFrames > mFrameCount) {
+        ALOGD("%s: startThresholdInFrames %u not between 1 and frameCount %zu, "
+                "setting to frameCount",
+                __func__, startThresholdInFrames, mFrameCount);
+        return mFrameCount;
+    }
+    return startThresholdInFrames;
+}
+
+uint32_t Proxy::setStartThresholdInFrames(uint32_t startThresholdInFrames)
+{
+    const uint32_t actual = std::min((size_t)startThresholdInFrames, frameCount());
+    android_atomic_store(&mCblk->mStartThresholdInFrames, actual);
+    return actual;
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +224,7 @@ status_t ClientProxy::obtainBuffer(Buffer* buffer, const struct timespec *reques
             front = cblk->u.mStreaming.mFront;
         }
         // write to rear, read from front
-        ssize_t filled = safe_sub_overflow(rear, front);
+        ssize_t filled = audio_utils::safe_sub_overflow(rear, front);
         // pipe should not be overfull
         if (!(0 <= filled && (size_t) filled <= mFrameCount)) {
             if (mIsOut) {
@@ -389,7 +409,7 @@ void ClientProxy::binderDied()
         android_atomic_or(CBLK_FUTEX_WAKE, &cblk->mFutex);
         // it seems that a FUTEX_WAKE_PRIVATE will not wake a FUTEX_WAIT, even within same process
         (void) syscall(__NR_futex, &cblk->mFutex, mClientInServer ? FUTEX_WAKE_PRIVATE : FUTEX_WAKE,
-                1);
+                INT_MAX);
     }
 }
 
@@ -399,7 +419,7 @@ void ClientProxy::interrupt()
     if (!(android_atomic_or(CBLK_INTERRUPT, &cblk->mFlags) & CBLK_INTERRUPT)) {
         android_atomic_or(CBLK_FUTEX_WAKE, &cblk->mFutex);
         (void) syscall(__NR_futex, &cblk->mFutex, mClientInServer ? FUTEX_WAKE_PRIVATE : FUTEX_WAKE,
-                1);
+                INT_MAX);
     }
 }
 
@@ -470,6 +490,8 @@ bool AudioTrackClientProxy::getStreamEndDone() const {
 status_t AudioTrackClientProxy::waitStreamEndDone(const struct timespec *requested)
 {
     struct timespec total;          // total elapsed time spent waiting
+    struct timespec before;
+    bool beforeIsValid = false;
     total.tv_sec = 0;
     total.tv_nsec = 0;
     audio_track_cblk_t* cblk = mCblk;
@@ -550,17 +572,38 @@ status_t AudioTrackClientProxy::waitStreamEndDone(const struct timespec *request
         }
         int32_t old = android_atomic_and(~CBLK_FUTEX_WAKE, &cblk->mFutex);
         if (!(old & CBLK_FUTEX_WAKE)) {
+            if (!beforeIsValid) {
+                clock_gettime(CLOCK_MONOTONIC, &before);
+                beforeIsValid = true;
+            }
             errno = 0;
             (void) syscall(__NR_futex, &cblk->mFutex,
                     mClientInServer ? FUTEX_WAIT_PRIVATE : FUTEX_WAIT, old & ~CBLK_FUTEX_WAKE, ts);
-            switch (errno) {
+            status_t error = errno; // clock_gettime can affect errno
+            {
+                struct timespec after;
+                clock_gettime(CLOCK_MONOTONIC, &after);
+                total.tv_sec += after.tv_sec - before.tv_sec;
+                // Use auto instead of long to avoid the google-runtime-int warning.
+                auto deltaNs = after.tv_nsec - before.tv_nsec;
+                if (deltaNs < 0) {
+                    deltaNs += 1000000000;
+                    total.tv_sec--;
+                }
+                if ((total.tv_nsec += deltaNs) >= 1000000000) {
+                    total.tv_nsec -= 1000000000;
+                    total.tv_sec++;
+                }
+                before = after;
+            }
+            switch (error) {
             case 0:            // normal wakeup by server, or by binderDied()
             case EWOULDBLOCK:  // benign race condition with server
             case EINTR:        // wait was interrupted by signal or other spurious wakeup
             case ETIMEDOUT:    // time-out expired
                 break;
             default:
-                status = errno;
+                status = error;
                 ALOGE("%s unexpected error %s", __func__, strerror(status));
                 goto end;
             }
@@ -680,6 +723,7 @@ ServerProxy::ServerProxy(audio_track_cblk_t* cblk, void *buffers, size_t frameCo
     , mTimestampMutator(&cblk->mExtendedTimestampQueue)
 {
     cblk->mBufferSizeInFrames = frameCount;
+    cblk->mStartThresholdInFrames = frameCount;
 }
 
 __attribute__((no_sanitize("integer")))
@@ -702,7 +746,7 @@ void ServerProxy::flushBufferIfNeeded()
         const size_t overflowBit = mFrameCountP2 << 1;
         const size_t mask = overflowBit - 1;
         int32_t newFront = (front & ~mask) | (flush & mask);
-        ssize_t filled = safe_sub_overflow(rear, newFront);
+        ssize_t filled = audio_utils::safe_sub_overflow(rear, newFront);
         if (filled >= (ssize_t)overflowBit) {
             // front and rear offsets span the overflow bit of the p2 mask
             // so rebasing newFront on the front offset is off by the overflow bit.
@@ -726,7 +770,7 @@ void ServerProxy::flushBufferIfNeeded()
             int32_t old = android_atomic_or(CBLK_FUTEX_WAKE, &cblk->mFutex);
             if (!(old & CBLK_FUTEX_WAKE)) {
                 (void) syscall(__NR_futex, &cblk->mFutex,
-                        mClientInServer ? FUTEX_WAKE_PRIVATE : FUTEX_WAKE, 1);
+                        mClientInServer ? FUTEX_WAKE_PRIVATE : FUTEX_WAKE, INT_MAX);
             }
         }
         mFlushed += (newFront - front) & mask;
@@ -744,7 +788,7 @@ int32_t AudioTrackServerProxy::getRear() const
         const size_t overflowBit = mFrameCountP2 << 1;
         const size_t mask = overflowBit - 1;
         int32_t newRear = (rear & ~mask) | (stop & mask);
-        ssize_t filled = safe_sub_overflow(newRear, front);
+        ssize_t filled = audio_utils::safe_sub_overflow(newRear, front);
         // overflowBit is unsigned, so cast to signed for comparison.
         if (filled >= (ssize_t)overflowBit) {
             // front and rear offsets span the overflow bit of the p2 mask
@@ -796,7 +840,7 @@ status_t ServerProxy::obtainBuffer(Buffer* buffer, bool ackFlush)
         front = android_atomic_acquire_load(&cblk->u.mStreaming.mFront);
         rear = cblk->u.mStreaming.mRear;
     }
-    ssize_t filled = safe_sub_overflow(rear, front);
+    ssize_t filled = audio_utils::safe_sub_overflow(rear, front);
     // pipe should not already be overfull
     if (!(0 <= filled && (size_t) filled <= mFrameCount)) {
         ALOGE("Shared memory control block is corrupt (filled=%zd, mFrameCount=%zu); shutting down",
@@ -896,7 +940,7 @@ void ServerProxy::releaseBuffer(Buffer* buffer)
         int32_t old = android_atomic_or(CBLK_FUTEX_WAKE, &cblk->mFutex);
         if (!(old & CBLK_FUTEX_WAKE)) {
             (void) syscall(__NR_futex, &cblk->mFutex,
-                    mClientInServer ? FUTEX_WAKE_PRIVATE : FUTEX_WAKE, 1);
+                    mClientInServer ? FUTEX_WAKE_PRIVATE : FUTEX_WAKE, INT_MAX);
         }
     }
 
@@ -917,13 +961,10 @@ size_t AudioTrackServerProxy::framesReady()
     }
     audio_track_cblk_t* cblk = mCblk;
 
-    int32_t flush = cblk->u.mStreaming.mFlush;
-    if (flush != mFlush) {
-        // FIXME should return an accurate value, but over-estimate is better than under-estimate
-        return mFrameCount;
-    }
+    flushBufferIfNeeded();
+
     const int32_t rear = getRear();
-    ssize_t filled = safe_sub_overflow(rear, cblk->u.mStreaming.mFront);
+    ssize_t filled = audio_utils::safe_sub_overflow(rear, cblk->u.mStreaming.mFront);
     // pipe should not already be overfull
     if (!(0 <= filled && (size_t) filled <= mFrameCount)) {
         ALOGE("Shared memory control block is corrupt (filled=%zd, mFrameCount=%zu); shutting down",
@@ -949,7 +990,7 @@ size_t AudioTrackServerProxy::framesReadySafe() const
         return mFrameCount;
     }
     const int32_t rear = getRear();
-    const ssize_t filled = safe_sub_overflow(rear, cblk->u.mStreaming.mFront);
+    const ssize_t filled = audio_utils::safe_sub_overflow(rear, cblk->u.mStreaming.mFront);
     if (!(0 <= filled && (size_t) filled <= mFrameCount)) {
         return 0; // error condition, silently return 0.
     }
@@ -1001,8 +1042,9 @@ AudioPlaybackRate AudioTrackServerProxy::getPlaybackRate()
 // ---------------------------------------------------------------------------
 
 StaticAudioTrackServerProxy::StaticAudioTrackServerProxy(audio_track_cblk_t* cblk, void *buffers,
-        size_t frameCount, size_t frameSize)
-    : AudioTrackServerProxy(cblk, buffers, frameCount, frameSize),
+        size_t frameCount, size_t frameSize, uint32_t sampleRate)
+    : AudioTrackServerProxy(cblk, buffers, frameCount, frameSize, false /*clientInServer*/,
+                            sampleRate),
       mObserver(&cblk->u.mStatic.mSingleStateQueue),
       mPosLoopMutator(&cblk->u.mStatic.mPosLoopQueue),
       mFramesReadySafe(frameCount), mFramesReady(frameCount),
@@ -1259,7 +1301,7 @@ size_t AudioRecordServerProxy::framesReadySafe() const
     }
     const int32_t front = android_atomic_acquire_load(&mCblk->u.mStreaming.mFront);
     const int32_t rear = mCblk->u.mStreaming.mRear;
-    const ssize_t filled = safe_sub_overflow(rear, front);
+    const ssize_t filled = audio_utils::safe_sub_overflow(rear, front);
     if (!(0 <= filled && (size_t) filled <= mFrameCount)) {
         return 0; // error condition, silently return 0.
     }

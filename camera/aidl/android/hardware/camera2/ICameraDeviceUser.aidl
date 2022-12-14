@@ -17,6 +17,8 @@
 package android.hardware.camera2;
 
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.ICameraDeviceCallbacks;
+import android.hardware.camera2.ICameraOfflineSession;
 import android.hardware.camera2.impl.CameraMetadataNative;
 import android.hardware.camera2.params.OutputConfiguration;
 import android.hardware.camera2.params.SessionConfiguration;
@@ -81,8 +83,11 @@ interface ICameraDeviceUser
      * @param operatingMode The kind of session to create; either NORMAL_MODE or
      *     CONSTRAINED_HIGH_SPEED_MODE. Must be a non-negative value.
      * @param sessionParams Session wide camera parameters
+     * @param startTimeMs The timestamp of session creation start, measured by
+     *                    SystemClock.uptimeMillis.
+     * @return a list of stream ids that can be used in offline mode via "switchToOffline"
      */
-    void endConfigure(int operatingMode, in CameraMetadataNative sessionParams);
+    int[] endConfigure(int operatingMode, in CameraMetadataNative sessionParams, long startTimeMs);
 
     /**
       * Check whether a particular session configuration has camera device
@@ -114,10 +119,11 @@ interface ICameraDeviceUser
      * @param width Width of the input buffers
      * @param height Height of the input buffers
      * @param format Format of the input buffers. One of HAL_PIXEL_FORMAT_*.
+     * @param isMultiResolution Whether the input stream supports variable resolution image.
      *
      * @return new stream ID
      */
-    int createInputStream(int width, int height, int format);
+    int createInputStream(int width, int height, int format, boolean isMultiResolution);
 
     /**
      * Get the surface of the input stream.
@@ -155,4 +161,37 @@ interface ICameraDeviceUser
     void updateOutputConfiguration(int streamId, in OutputConfiguration outputConfiguration);
 
     void finalizeOutputConfigurations(int streamId, in OutputConfiguration outputConfiguration);
+
+
+    // Keep in sync with public API in
+    // frameworks/base/core/java/android/hardware/camera2/CameraDevice.java
+    const int AUDIO_RESTRICTION_NONE = 0;
+    const int AUDIO_RESTRICTION_VIBRATION = 1;
+    const int AUDIO_RESTRICTION_VIBRATION_SOUND = 3;
+
+    /**
+      * Set audio restriction mode for this camera device.
+      *
+      * @param mode the audio restriction mode ID as above
+      *
+      */
+    void setCameraAudioRestriction(int mode);
+
+    /**
+      * Get global audio restriction mode for all camera clients.
+      *
+      * @return the currently applied system-wide audio restriction mode
+      */
+    int getGlobalAudioRestriction();
+
+    /**
+     * Offline processing main entry point
+     *
+     * @param callbacks Object that will receive callbacks from offline session
+     * @param offlineOutputIds The ID of streams that needs to be preserved in offline session
+     *
+     * @return Offline session object.
+     */
+    ICameraOfflineSession switchToOffline(in ICameraDeviceCallbacks callbacks,
+            in int[] offlineOutputIds);
 }

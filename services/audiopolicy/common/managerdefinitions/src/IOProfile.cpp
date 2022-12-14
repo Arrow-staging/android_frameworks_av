@@ -17,10 +17,9 @@
 #define LOG_TAG "APM::IOProfile"
 //#define LOG_NDEBUG 0
 
-#include <system/audio-base.h>
+#include <system/audio.h>
 #include "IOProfile.h"
 #include "HwModule.h"
-#include "AudioGain.h"
 #include "TypeConverter.h"
 
 namespace android {
@@ -79,7 +78,10 @@ bool IOProfile::isCompatibleProfile(const DeviceVector &devices,
         }
     }
 
-    if (isPlaybackThread && (getFlags() & flags) != flags) {
+    const uint32_t mustMatchOutputFlags =
+            AUDIO_OUTPUT_FLAG_DIRECT|AUDIO_OUTPUT_FLAG_HW_AV_SYNC|AUDIO_OUTPUT_FLAG_MMAP_NOIRQ;
+    if (isPlaybackThread && (((getFlags() ^ flags) & mustMatchOutputFlags)
+                    || (getFlags() & flags) != flags)) {
         return false;
     }
     // The only input flag that is allowed to be different is the fast flag.
@@ -103,26 +105,41 @@ bool IOProfile::isCompatibleProfile(const DeviceVector &devices,
     return true;
 }
 
-void IOProfile::dump(String8 *dst) const
-{
-    AudioPort::dump(dst, 4);
+bool IOProfile::containsSingleDeviceSupportingEncodedFormats(
+        const sp<DeviceDescriptor>& device) const {
+    if (device == nullptr) {
+        return false;
+    }
+    DeviceVector deviceList = mSupportedDevices.getDevicesFromType(device->type());
+    return std::count_if(deviceList.begin(), deviceList.end(),
+            [&device](sp<DeviceDescriptor> deviceDesc) {
+                return device == deviceDesc && deviceDesc->hasCurrentEncodedFormat(); }) == 1;
+}
 
-    dst->appendFormat("    - flags: 0x%04x", getFlags());
-    std::string flagsLiteral;
-    if (getRole() == AUDIO_PORT_ROLE_SINK) {
-        InputFlagConverter::maskToString(getFlags(), flagsLiteral);
-    } else if (getRole() == AUDIO_PORT_ROLE_SOURCE) {
-        OutputFlagConverter::maskToString(getFlags(), flagsLiteral);
-    }
+void IOProfile::dump(String8 *dst, int spaces) const
+{
+    String8 extraInfo;
+    extraInfo.appendFormat("0x%04x", getFlags());
+    std::string flagsLiteral =
+            getRole() == AUDIO_PORT_ROLE_SINK ?
+            toString(static_cast<audio_input_flags_t>(getFlags())) :
+            getRole() == AUDIO_PORT_ROLE_SOURCE ?
+            toString(static_cast<audio_output_flags_t>(getFlags())) : "";
     if (!flagsLiteral.empty()) {
-        dst->appendFormat(" (%s)", flagsLiteral.c_str());
+        extraInfo.appendFormat(" (%s)", flagsLiteral.c_str());
     }
-    dst->append("\n");
-    mSupportedDevices.dump(dst, String8("Supported"), 4, false);
-    dst->appendFormat("\n    - maxOpenCount: %u - curOpenCount: %u\n",
-             maxOpenCount, curOpenCount);
-    dst->appendFormat("    - maxActiveCount: %u - curActiveCount: %u\n",
-             maxActiveCount, curActiveCount);
+
+    std::string portStr;
+    AudioPort::dump(&portStr, spaces, extraInfo.c_str());
+    dst->append(portStr.c_str());
+
+    mSupportedDevices.dump(dst, String8("- Supported"), spaces - 2, false);
+    dst->appendFormat("%*s- maxOpenCount: %u; curOpenCount: %u\n",
+            spaces - 2, "", maxOpenCount, curOpenCount);
+    dst->appendFormat("%*s- maxActiveCount: %u; curActiveCount: %u\n",
+            spaces - 2, "", maxActiveCount, curActiveCount);
+    dst->appendFormat("%*s- recommendedMuteDurationMs: %u ms\n",
+            spaces - 2, "", recommendedMuteDurationMs);
 }
 
 void IOProfile::log()

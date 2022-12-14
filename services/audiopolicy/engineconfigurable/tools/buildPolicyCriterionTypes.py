@@ -1,4 +1,4 @@
-#!/usr/bin/python
+#!/usr/bin/python3
 
 #
 # Copyright 2018, The Android Open Source Project
@@ -19,10 +19,8 @@
 import argparse
 import re
 import sys
-import tempfile
 import os
 import logging
-import subprocess
 import xml.etree.ElementTree as ET
 import xml.etree.ElementInclude as EI
 import xml.dom.minidom as MINIDOM
@@ -49,36 +47,46 @@ from collections import OrderedDict
 
 def parseArgs():
     argparser = argparse.ArgumentParser(description="Parameter-Framework XML \
-        audio criterion type file generator.\n\
-        Exit with the number of (recoverable or not) error that occured.")
+                                        audio criterion type file generator.\n\
+                                        Exit with the number of (recoverable or not) \
+                                        error that occured.")
     argparser.add_argument('--androidaudiobaseheader',
-            help="Android Audio Base C header file, Mandatory.",
-            metavar="ANDROID_AUDIO_BASE_HEADER",
-            type=argparse.FileType('r'),
-            required=True)
+                           help="Android Audio Base C header file, Mandatory.",
+                           metavar="ANDROID_AUDIO_BASE_HEADER",
+                           type=argparse.FileType('r'),
+                           required=True)
+    argparser.add_argument('--androidaudiocommonbaseheader',
+                           help="Android Audio CommonBase C header file, Mandatory.",
+                           metavar="ANDROID_AUDIO_COMMON_BASE_HEADER",
+                           type=argparse.FileType('r'),
+                           required=True)
     argparser.add_argument('--audiopolicyconfigurationfile',
-            help="Android Audio Policy Configuration file, Mandatory.",
-            metavar="(AUDIO_POLICY_CONFIGURATION_FILE)",
-            type=argparse.FileType('r'),
-            required=True)
+                           help="Android Audio Policy Configuration file, Mandatory.",
+                           metavar="(AUDIO_POLICY_CONFIGURATION_FILE)",
+                           type=argparse.FileType('r'),
+                           required=True)
     argparser.add_argument('--criteriontypes',
-            help="Criterion types XML base file, in \
-            '<criterion_types> \
-                <criterion_type name="" type=<inclusive|exclusive> values=<value1,value2,...>/>' \
-        format. Mandatory.",
-            metavar="CRITERION_TYPE_FILE",
-            type=argparse.FileType('r'),
-            required=True)
+                           help="Criterion types XML base file, in \
+                           '<criterion_types> \
+                               <criterion_type name="" type=<inclusive|exclusive> \
+                               values=<value1,value2,...>/>' \
+                           format. Mandatory.",
+                           metavar="CRITERION_TYPE_FILE",
+                           type=argparse.FileType('r'),
+                           required=True)
     argparser.add_argument('--outputfile',
-            help="Criterion types outputfile file. Mandatory.",
-            metavar="CRITERION_TYPE_OUTPUT_FILE",
-            type=argparse.FileType('w'),
-            required=True)
+                           help="Criterion types outputfile file. Mandatory.",
+                           metavar="CRITERION_TYPE_OUTPUT_FILE",
+                           type=argparse.FileType('w'),
+                           required=True)
     argparser.add_argument('--verbose',
-            action='store_true')
+                           action='store_true')
 
     return argparser.parse_args()
 
+
+output_devices_type_value = {}
+input_devices_type_value = {}
 
 def generateXmlCriterionTypesFile(criterionTypes, addressCriteria, criterionTypesFile, outputFile):
 
@@ -97,12 +105,25 @@ def generateXmlCriterionTypesFile(criterionTypes, addressCriteria, criterionType
                     value_node.set('numerical', str(value))
                     value_node.set('literal', key)
 
+                    if criterion_type.get('name') == "OutputDevicesMaskType":
+                        value_node.set('android_type', output_devices_type_value[key])
+                    if criterion_type.get('name') == "InputDevicesMaskType":
+                        value_node.set('android_type', input_devices_type_value[key])
+
     if addressCriteria:
         for criterion_name, values_list in addressCriteria.items():
             for criterion_type in criterion_types_root.findall('criterion_type'):
                 if criterion_type.get('name') == criterion_name:
-                    values_node = ET.SubElement(criterion_type, "values")
                     index = 0
+                    existing_values_node = criterion_type.find("values")
+                    if existing_values_node is not None:
+                        for existing_value in existing_values_node.findall('value'):
+                            if existing_value.get('numerical') == str(1 << index):
+                                index += 1
+                        values_node = existing_values_node
+                    else:
+                        values_node = ET.SubElement(criterion_type, "values")
+
                     for value in values_list:
                         value_node = ET.SubElement(values_node, "value", literal=value)
                         value_node.set('numerical', str(1 << index))
@@ -112,7 +133,7 @@ def generateXmlCriterionTypesFile(criterionTypes, addressCriteria, criterionType
     reparsed = MINIDOM.parseString(xmlstr)
     prettyXmlStr = reparsed.toprettyxml(newl='\r\n')
     prettyXmlStr = os.linesep.join([s for s in prettyXmlStr.splitlines() if s.strip()])
-    outputFile.write(prettyXmlStr.encode('utf-8'))
+    outputFile.write(prettyXmlStr)
 
 def capitalizeLine(line):
     return ' '.join((w.capitalize() for w in line.split(' ')))
@@ -129,30 +150,30 @@ def parseAndroidAudioPolicyConfigurationFile(audiopolicyconfigurationfile):
     #
     address_criteria_mapping_table = {
         'sink' : "OutputDevicesAddressesType",
-        'source' : "InputDevicesAddressesType" }
+        'source' : "InputDevicesAddressesType"}
 
     address_criteria = {
         'OutputDevicesAddressesType' : [],
-        'InputDevicesAddressesType' : [] }
+        'InputDevicesAddressesType' : []}
 
-    oldWorkingDir = os.getcwd()
-    print "Current working directory %s" % oldWorkingDir
+    old_working_dir = os.getcwd()
+    print("Current working directory %s" % old_working_dir)
 
-    newDir = os.path.join(oldWorkingDir , audiopolicyconfigurationfile.name)
+    new_dir = os.path.join(old_working_dir, audiopolicyconfigurationfile.name)
 
     policy_in_tree = ET.parse(audiopolicyconfigurationfile)
-    os.chdir(os.path.dirname(os.path.normpath(newDir)))
+    os.chdir(os.path.dirname(os.path.normpath(new_dir)))
 
-    print "new working directory %s" % os.getcwd()
+    print("new working directory %s" % os.getcwd())
 
     policy_root = policy_in_tree.getroot()
     EI.include(policy_root)
 
-    os.chdir(oldWorkingDir)
+    os.chdir(old_working_dir)
 
     for device in policy_root.iter('devicePort'):
         for key in address_criteria_mapping_table.keys():
-            if device.get('role') == key and device.get('address') :
+            if device.get('role') == key and device.get('address'):
                 logging.info("{}: <{}>".format(key, device.get('address')))
                 address_criteria[address_criteria_mapping_table[key]].append(device.get('address'))
 
@@ -168,29 +189,32 @@ def parseAndroidAudioPolicyConfigurationFile(audiopolicyconfigurationfile):
 #   -Output devices type
 #   -Input devices type
 #
-def parseAndroidAudioFile(androidaudiobaseheaderFile):
+def parseAndroidAudioFile(androidaudiobaseheaderFile, androidaudiocommonbaseheaderFile):
     #
     # Adaptation table between Android Enumeration prefix and Audio PFW Criterion type names
     #
     criterion_mapping_table = {
-        'AUDIO_MODE' : "AndroidModeType",
+        'HAL_AUDIO_MODE' : "AndroidModeType",
         'AUDIO_DEVICE_OUT' : "OutputDevicesMaskType",
         'AUDIO_DEVICE_IN' : "InputDevicesMaskType"}
 
     all_criteria = {
         'AndroidModeType' : {},
         'OutputDevicesMaskType' : {},
-        'InputDevicesMaskType' : {} }
+        'InputDevicesMaskType' : {}}
 
     #
     # _CNT, _MAX, _ALL and _NONE are prohibited values as ther are just helpers for enum users.
     #
-    ignored_values = [ 'CNT', 'MAX', 'ALL', 'NONE' ]
+    ignored_values = ['CNT', 'MAX', 'ALL', 'NONE']
+
+    multi_bit_outputdevice_shift = 32
+    multi_bit_inputdevice_shift = 32
 
     criteria_pattern = re.compile(
-        r"\s*(?P<type>(?:"+'|'.join(criterion_mapping_table.keys()) + "))\_" \
-        r"(?P<literal>(?!" + '|'.join(ignored_values) + ")\w*)\s*=\s*" \
-        r"(?P<values>(?:0[xX])?[0-9a-fA-F]+)")
+        r"\s*V\((?P<type>(?:"+'|'.join(criterion_mapping_table.keys()) + "))_" \
+        r"(?P<literal>(?!" + '|'.join(ignored_values) + ")\w*)\s*,\s*" \
+        r"(?:AUDIO_DEVICE_BIT_IN \| )?(?P<values>(?:0[xX])?[0-9a-fA-F]+|[0-9]+)")
 
     logging.info("Checking Android Header file {}".format(androidaudiobaseheaderFile))
 
@@ -201,27 +225,124 @@ def parseAndroidAudioFile(androidaudiobaseheaderFile):
                 androidaudiobaseheaderFile.name, line_number, line))
 
             criterion_name = criterion_mapping_table[match.groupdict()['type']]
-            literal = ''.join((w.capitalize() for w in match.groupdict()['literal'].split('_')))
-            numerical_value = match.groupdict()['values']
+            criterion_literal = \
+                ''.join((w.capitalize() for w in match.groupdict()['literal'].split('_')))
+            criterion_numerical_value = match.groupdict()['values']
 
-            # for AUDIO_DEVICE_IN: need to remove sign bit
+            # for AUDIO_DEVICE_IN: rename default to stub
             if criterion_name == "InputDevicesMaskType":
-                numerical_value = str(int(numerical_value, 0) & ~2147483648)
+                if criterion_literal == "Default":
+                    criterion_numerical_value = str(int("0x40000000", 0))
+                    input_devices_type_value[criterion_literal] = "0xC0000000"
+                else:
+                    try:
+                        string_int = int(criterion_numerical_value, 0)
+                        # Append AUDIO_DEVICE_IN for android type tag
+                        input_devices_type_value[criterion_literal] = hex(string_int | 2147483648)
+
+                        num_bits = bin(string_int).count("1")
+                        if num_bits > 1:
+                            logging.info("The value {}:{} is for criterion {} binary rep {} has {} bits sets"
+                                .format(criterion_numerical_value, criterion_literal, criterion_name, bin(string_int), num_bits))
+                            string_int = 2**multi_bit_inputdevice_shift
+                            logging.info("new val assigned is {} {}" .format(string_int, bin(string_int)))
+                            multi_bit_inputdevice_shift += 1
+                            criterion_numerical_value = str(string_int)
+
+                    except ValueError:
+                        # Handle the exception
+                        logging.info("value {}:{} for criterion {} is not a number, ignoring"
+                            .format(criterion_numerical_value, criterion_literal, criterion_name))
+                        continue
+
+            if criterion_name == "OutputDevicesMaskType":
+                if criterion_literal == "Default":
+                    criterion_numerical_value = str(int("0x40000000", 0))
+                    output_devices_type_value[criterion_literal] = "0x40000000"
+                else:
+                    try:
+                        string_int = int(criterion_numerical_value, 0)
+                        output_devices_type_value[criterion_literal] = criterion_numerical_value
+
+                        num_bits = bin(string_int).count("1")
+                        if num_bits > 1:
+                            logging.info("The value {}:{} is for criterion {} binary rep {} has {} bits sets"
+                                .format(criterion_numerical_value, criterion_literal, criterion_name, bin(string_int), num_bits))
+                            string_int = 2**multi_bit_outputdevice_shift
+                            logging.info("new val assigned is {} {}" .format(string_int, bin(string_int)))
+                            multi_bit_outputdevice_shift += 1
+                            criterion_numerical_value = str(string_int)
+
+                    except ValueError:
+                        # Handle the exception
+                        logging.info("The value {}:{} is for criterion {} is not a number, ignoring"
+                            .format(criterion_numerical_value, criterion_literal, criterion_name))
+                        continue
+
+            try:
+                string_int = int(criterion_numerical_value, 0)
+
+            except ValueError:
+                # Handle the exception
+                logging.info("The value {}:{} is for criterion {} is not a number, ignoring"
+                    .format(criterion_numerical_value, criterion_literal, criterion_name))
+                continue
 
             # Remove duplicated numerical values
-            if int(numerical_value, 0) in all_criteria[criterion_name].values():
+            if int(criterion_numerical_value, 0) in all_criteria[criterion_name].values():
                 logging.info("criterion {} duplicated values:".format(criterion_name))
-                logging.info("{}:{}".format(numerical_value, literal))
+                logging.info("{}:{}".format(criterion_numerical_value, criterion_literal))
                 logging.info("KEEPING LATEST")
-                for key in all_criteria[criterion_name].keys():
-                    if all_criteria[criterion_name][key] == int(numerical_value, 0):
+                for key in list(all_criteria[criterion_name]):
+                    if all_criteria[criterion_name][key] == int(criterion_numerical_value, 0):
                         del all_criteria[criterion_name][key]
 
-            all_criteria[criterion_name][literal] = int(numerical_value, 0)
+            all_criteria[criterion_name][criterion_literal] = int(criterion_numerical_value, 0)
 
             logging.debug("type:{},".format(criterion_name))
-            logging.debug("iteral:{},".format(literal))
-            logging.debug("values:{}.".format(numerical_value))
+            logging.debug("iteral:{},".format(criterion_literal))
+            logging.debug("values:{}.".format(criterion_numerical_value))
+
+    logging.info("Checking Android Common Header file {}".format(androidaudiocommonbaseheaderFile))
+
+    criteria_pattern = re.compile(
+        r"\s*(?P<type>(?:"+'|'.join(criterion_mapping_table.keys()) + "))_" \
+        r"(?P<literal>(?!" + '|'.join(ignored_values) + ")\w*)\s*=\s*" \
+        r"(?:AUDIO_DEVICE_BIT_IN \| )?(?P<values>(?:0[xX])?[0-9a-fA-F]+|[0-9]+)")
+
+    for line_number, line in enumerate(androidaudiocommonbaseheaderFile):
+        match = criteria_pattern.match(line)
+        if match:
+            logging.debug("The following line is VALID: {}:{}\n{}".format(
+                androidaudiocommonbaseheaderFile.name, line_number, line))
+
+            criterion_name = criterion_mapping_table[match.groupdict()['type']]
+            criterion_literal = \
+                ''.join((w.capitalize() for w in match.groupdict()['literal'].split('_')))
+            criterion_numerical_value = match.groupdict()['values']
+
+            try:
+                string_int = int(criterion_numerical_value, 0)
+            except ValueError:
+                # Handle the exception
+                logging.info("The value {}:{} is for criterion {} is not a number, ignoring"
+                    .format(criterion_numerical_value, criterion_literal, criterion_name))
+                continue
+
+            # Remove duplicated numerical values
+            if int(criterion_numerical_value, 0) in all_criteria[criterion_name].values():
+                logging.info("criterion {} duplicated values:".format(criterion_name))
+                logging.info("{}:{}".format(criterion_numerical_value, criterion_literal))
+                logging.info("KEEPING LATEST")
+                for key in list(all_criteria[criterion_name]):
+                    if all_criteria[criterion_name][key] == int(criterion_numerical_value, 0):
+                        del all_criteria[criterion_name][key]
+
+            all_criteria[criterion_name][criterion_literal] = int(criterion_numerical_value, 0)
+
+            logging.debug("type:{},".format(criterion_name))
+            logging.debug("iteral:{},".format(criterion_literal))
+            logging.debug("values:{}.".format(criterion_numerical_value))
 
     return all_criteria
 
@@ -230,7 +351,8 @@ def main():
     logging.root.setLevel(logging.INFO)
     args = parseArgs()
 
-    all_criteria = parseAndroidAudioFile(args.androidaudiobaseheader)
+    all_criteria = parseAndroidAudioFile(args.androidaudiobaseheader,
+                                         args.androidaudiocommonbaseheader)
 
     address_criteria = parseAndroidAudioPolicyConfigurationFile(args.audiopolicyconfigurationfile)
 
@@ -240,4 +362,4 @@ def main():
 
 # If this file is directly executed
 if __name__ == "__main__":
-    exit(main())
+    sys.exit(main())

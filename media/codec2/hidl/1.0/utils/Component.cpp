@@ -22,7 +22,10 @@
 #include <codec2/hidl/1.0/ComponentStore.h>
 #include <codec2/hidl/1.0/InputBufferManager.h>
 
-#include <android/hardware/media/c2/1.0/IInputSink.h>
+#ifndef __ANDROID_APEX__
+#include <FilterWrapper.h>
+#endif
+
 #include <hidl/HidlBinderSupport.h>
 #include <utils/Timers.h>
 
@@ -108,19 +111,22 @@ struct Component::Listener : public C2Component::Listener {
             WorkBundle workBundle;
 
             sp<Component> strongComponent = mComponent.promote();
+            beginTransferBufferQueueBlocks(c2workItems, true);
             if (!objcpy(&workBundle, c2workItems, strongComponent ?
                     &strongComponent->mBufferPoolSender : nullptr)) {
                 LOG(ERROR) << "Component::Listener::onWorkDone_nb -- "
                            << "received corrupted work items.";
+                endTransferBufferQueueBlocks(c2workItems, false, true);
                 return;
             }
             Return<void> transStatus = listener->onWorkDone(workBundle);
             if (!transStatus.isOk()) {
                 LOG(ERROR) << "Component::Listener::onWorkDone_nb -- "
                            << "transaction failed.";
+                endTransferBufferQueueBlocks(c2workItems, false, true);
                 return;
             }
-            yieldBufferQueueBlocks(c2workItems, true);
+            endTransferBufferQueueBlocks(c2workItems, true, true);
         }
     }
 
@@ -202,7 +208,8 @@ Component::Component(
         const sp<::android::hardware::media::bufferpool::V2_0::
         IClientManager>& clientPoolManager)
       : mComponent{component},
-        mInterface{new ComponentInterface(component->intf(), store.get())},
+        mInterface{new ComponentInterface(component->intf(),
+                                          store->getParameterCache())},
         mListener{listener},
         mStore{store},
         mBufferPoolSender{clientPoolManager} {
@@ -255,13 +262,14 @@ Return<void> Component::flush(flush_cb _hidl_cb) {
 
     WorkBundle flushedWorkBundle;
     Status res = static_cast<Status>(c2res);
+    beginTransferBufferQueueBlocks(c2flushedWorks, true);
     if (c2res == C2_OK) {
         if (!objcpy(&flushedWorkBundle, c2flushedWorks, &mBufferPoolSender)) {
             res = Status::CORRUPTED;
         }
     }
     _hidl_cb(res, flushedWorkBundle);
-    yieldBufferQueueBlocks(c2flushedWorks, true);
+    endTransferBufferQueueBlocks(c2flushedWorks, true, true);
     return Void();
 }
 
@@ -273,7 +281,7 @@ Return<Status> Component::drain(bool withEos) {
 
 Return<Status> Component::setOutputSurface(
         uint64_t blockPoolId,
-        const sp<HGraphicBufferProducer>& surface) {
+        const sp<HGraphicBufferProducer2>& surface) {
     std::shared_ptr<C2BlockPool> pool;
     GetCodec2BlockPool(blockPoolId, mComponent, &pool);
     if (pool && pool->getAllocatorId() == C2PlatformAllocatorStore::BUFFERQUEUE) {
@@ -298,19 +306,12 @@ Return<Status> Component::setOutputSurface(
 Return<void> Component::connectToInputSurface(
         const sp<IInputSurface>& inputSurface,
         connectToInputSurface_cb _hidl_cb) {
-    sp<Sink> sink;
-    {
-        std::lock_guard<std::mutex> lock(mSinkMutex);
-        if (!mSink) {
-            mSink = new Sink(shared_from_this());
-        }
-        sink = mSink;
-    }
     Status status;
     sp<IInputSurfaceConnection> connection;
-    auto transStatus = inputSurface->connect(sink,
-            [&status, &connection](Status s,
-                                   const sp<IInputSurfaceConnection>& c) {
+    auto transStatus = inputSurface->connect(
+            asInputSink(),
+            [&status, &connection](
+                    Status s, const sp<IInputSurfaceConnection>& c) {
                 status = s;
                 connection = c;
             }
@@ -320,7 +321,7 @@ Return<void> Component::connectToInputSurface(
 }
 
 Return<void> Component::connectToOmxInputSurface(
-        const sp<HGraphicBufferProducer>& producer,
+        const sp<HGraphicBufferProducer1>& producer,
         const sp<::android::hardware::media::omx::V1_0::
         IGraphicBufferSource>& source,
         connectToOmxInputSurface_cb _hidl_cb) {
@@ -393,10 +394,17 @@ Return<void> Component::createBlockPool(
         uint32_t allocatorId,
         createBlockPool_cb _hidl_cb) {
     std::shared_ptr<C2BlockPool> blockPool;
+#ifdef __ANDROID_APEX__
     c2_status_t status = CreateCodec2BlockPool(
             static_cast<C2PlatformAllocatorStore::id_t>(allocatorId),
             mComponent,
             &blockPool);
+#else
+    c2_status_t status = ComponentStore::GetFilterWrapper()->createBlockPool(
+            static_cast<C2PlatformAllocatorStore::id_t>(allocatorId),
+            mComponent,
+            &blockPool);
+#endif
     if (status != C2_OK) {
         blockPool = nullptr;
     }
@@ -454,6 +462,14 @@ Return<sp<IComponentInterface>> Component::getInterface() {
     return sp<IComponentInterface>(mInterface);
 }
 
+Return<sp<IInputSink>> Component::asInputSink() {
+    std::lock_guard<std::mutex> lock(mSinkMutex);
+    if (!mSink) {
+        mSink = new Sink(shared_from_this());
+    }
+    return {mSink};
+}
+
 std::shared_ptr<C2Component> Component::findLocalComponent(
         const sp<IInputSink>& sink) {
     return Component::Sink::findLocalComponent(sink);
@@ -465,6 +481,37 @@ void Component::initListener(const sp<Component>& self) {
     c2_status_t res = mComponent->setListener_vb(c2listener, C2_DONT_BLOCK);
     if (res != C2_OK) {
         mInit = res;
+    }
+
+    struct ListenerDeathRecipient : public HwDeathRecipient {
+        ListenerDeathRecipient(const wp<Component>& comp)
+            : mComponent{comp} {
+        }
+
+        virtual void serviceDied(
+                uint64_t /* cookie */,
+                const wp<::android::hidl::base::V1_0::IBase>& /* who */
+                ) override {
+            auto strongComponent = mComponent.promote();
+            if (strongComponent) {
+                LOG(INFO) << "Client died ! release the component !!";
+                strongComponent->release();
+            } else {
+                LOG(ERROR) << "Client died ! no component to release !!";
+            }
+        }
+
+        wp<Component> mComponent;
+    };
+
+    mDeathRecipient = new ListenerDeathRecipient(self);
+    Return<bool> transStatus = mListener->linkToDeath(
+            mDeathRecipient, 0);
+    if (!transStatus.isOk()) {
+        LOG(ERROR) << "Listener linkToDeath() transaction failed.";
+    }
+    if (!static_cast<bool>(transStatus)) {
+        LOG(DEBUG) << "Listener linkToDeath() call failed.";
     }
 }
 

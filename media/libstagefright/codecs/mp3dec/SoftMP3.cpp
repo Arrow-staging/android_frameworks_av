@@ -23,7 +23,7 @@
 #include <media/stagefright/foundation/ADebug.h>
 #include <media/stagefright/MediaDefs.h>
 
-#include "include/pvmp3decoder_api.h"
+#include <pvmp3decoder_api.h>
 
 namespace android {
 
@@ -307,6 +307,20 @@ void SoftMP3::onQueueFilled(OMX_U32 /* portIndex */) {
 
             if (inHeader->nFlags & OMX_BUFFERFLAG_EOS) {
                 mSawInputEos = true;
+                if (mIsFirst && !inHeader->nFilledLen) {
+                     ALOGV("empty first EOS");
+                     outHeader->nFilledLen = 0;
+                     outHeader->nTimeStamp = inHeader->nTimeStamp;
+                     outHeader->nFlags = OMX_BUFFERFLAG_EOS;
+                     mSignalledOutputEos = true;
+                     outInfo->mOwnedByUs = false;
+                     outQueue.erase(outQueue.begin());
+                     notifyFillBufferDone(outHeader);
+                     inInfo->mOwnedByUs = false;
+                     inQueue.erase(inQueue.begin());
+                     notifyEmptyBufferDone(inHeader);
+                     return;
+                }
             }
 
             mConfig->pInputBuffer =
@@ -484,6 +498,7 @@ void SoftMP3::onReset() {
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 android::SoftOMXComponent *createSoftOMXComponent(
         const char *name, const OMX_CALLBACKTYPE *callbacks,
         OMX_PTR appData, OMX_COMPONENTTYPE **component) {

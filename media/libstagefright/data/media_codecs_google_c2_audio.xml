@@ -67,7 +67,7 @@
         <MediaCodec name="c2.android.raw.decoder" type="audio/raw">
             <Alias name="OMX.google.raw.decoder" />
             <Limit name="channel-count" max="8" />
-            <Limit name="sample-rate" ranges="8000-96000" />
+            <Limit name="sample-rate" ranges="8000-192000" />
             <Limit name="bitrate" range="1-10000000" />
         </MediaCodec>
         <MediaCodec name="c2.android.flac.decoder" type="audio/flac">
@@ -112,7 +112,7 @@
             <Limit name="sample-rate" ranges="8000,12000,16000,24000,48000" />
             <Limit name="bitrate" range="500-512000" />
             <Limit name="complexity" range="0-10"  default="5" />
-            <Feature name="bitrate-modes" value="CQ" />
+            <Feature name="bitrate-modes" value="CBR" />
         </MediaCodec>
     </Encoders>
 </Included>

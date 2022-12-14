@@ -17,24 +17,25 @@
 #ifndef ANDROID_HARDWARE_EFFECTS_FACTORY_HAL_HIDL_H
 #define ANDROID_HARDWARE_EFFECTS_FACTORY_HAL_HIDL_H
 
+#include <memory>
+
 #include PATH(android/hardware/audio/effect/FILE_VERSION/IEffectsFactory.h)
-#include PATH(android/hardware/audio/effect/FILE_VERSION/types.h)
 #include <media/audiohal/EffectsFactoryHalInterface.h>
 
-#include "ConversionHelperHidl.h"
+#include "EffectConversionHelperHidl.h"
 
 namespace android {
 namespace effect {
-namespace CPP_VERSION {
 
 using ::android::hardware::hidl_vec;
-using ::android::CPP_VERSION::ConversionHelperHidl;
 using namespace ::android::hardware::audio::effect::CPP_VERSION;
 
-class EffectsFactoryHalHidl : public EffectsFactoryHalInterface, public ConversionHelperHidl
+class EffectDescriptorCache;
+
+class EffectsFactoryHalHidl : public EffectsFactoryHalInterface, public EffectConversionHelperHidl
 {
   public:
-    EffectsFactoryHalHidl();
+    EffectsFactoryHalHidl(sp<IEffectsFactory> effectsFactory);
 
     // Returns the number of different effects in all loaded libraries.
     virtual status_t queryNumberEffects(uint32_t *pNumEffects);
@@ -46,14 +47,19 @@ class EffectsFactoryHalHidl : public EffectsFactoryHalInterface, public Conversi
     virtual status_t getDescriptor(const effect_uuid_t *pEffectUuid,
             effect_descriptor_t *pDescriptor);
 
+    virtual status_t getDescriptors(const effect_uuid_t *pEffectType,
+                                    std::vector<effect_descriptor_t> *descriptors);
+
     // Creates an effect engine of the specified type.
     // To release the effect engine, it is necessary to release references
     // to the returned effect object.
     virtual status_t createEffect(const effect_uuid_t *pEffectUuid,
-            int32_t sessionId, int32_t ioId,
+            int32_t sessionId, int32_t ioId, int32_t deviceId,
             sp<EffectHalInterface> *effect);
 
     virtual status_t dumpEffects(int fd);
+
+    virtual float getHalVersion() { return MAJOR_VERSION + (float)MINOR_VERSION / 10; }
 
     status_t allocateBuffer(size_t size, sp<EffectBufferHalInterface>* buffer) override;
     status_t mirrorBuffer(void* external, size_t size,
@@ -61,16 +67,9 @@ class EffectsFactoryHalHidl : public EffectsFactoryHalInterface, public Conversi
 
   private:
     sp<IEffectsFactory> mEffectsFactory;
-    hidl_vec<EffectDescriptor> mLastDescriptors;
-
-    status_t queryAllDescriptors();
+    std::unique_ptr<EffectDescriptorCache> mCache;
 };
 
-sp<EffectsFactoryHalInterface> createEffectsFactoryHal() {
-    return new EffectsFactoryHalHidl();
-}
-
-} // namespace CPP_VERSION
 } // namespace effect
 } // namespace android
 

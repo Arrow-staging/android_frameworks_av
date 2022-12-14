@@ -21,26 +21,30 @@
 #include <utils/SortedVector.h>
 #include <utils/KeyedVector.h>
 #include "AudioIODescriptorInterface.h"
-#include "AudioPort.h"
 #include "ClientDescriptor.h"
 #include "DeviceDescriptor.h"
 #include "EffectDescriptor.h"
 #include "IOProfile.h"
+#include "PolicyAudioPort.h"
 
 namespace android {
 
-class AudioMix;
+class AudioPolicyMix;
 class AudioPolicyClientInterface;
 
 // descriptor for audio inputs. Used to maintain current configuration of each opened audio input
 // and keep track of the usage of this input.
-class AudioInputDescriptor: public AudioPortConfig, public AudioIODescriptorInterface
-    , public ClientMapHandler<RecordClientDescriptor>
+class AudioInputDescriptor: public AudioPortConfig,
+        public PolicyAudioPortConfig,
+        public AudioIODescriptorInterface,
+        public ClientMapHandler<RecordClientDescriptor>
 {
 public:
-    explicit AudioInputDescriptor(const sp<IOProfile>& profile,
-                                  AudioPolicyClientInterface *clientInterface);
-    audio_port_handle_t getId() const;
+    AudioInputDescriptor(const sp<IOProfile>& profile,
+                         AudioPolicyClientInterface *clientInterface);
+
+    virtual ~AudioInputDescriptor() = default;
+
     audio_module_handle_t getModuleHandle() const;
 
     audio_devices_t getDeviceType() const { return (mDevice != nullptr) ?
@@ -50,16 +54,25 @@ public:
     DeviceVector supportedDevices() const  {
         return mProfile != nullptr ? mProfile->getSupportedDevices() :  DeviceVector(); }
 
-    void dump(String8 *dst) const override;
+    void dump(String8 *dst, int spaces, const char* extraInfo) const override;
 
     audio_io_handle_t   mIoHandle = AUDIO_IO_HANDLE_NONE; // input handle
-    AudioMix            *mPolicyMix = nullptr;        // non NULL when used by a dynamic policy
+    wp<AudioPolicyMix>  mPolicyMix;                   // non NULL when used by a dynamic policy
     const sp<IOProfile> mProfile;                     // I/O profile this output derives from
 
+    // PolicyAudioPortConfig
+    virtual sp<PolicyAudioPort> getPolicyAudioPort() const {
+        return mProfile;
+    }
+
+    // AudioPortConfig
+    virtual status_t applyAudioPortConfig(const struct audio_port_config *config,
+                                          struct audio_port_config *backupConfig = NULL);
     virtual void toAudioPortConfig(struct audio_port_config *dstConfig,
             const struct audio_port_config *srcConfig = NULL) const;
     virtual sp<AudioPort> getAudioPort() const { return mProfile; }
-    void toAudioPort(struct audio_port *port) const;
+
+    void toAudioPort(struct audio_port_v7 *port) const;
     void setPreemptedSessions(const SortedVector<audio_session_t>& sessions);
     SortedVector<audio_session_t> getPreemptedSessions() const;
     bool hasPreemptedSession(audio_session_t session) const;
@@ -68,15 +81,25 @@ public:
     bool isSourceActive(audio_source_t source) const;
     audio_source_t source() const;
     bool isSoundTrigger() const;
+    sp<RecordClientDescriptor> getHighestPriorityClient() const;
     audio_attributes_t getHighestPriorityAttributes() const;
     void setClientActive(const sp<RecordClientDescriptor>& client, bool active);
     int32_t activeCount() { return mGlobalActiveCount; }
     void trackEffectEnabled(const sp<EffectDescriptor> &effect, bool enabled);
     EffectDescriptorCollection getEnabledEffects() const;
+    EffectDescriptorCollection getActiveEffects() const; // enabled and not suspended
     // implementation of AudioIODescriptorInterface
     audio_config_base_t getConfig() const override;
     audio_patch_handle_t getPatchHandle() const override;
     void setPatchHandle(audio_patch_handle_t handle) override;
+    bool isMmap() override {
+        if (const auto policyPort = getPolicyAudioPort(); policyPort != nullptr) {
+            if (const auto port = policyPort->asAudioPort(); port != nullptr) {
+                return port->isMmap();
+            }
+        }
+        return false;
+    }
 
     status_t open(const audio_config_t *config,
                   const sp<DeviceDescriptor> &device,
@@ -95,17 +118,20 @@ public:
     RecordClientVector clientsList(bool activeOnly = false,
         audio_source_t source = AUDIO_SOURCE_DEFAULT, bool preferredDeviceOnly = false) const;
 
-    void setAppState(uid_t uid, app_state_t state);
+    void setAppState(audio_port_handle_t portId, app_state_t state);
 
     // implementation of ClientMapHandler<RecordClientDescriptor>
     void addClient(const sp<RecordClientDescriptor> &client) override;
+
+    // Go over all active clients and suspend or restore effects according highest priority
+    // active use case
+    void checkSuspendEffects();
 
  private:
 
     void updateClientRecordingConfiguration(int event, const sp<RecordClientDescriptor>& client);
 
     audio_patch_handle_t mPatchHandle = AUDIO_PATCH_HANDLE_NONE;
-    audio_port_handle_t  mId = AUDIO_PORT_HANDLE_NONE;
     sp<DeviceDescriptor> mDevice = nullptr; /**< current device this input is routed to */
 
     // Because a preemptible capture session can preempt another one, we end up in an endless loop
@@ -118,6 +144,7 @@ public:
     AudioPolicyClientInterface * const mClientInterface;
     int32_t mGlobalActiveCount = 0;  // non-client-specific activity ref count
     EffectDescriptorCollection mEnabledEffects;
+    audio_input_flags_t& mFlags = AudioPortConfig::mFlags.input;
 };
 
 class AudioInputCollection :

@@ -27,6 +27,7 @@
 #include <media/stagefright/MediaDefs.h>
 #include <media/stagefright/MediaErrors.h>
 #include <media/stagefright/Utils.h>
+#include <media/stagefright/FoundationUtils.h>
 #include <media/mediaplayer.h>
 
 namespace android {
@@ -614,7 +615,7 @@ status_t M3UParser::parse(const void *_data, size_t size) {
                 if (mIsVariantPlaylist) {
                     return ERROR_MALFORMED;
                 }
-                err = parseCipherInfo(line, &itemMeta, mBaseURI);
+                err = parseCipherInfo(line, &itemMeta);
             } else if (line.startsWith("#EXT-X-ENDLIST")) {
                 mIsComplete = true;
             } else if (line.startsWith("#EXT-X-PLAYLIST-TYPE:EVENT")) {
@@ -935,7 +936,7 @@ status_t M3UParser::parseStreamInf(
 
 // static
 status_t M3UParser::parseCipherInfo(
-        const AString &line, sp<AMessage> *meta, const AString &baseURI) {
+        const AString &line, sp<AMessage> *meta) {
     ssize_t colonPos = line.find(":");
 
     if (colonPos < 0) {
@@ -984,13 +985,9 @@ status_t M3UParser::parseCipherInfo(
                     val = tmp;
                 }
 
-                AString absURI;
-                if (MakeURL(baseURI.c_str(), val.c_str(), &absURI)) {
-                    val = absURI;
-                } else {
-                    ALOGE("failed to make absolute url for %s.",
-                            uriDebugString(baseURI).c_str());
-                }
+                // To save space, we only store the partial Uri here
+                // The full Uri will be constructed from this plus
+                // the base Uri as needed by PlaylistFetcher
             }
 
             key.insert(AString("cipher-"), 0);
@@ -1000,6 +997,14 @@ status_t M3UParser::parseCipherInfo(
     }
 
     return OK;
+}
+
+AString M3UParser::getFullCipherUri(const AString &partial) {
+    AString full;
+    if (MakeURL(mBaseURI.c_str(), partial.c_str(), &full)) {
+        return full;
+    }
+    return AString("");
 }
 
 // static
@@ -1397,6 +1402,18 @@ bool M3UParser::codecIsType(const AString &codec, const char *type) {
         case 'ulaw':
         case 'vdva':
         case 'ac-4':
+        case 'Opus':
+        case 'a3ds':
+        case 'dts+':
+        case 'dts-':
+        case 'dtsx':
+        case 'dtsy':
+        case 'ec+3':
+        case 'mha1':
+        case 'mha2':
+        case 'mhm1':
+        case 'mhm2':
+        case 'sevs':
             return !strcmp("audio", type);
 
         case 'avc1':
@@ -1445,6 +1462,35 @@ bool M3UParser::codecIsType(const AString &codec, const char *type) {
         case 'tga ':
         case 'tiff':
         case 'WRLE':
+        case 'a3d1':
+        case 'a3d2':
+        case 'a3d3':
+        case 'a3d4':
+        case 'avc3':
+        case 'avc4':
+        case 'dva1':
+        case 'dvav':
+        case 'dvh1':
+        case 'dvhe':
+        case 'hev1':
+        case 'hev2':
+        case 'hvc1':
+        case 'hvc2':
+        case 'hvt1':
+        case 'lhe1':
+        case 'lht1':
+        case 'lhv1':
+        case 'mjpg':
+        case 'mvc3':
+        case 'mvc4':
+        case 'mvd1':
+        case 'mvd2':
+        case 'mvd3':
+        case 'mvd4':
+        case 'rv60':
+        case 'svc2':
+        case 'vp08':
+        case 'vp09':
             return !strcmp("video", type);
 
         default:

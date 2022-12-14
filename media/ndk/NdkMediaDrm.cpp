@@ -18,6 +18,11 @@
 #define LOG_TAG "NdkMediaDrm"
 
 #include <inttypes.h>
+#include <unistd.h>
+
+#include <iostream>
+#include <fstream>
+#include <string>
 
 #include <media/NdkMediaDrm.h>
 
@@ -26,11 +31,11 @@
 #include <utils/StrongPointer.h>
 #include <gui/Surface.h>
 
-#include <media/IDrm.h>
-#include <media/IDrmClient.h>
+#include <android-base/properties.h>
+#include <mediadrm/DrmUtils.h>
+#include <mediadrm/IDrm.h>
+#include <mediadrm/IDrmClient.h>
 #include <media/stagefright/MediaErrors.h>
-#include <binder/IServiceManager.h>
-#include <media/IMediaDrmService.h>
 #include <media/NdkMediaCrypto.h>
 
 
@@ -38,7 +43,7 @@ using namespace android;
 
 typedef Vector<uint8_t> idvec_t;
 
-struct DrmListener: virtual public BnDrmClient
+struct DrmListener: virtual public IDrmClient
 {
 private:
     AMediaDrm *mObj;
@@ -68,15 +73,32 @@ public:
         mKeysChangeListener = listener;
     }
 
-    void notify(DrmPlugin::EventType eventType, int extra, const Parcel *obj);
+    void sendEvent(
+            DrmPlugin::EventType eventType,
+            const hardware::hidl_vec<uint8_t> &sessionId,
+            const hardware::hidl_vec<uint8_t> &data) override;
+
+    void sendExpirationUpdate(
+            const hardware::hidl_vec<uint8_t> &sessionId,
+            int64_t expiryTimeInMS) override;
+
+    void sendKeysChange(
+            const hardware::hidl_vec<uint8_t> &sessionId,
+            const std::vector<DrmKeyStatus> &keyStatusList,
+            bool hasNewUsableKey) override;
+
+    void sendSessionLostState(
+            const hardware::hidl_vec<uint8_t> &) override {}
+
 };
 
 struct AMediaDrm {
     sp<IDrm> mDrm;
-    sp<IDrmClient> mDrmClient;
     List<idvec_t> mIds;
     KeyedVector<String8, String8> mQueryResults;
     Vector<uint8_t> mKeyRequest;
+    String8 mDefaultUrl;
+    AMediaDrmKeyRequestType mkeyRequestType;
     Vector<uint8_t> mProvisionRequest;
     String8 mProvisionUrl;
     String8 mPropertyString;
@@ -85,71 +107,52 @@ struct AMediaDrm {
     sp<DrmListener> mListener;
 };
 
-void DrmListener::notify(DrmPlugin::EventType eventType, int extra, const Parcel *obj) {
-    if (!mEventListener && !mExpirationUpdateListener && !mKeysChangeListener) {
-        ALOGE("No listeners are specified");
+void DrmListener::sendExpirationUpdate(
+        const hardware::hidl_vec<uint8_t> &sessionId,
+        int64_t expiryTimeInMS) {
+    if (!mExpirationUpdateListener) {
+        ALOGE("No ExpirationUpdateListener specified");
         return;
     }
 
-    obj->setDataPosition(0);
+    if (expiryTimeInMS >= 0) {
+        AMediaDrmSessionId asid = {sessionId.data(), sessionId.size()};
+        (*mExpirationUpdateListener)(mObj, &asid, expiryTimeInMS);
+    } else {
+        ALOGE("expiry time negative, status=%" PRId64 "", expiryTimeInMS);
+    }
+}
 
-    AMediaDrmSessionId sessionId = {NULL, 0};
-    int32_t sessionIdSize = obj->readInt32();
-    if (sessionIdSize <= 0) {
-        ALOGE("Invalid session id size");
+void DrmListener::sendKeysChange(
+        const hardware::hidl_vec<uint8_t> &sessionId,
+        const std::vector<DrmKeyStatus> &keyStatusList,
+        bool hasNewUsableKey) {
+    if (!mKeysChangeListener) {
+        ALOGE("No KeysChangeListener specified");
         return;
     }
 
-    std::unique_ptr<uint8_t[]> sessionIdData(new uint8_t[sessionIdSize]);
-    sessionId.ptr = sessionIdData.get();
-    sessionId.length = sessionIdSize;
-    status_t err = obj->read(sessionIdData.get(), sessionId.length);
-    if (err != OK) {
-        ALOGE("Failed to read session id, error=%d", err);
-        return;
-    }
-
-    if (DrmPlugin::kDrmPluginEventExpirationUpdate == eventType) {
-        int64_t expiryTimeInMS = obj->readInt64();
-        if (expiryTimeInMS >= 0) {
-            (*mExpirationUpdateListener)(mObj, &sessionId, expiryTimeInMS);
-        } else {
-            ALOGE("Failed to read expiry time, status=%" PRId64 "", expiryTimeInMS);
-        }
-        return;
-    } else if (DrmPlugin::kDrmPluginEventKeysChange == eventType) {
-        int32_t numKeys = 0;
-        err = obj->readInt32(&numKeys);
-        if (err != OK) {
-            ALOGE("Failed to read number of keys status, error=%d", err);
-            return;
-        }
-
-        Vector<AMediaDrmKeyStatus> keysStatus;
-        std::vector<std::unique_ptr<uint8_t[]> > dataPointers;
+    Vector<AMediaDrmKeyStatus> keysStatus;
+    for (const auto &drmKeyStatus : keyStatusList) {
         AMediaDrmKeyStatus keyStatus;
+        keyStatus.keyId.ptr = drmKeyStatus.keyId.data();
+        keyStatus.keyId.length = drmKeyStatus.keyId.size();
+        keyStatus.keyType = static_cast<AMediaDrmKeyStatusType>(drmKeyStatus.type);
+        keysStatus.push(keyStatus);
+    }
 
-        for (size_t i = 0; i < numKeys; ++i) {
-            keyStatus.keyId.ptr = nullptr;
-            keyStatus.keyId.length = 0;
-            int32_t idSize = obj->readInt32();
-            if (idSize > 0) {
-                std::unique_ptr<uint8_t[]> data(new uint8_t[idSize]);
-                err = obj->read(data.get(), idSize);
-                if (err != OK) {
-                    ALOGE("Failed to read key data, error=%d", err);
-                    return;
-                }
-                keyStatus.keyId.ptr = data.get();
-                keyStatus.keyId.length = idSize;
-                dataPointers.push_back(std::move(data));
-            }
-            keyStatus.keyType = static_cast<AMediaDrmKeyStatusType>(obj->readInt32());
-            keysStatus.push(keyStatus);
-        }
+    AMediaDrmSessionId asid = {sessionId.data(), sessionId.size()};
+    int32_t numKeys = keyStatusList.size();
+    (*mKeysChangeListener)(mObj, &asid, keysStatus.array(), numKeys, hasNewUsableKey);
+    return;
+}
 
-        bool hasNewUsableKey = obj->readInt32();
-        (*mKeysChangeListener)(mObj, &sessionId, keysStatus.array(), numKeys, hasNewUsableKey);
+void DrmListener::sendEvent(
+        DrmPlugin::EventType eventType,
+        const hardware::hidl_vec<uint8_t> &sessionId,
+        const hardware::hidl_vec<uint8_t> &data) {
+    if (!mEventListener) {
+        ALOGE("No EventListener specified");
         return;
     }
 
@@ -173,23 +176,17 @@ void DrmListener::notify(DrmPlugin::EventType eventType, int extra, const Parcel
             ndkEventType = EVENT_SESSION_RECLAIMED;
             break;
         default:
-            ALOGE("Invalid event DrmPlugin::EventType %d, ignored", (int)eventType);
+            ALOGE("Invalid event DrmPlugin::EventType %d, ignored", eventType);
             return;
     }
 
-    int32_t dataSize = obj->readInt32();
-    uint8_t *data = NULL;
-    if (dataSize > 0) {
-        data = new uint8_t[dataSize];
-        err = obj->read(data, dataSize);
-        if (err == OK) {
-            (*mEventListener)(mObj, &sessionId, ndkEventType, extra, data, dataSize);
-        } else {
-            ALOGE("Failed to read event data, error=%d", err);
-        }
-        delete [] data;
+    AMediaDrmSessionId asid = {sessionId.data(), sessionId.size()};
+    int32_t dataSize = data.size();
+    const uint8_t *dataPtr = data.data();
+    if (dataSize >= 0) {
+        (*mEventListener)(mObj, &asid, ndkEventType, 0, dataPtr, dataSize);
     } else {
-        ALOGE("Error reading parcel: invalid event data size=%d", dataSize);
+        ALOGE("invalid event data size=%d", dataSize);
     }
 }
 
@@ -231,20 +228,32 @@ static media_status_t translateStatus(status_t status) {
     return result;
 }
 
+static bool ShouldGetAppPackageName(void) {
+    // Check what this device's first API level was.
+    int32_t firstApiLevel = android::base::GetIntProperty<int32_t>("ro.product.first_api_level", 0);
+    if (firstApiLevel == 0) {
+        // First API Level is 0 on factory ROMs, but we can assume the current SDK
+        // version is the first if it's a factory ROM.
+        firstApiLevel = android::base::GetIntProperty<int32_t>("ro.build.version.sdk", 0);
+    }
+    return firstApiLevel >= 29;  // Android Q
+}
+
+static status_t GetAppPackageName(String8 *packageName) {
+    // todo(robertshih): use refactored/renamed libneuralnetworks_packageinfo which is stable
+    std::string appName;
+    std::ifstream cmdline("/proc/self/cmdline");
+    std::getline(cmdline, appName);
+    cmdline.close();
+    if (appName.empty()) {
+        return UNKNOWN_ERROR;
+    }
+    *packageName = String8(appName.c_str());
+    return OK;
+}
+
 static sp<IDrm> CreateDrm() {
-    sp<IServiceManager> sm = defaultServiceManager();
-    sp<IBinder> binder = sm->getService(String16("media.drm"));
-
-    sp<IMediaDrmService> service = interface_cast<IMediaDrmService>(binder);
-    if (service == NULL) {
-        return NULL;
-    }
-
-    sp<IDrm> drm = service->makeDrm();
-    if (drm == NULL || (drm->initCheck() != OK && drm->initCheck() != NO_INIT)) {
-        return NULL;
-    }
-    return drm;
+    return DrmUtils::MakeDrm();
 }
 
 
@@ -255,8 +264,16 @@ static sp<IDrm> CreateDrmFromUUID(const AMediaUUID uuid) {
         return NULL;
     }
 
-    String8 nullPackageName;
-    status_t err = drm->createPlugin(uuid, nullPackageName);
+    String8 packageName;
+    if (ShouldGetAppPackageName()) {
+        status_t err = GetAppPackageName(&packageName);
+
+        if (err != OK) {
+            return NULL;
+        }
+    }
+
+    status_t err = drm->createPlugin(uuid, packageName);
 
     if (err != OK) {
         return NULL;
@@ -365,12 +382,15 @@ media_status_t AMediaDrm_openSession(AMediaDrm *mObj, AMediaDrmSessionId *sessio
     }
     Vector<uint8_t> session;
     status_t status = mObj->mDrm->openSession(DrmPlugin::kSecurityLevelMax, session);
-    if (status == OK) {
-        mObj->mIds.push_front(session);
-        List<idvec_t>::iterator iter = mObj->mIds.begin();
-        sessionId->ptr = iter->array();
-        sessionId->length = iter->size();
+    if (status != OK) {
+        sessionId->ptr = NULL;
+        sessionId->length = 0;
+        return translateStatus(status);
     }
+    mObj->mIds.push_front(session);
+    List<idvec_t>::iterator iter = mObj->mIds.begin();
+    sessionId->ptr = iter->array();
+    sessionId->length = iter->size();
     return AMEDIA_OK;
 }
 
@@ -397,6 +417,21 @@ media_status_t AMediaDrm_getKeyRequest(AMediaDrm *mObj, const AMediaDrmScope *sc
         const uint8_t *init, size_t initSize, const char *mimeType, AMediaDrmKeyType keyType,
         const AMediaDrmKeyValue *optionalParameters, size_t numOptionalParameters,
         const uint8_t **keyRequest, size_t *keyRequestSize) {
+
+    return AMediaDrm_getKeyRequestWithDefaultUrlAndType(mObj,
+        scope, init, initSize, mimeType, keyType, optionalParameters,
+        numOptionalParameters, keyRequest,
+        keyRequestSize, NULL, NULL);
+}
+
+EXPORT
+media_status_t AMediaDrm_getKeyRequestWithDefaultUrlAndType(AMediaDrm *mObj,
+        const AMediaDrmScope *scope, const uint8_t *init, size_t initSize,
+        const char *mimeType, AMediaDrmKeyType keyType,
+        const AMediaDrmKeyValue *optionalParameters,
+        size_t numOptionalParameters, const uint8_t **keyRequest,
+        size_t *keyRequestSize, const char **defaultUrl,
+        AMediaDrmKeyRequestType *keyRequestType) {
 
     if (!mObj || mObj->mDrm == NULL) {
         return AMEDIA_ERROR_INVALID_OBJECT;
@@ -431,18 +466,43 @@ media_status_t AMediaDrm_getKeyRequest(AMediaDrm *mObj, const AMediaDrmScope *sc
         mdOptionalParameters.add(String8(optionalParameters[i].mKey),
                 String8(optionalParameters[i].mValue));
     }
-    String8 defaultUrl;
-    DrmPlugin::KeyRequestType keyRequestType;
+
+    DrmPlugin::KeyRequestType requestType;
     mObj->mKeyRequest.clear();
     status_t status = mObj->mDrm->getKeyRequest(*iter, mdInit, String8(mimeType),
-            mdKeyType, mdOptionalParameters, mObj->mKeyRequest, defaultUrl,
-            &keyRequestType);
+            mdKeyType, mdOptionalParameters, mObj->mKeyRequest, mObj->mDefaultUrl,
+            &requestType);
     if (status != OK) {
         return translateStatus(status);
     } else {
         *keyRequest = mObj->mKeyRequest.array();
         *keyRequestSize = mObj->mKeyRequest.size();
+        if (defaultUrl != NULL)
+            *defaultUrl = mObj->mDefaultUrl.string();
+        switch(requestType) {
+            case DrmPlugin::kKeyRequestType_Initial:
+                mObj->mkeyRequestType = KEY_REQUEST_TYPE_INITIAL;
+                break;
+            case DrmPlugin::kKeyRequestType_Renewal:
+                mObj->mkeyRequestType = KEY_REQUEST_TYPE_RENEWAL;
+                break;
+            case DrmPlugin::kKeyRequestType_Release:
+                mObj->mkeyRequestType = KEY_REQUEST_TYPE_RELEASE;
+                break;
+            case DrmPlugin::kKeyRequestType_None:
+                mObj->mkeyRequestType = KEY_REQUEST_TYPE_NONE;
+                break;
+            case DrmPlugin::kKeyRequestType_Update:
+                mObj->mkeyRequestType = KEY_REQUEST_TYPE_UPDATE;
+                break;
+            default:
+                return AMEDIA_ERROR_UNKNOWN;
+        }
+
+        if (keyRequestType != NULL)
+            *keyRequestType = mObj->mkeyRequestType;
     }
+
     return AMEDIA_OK;
 }
 
@@ -474,6 +534,7 @@ media_status_t AMediaDrm_provideKeyResponse(AMediaDrm *mObj, const AMediaDrmScop
     } else {
         keySetId->ptr = NULL;
         keySetId->length = 0;
+        return translateStatus(status);
     }
     return AMEDIA_OK;
 }

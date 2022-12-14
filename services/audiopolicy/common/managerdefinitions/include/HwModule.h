@@ -52,8 +52,12 @@ public:
         devices.merge(mDynamicDevices);
         return devices;
     }
+    std::string getTagForDevice(audio_devices_t device,
+                                const String8 &address = String8(),
+                                audio_format_t codec = AUDIO_FORMAT_DEFAULT);
     void addDynamicDevice(const sp<DeviceDescriptor> &device)
     {
+        device->setDynamic();
         mDynamicDevices.add(device);
     }
 
@@ -76,25 +80,26 @@ public:
 
     sp<DeviceDescriptor> getRouteSinkDevice(const sp<AudioRoute> &route) const;
     DeviceVector getRouteSourceDevices(const sp<AudioRoute> &route) const;
+    const AudioRouteVector& getRoutes() const { return mRoutes; }
     void setRoutes(const AudioRouteVector &routes);
 
     status_t addOutputProfile(const sp<IOProfile> &profile);
     status_t addInputProfile(const sp<IOProfile> &profile);
     status_t addProfile(const sp<IOProfile> &profile);
 
-    status_t addOutputProfile(const String8& name, const audio_config_t *config,
+    status_t addOutputProfile(const std::string& name, const audio_config_t *config,
             audio_devices_t device, const String8& address);
-    status_t removeOutputProfile(const String8& name);
-    status_t addInputProfile(const String8& name, const audio_config_t *config,
+    status_t removeOutputProfile(const std::string& name);
+    status_t addInputProfile(const std::string& name, const audio_config_t *config,
             audio_devices_t device, const String8& address);
-    status_t removeInputProfile(const String8& name);
+    status_t removeInputProfile(const std::string& name);
 
     audio_module_handle_t getHandle() const { return mHandle; }
     void setHandle(audio_module_handle_t handle);
 
-    sp<AudioPort> findPortByTagName(const String8 &tagName) const
+    sp<PolicyAudioPort> findPortByTagName(const std::string &tagName) const
     {
-        return mPorts.findByTagName(tagName);
+        return findByTagName(mPorts, tagName);
     }
 
     /**
@@ -106,10 +111,11 @@ public:
      * @return true if the HwModule supports the connection between the sink and the source,
      * false otherwise
      */
-    bool supportsPatch(const sp<AudioPort> &srcPort, const sp<AudioPort> &dstPort) const;
+    bool supportsPatch(const sp<PolicyAudioPort> &srcPort,
+                       const sp<PolicyAudioPort> &dstPort) const;
 
     // TODO remove from here (split serialization)
-    void dump(String8 *dst) const;
+    void dump(String8 *dst, int spaces) const;
 
 private:
     void refreshSupportedDevices();
@@ -122,7 +128,7 @@ private:
     DeviceVector mDeclaredDevices; // devices declared in audio_policy configuration file.
     DeviceVector mDynamicDevices; /**< devices that can be added/removed at runtime (e.g. rsbumix)*/
     AudioRouteVector mRoutes;
-    AudioPortVector mPorts;
+    PolicyAudioPortVector mPorts;
 };
 
 class HwModuleCollection : public Vector<sp<HwModule> >
@@ -130,8 +136,17 @@ class HwModuleCollection : public Vector<sp<HwModule> >
 public:
     sp<HwModule> getModuleFromName(const char *name) const;
 
-    sp<HwModule> getModuleForDeviceTypes(audio_devices_t device,
-                                         audio_format_t encodedFormat) const;
+    /**
+     * @brief getModuleForDeviceType try to get a device from type / format on all modules
+     * @param device type to consider
+     * @param encodedFormat to consider
+     * @param[out] tagName if not null, if a matching device is found, will return the tagName
+     * of original device from XML file so that audio routes matchin rules work.
+     * @return valid module if considered device found, nullptr otherwise.
+     */
+    sp<HwModule> getModuleForDeviceType(audio_devices_t device,
+                                        audio_format_t encodedFormat,
+                                        std::string *tagName = nullptr) const;
 
     sp<HwModule> getModuleForDevice(const sp<DeviceDescriptor> &device,
                                     audio_format_t encodedFormat) const;

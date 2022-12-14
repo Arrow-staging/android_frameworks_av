@@ -1,3 +1,22 @@
+package {
+    default_applicable_licenses: [
+        "frameworks_av_media_libstagefright_httplive_license",
+    ],
+}
+
+// Added automatically by a large-scale-change
+// See: http://go/android-license-faq
+license {
+    name: "frameworks_av_media_libstagefright_httplive_license",
+    visibility: [":__subpackages__"],
+    license_kinds: [
+        "SPDX-license-identifier-Apache-2.0",
+    ],
+    license_text: [
+        "NOTICE",
+    ],
+}
+
 cc_library {
     name: "libstagefright_httplive",
 
@@ -7,11 +26,6 @@ cc_library {
         "LiveSession.cpp",
         "M3UParser.cpp",
         "PlaylistFetcher.cpp",
-    ],
-
-    include_dirs: [
-        "frameworks/av/media/libstagefright",
-        "frameworks/native/include/media/openmax",
     ],
 
     cflags: [
@@ -31,6 +45,7 @@ cc_library {
         "liblog",
         "libcrypto",
         "libcutils",
+        "libdatasource",
         "libmedia",
         "libmediandk",
         "libstagefright",
@@ -45,6 +60,8 @@ cc_library {
 
     header_libs: [
         "libbase_headers",
+        "libstagefright_headers",
+        "libstagefright_httplive_headers",
     ],
 
     static_libs: [
@@ -53,4 +70,9 @@ cc_library {
         "libstagefright_mpeg2support",
     ],
 
+}
+
+cc_library_headers {
+    name: "libstagefright_httplive_headers",
+    export_include_dirs: ["."],
 }

@@ -23,7 +23,7 @@
 
 #include <binder/IServiceManager.h>
 #include <binder/ProcessState.h>
-#include <media/ICrypto.h>
+#include <mediadrm/ICrypto.h>
 #include <media/IMediaHTTPService.h>
 #include <media/IMediaPlayerService.h>
 #include <media/MediaCodecBuffer.h>
@@ -39,7 +39,7 @@
 #include <gui/ISurfaceComposer.h>
 #include <gui/SurfaceComposerClient.h>
 #include <gui/Surface.h>
-#include <ui/DisplayInfo.h>
+#include <ui/DisplayMode.h>
 
 static void usage(const char *me) {
     fprintf(stderr, "usage: %s [-a] use audio\n"
@@ -79,7 +79,7 @@ static int decode(
 
     static int64_t kTimeout = 500ll;
 
-    sp<NuMediaExtractor> extractor = new NuMediaExtractor;
+    sp<NuMediaExtractor> extractor = new NuMediaExtractor(NuMediaExtractor::EntryPoint::OTHER);
     if (extractor->setDataSource(NULL /* httpService */, path) != OK) {
         fprintf(stderr, "unable to instantiate extractor.\n");
         return 1;
@@ -414,11 +414,12 @@ int main(int argc, char **argv) {
         const sp<IBinder> display = SurfaceComposerClient::getInternalDisplayToken();
         CHECK(display != nullptr);
 
-        DisplayInfo info;
-        CHECK_EQ(SurfaceComposerClient::getDisplayInfo(display, &info), NO_ERROR);
+        ui::DisplayMode mode;
+        CHECK_EQ(SurfaceComposerClient::getActiveDisplayMode(display, &mode), NO_ERROR);
 
-        ssize_t displayWidth = info.w;
-        ssize_t displayHeight = info.h;
+        const ui::Size& resolution = mode.resolution;
+        const ssize_t displayWidth = resolution.getWidth();
+        const ssize_t displayHeight = resolution.getHeight();
 
         ALOGV("display is %zd x %zd\n", displayWidth, displayHeight);
 

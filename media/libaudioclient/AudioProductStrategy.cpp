@@ -19,57 +19,47 @@
 #include <utils/Log.h>
 #include <media/AudioProductStrategy.h>
 #include <media/AudioAttributes.h>
-#include <media/AudioSystem.h>
+#include <media/PolicyAidlConversion.h>
 
 namespace android {
 
-status_t AudioProductStrategy::readFromParcel(const Parcel *parcel)
-{
-    mId = static_cast<product_strategy_t>(parcel->readInt32());
-    status_t ret = parcel->readUtf8FromUtf16(&mName);
-    if (ret != NO_ERROR) {
-        return ret;
-    }
-    size_t size = static_cast<size_t>(parcel->readInt32());
-    for (size_t i = 0; i < size; i++) {
-        AudioAttributes attribute;
-        ret = attribute.readFromParcel(parcel);
-        if (ret != NO_ERROR) {
-            mAudioAttributes.clear();
-            return ret;
-        }
-        mAudioAttributes.push_back(attribute);
-    }
-    return NO_ERROR;
+status_t AudioProductStrategy::readFromParcel(const Parcel* parcel) {
+    media::AudioProductStrategy aidl;
+    RETURN_STATUS_IF_ERROR(aidl.readFromParcel(parcel));
+    *this = VALUE_OR_RETURN_STATUS(aidl2legacy_AudioProductStrategy(aidl));
+    return OK;
 }
 
-status_t AudioProductStrategy::writeToParcel(Parcel *parcel) const
-{
-    parcel->writeInt32(static_cast<int32_t>(mId));
-    parcel->writeUtf8AsUtf16(mName);
-    size_t size = mAudioAttributes.size();
-    size_t sizePosition = parcel->dataPosition();
-    parcel->writeInt32(size);
-    size_t finalSize = size;
-
-    for (size_t i = 0; i < size; i++) {
-        size_t position = parcel->dataPosition();
-        AudioAttributes attribute(mAudioAttributes[i]);
-        status_t ret = attribute.writeToParcel(parcel);
-        if (ret != NO_ERROR) {
-            parcel->setDataPosition(position);
-            finalSize--;
-        }
-    }
-    if (size != finalSize) {
-        size_t position = parcel->dataPosition();
-        parcel->setDataPosition(sizePosition);
-        parcel->writeInt32(finalSize);
-        parcel->setDataPosition(position);
-    }
-    return NO_ERROR;
+status_t AudioProductStrategy::writeToParcel(Parcel* parcel) const {
+    media::AudioProductStrategy aidl = VALUE_OR_RETURN_STATUS(
+            legacy2aidl_AudioProductStrategy(*this));
+    return aidl.writeToParcel(parcel);
 }
 
+ConversionResult<media::AudioProductStrategy>
+legacy2aidl_AudioProductStrategy(const AudioProductStrategy& legacy) {
+    media::AudioProductStrategy aidl;
+    aidl.name = legacy.getName();
+    aidl.audioAttributes = VALUE_OR_RETURN(
+            convertContainer<std::vector<media::AudioAttributesEx>>(
+                    legacy.getAudioAttributes(),
+                    legacy2aidl_AudioAttributes_AudioAttributesEx));
+    aidl.id = VALUE_OR_RETURN(legacy2aidl_product_strategy_t_int32_t(legacy.getId()));
+    return aidl;
+}
+
+ConversionResult<AudioProductStrategy>
+aidl2legacy_AudioProductStrategy(const media::AudioProductStrategy& aidl) {
+    return AudioProductStrategy(
+            aidl.name,
+            VALUE_OR_RETURN(
+                    convertContainer<std::vector<AudioAttributes>>(
+                            aidl.audioAttributes,
+                            aidl2legacy_AudioAttributesEx_AudioAttributes)),
+            VALUE_OR_RETURN(aidl2legacy_int32_t_product_strategy_t(aidl.id)));
+}
+
+// Keep in sync with android/media/audiopolicy/AudioProductStrategy#attributeMatches
 bool AudioProductStrategy::attributesMatches(const audio_attributes_t refAttributes,
                                         const audio_attributes_t clientAttritubes)
 {
@@ -86,7 +76,7 @@ bool AudioProductStrategy::attributesMatches(const audio_attributes_t refAttribu
              (clientAttritubes.content_type == refAttributes.content_type)) &&
             ((refAttributes.flags == AUDIO_FLAG_NONE) ||
              (clientAttritubes.flags != AUDIO_FLAG_NONE &&
-            (clientAttritubes.flags & refAttributes.flags) == clientAttritubes.flags)) &&
+            (clientAttritubes.flags & refAttributes.flags) == refAttributes.flags)) &&
             ((strlen(refAttributes.tags) == 0) ||
              (std::strcmp(clientAttritubes.tags, refAttributes.tags) == 0));
 }

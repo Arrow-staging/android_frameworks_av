@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2018 The Android Open Source Project
+ * Copyright (C) 2019 The Android Open Source Project
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -25,6 +25,7 @@
 #include <media/stagefright/foundation/AUtils.h>
 
 #include <C2Debug.h>
+#include <Codec2Mapper.h>
 #include <C2PlatformSupport.h>
 #include <Codec2BufferUtils.h>
 #include <SimpleC2Interface.h>
@@ -38,57 +39,119 @@
 
 namespace android {
 
-class C2SoftHevcEnc::IntfImpl : public C2InterfaceHelper {
-   public:
-    explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper>& helper)
-        : C2InterfaceHelper(helper) {
+namespace {
+
+constexpr char COMPONENT_NAME[] = "c2.android.hevc.encoder";
+
+void ParseGop(
+        const C2StreamGopTuning::output &gop,
+        uint32_t *syncInterval, uint32_t *iInterval, uint32_t *maxBframes) {
+    uint32_t syncInt = 1;
+    uint32_t iInt = 1;
+    for (size_t i = 0; i < gop.flexCount(); ++i) {
+        const C2GopLayerStruct &layer = gop.m.values[i];
+        if (layer.count == UINT32_MAX) {
+            syncInt = 0;
+        } else if (syncInt <= UINT32_MAX / (layer.count + 1)) {
+            syncInt *= (layer.count + 1);
+        }
+        if ((layer.type_ & I_FRAME) == 0) {
+            if (layer.count == UINT32_MAX) {
+                iInt = 0;
+            } else if (iInt <= UINT32_MAX / (layer.count + 1)) {
+                iInt *= (layer.count + 1);
+            }
+        }
+        if (layer.type_ == C2Config::picture_type_t(P_FRAME | B_FRAME) && maxBframes) {
+            *maxBframes = layer.count;
+        }
+    }
+    if (syncInterval) {
+        *syncInterval = syncInt;
+    }
+    if (iInterval) {
+        *iInterval = iInt;
+    }
+}
+} // namepsace
+
+class C2SoftHevcEnc::IntfImpl : public SimpleInterface<void>::BaseParams {
+  public:
+    explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
+        : SimpleInterface<void>::BaseParams(
+                helper,
+                COMPONENT_NAME,
+                C2Component::KIND_ENCODER,
+                C2Component::DOMAIN_VIDEO,
+                MEDIA_MIMETYPE_VIDEO_HEVC) {
+        noPrivateBuffers(); // TODO: account for our buffers here
+        noInputReferences();
+        noOutputReferences();
+        noTimeStretch();
         setDerivedInstance(this);
 
         addParameter(
-            DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(
-                    new C2StreamBufferTypeSetting::input(0u, C2BufferData::GRAPHIC))
+                DefineParam(mGop, C2_PARAMKEY_GOP)
+                .withDefault(C2StreamGopTuning::output::AllocShared(
+                        0 /* flexCount */, 0u /* stream */))
+                .withFields({C2F(mGop, m.values[0].type_).any(),
+                             C2F(mGop, m.values[0].count).any()})
+                .withSetter(GopSetter)
                 .build());
 
         addParameter(
-            DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(
-                    new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
+                DefineParam(mActualInputDelay, C2_PARAMKEY_INPUT_DELAY)
+                .withDefault(new C2PortActualDelayTuning::input(
+                    DEFAULT_B_FRAMES + DEFAULT_RC_LOOKAHEAD))
+                .withFields({C2F(mActualInputDelay, value).inRange(
+                    0, MAX_B_FRAMES + MAX_RC_LOOKAHEAD)})
+                .calculatedAs(InputDelaySetter, mGop)
                 .build());
 
         addParameter(
-            DefineParam(mInputMediaType, C2_PARAMKEY_INPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::input>(
-                    MEDIA_MIMETYPE_VIDEO_RAW))
+                DefineParam(mAttrib, C2_PARAMKEY_COMPONENT_ATTRIBUTES)
+                .withConstValue(new C2ComponentAttributesSetting(
+                    C2Component::ATTRIB_IS_TEMPORAL))
                 .build());
 
         addParameter(
-            DefineParam(mOutputMediaType, C2_PARAMKEY_OUTPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::output>(
-                    MEDIA_MIMETYPE_VIDEO_HEVC))
+                DefineParam(mUsage, C2_PARAMKEY_INPUT_STREAM_USAGE)
+                .withConstValue(new C2StreamUsageTuning::input(
+                        0u, (uint64_t)C2MemoryUsage::CPU_READ))
                 .build());
 
-        addParameter(DefineParam(mUsage, C2_PARAMKEY_INPUT_STREAM_USAGE)
-                         .withConstValue(new C2StreamUsageTuning::input(
-                             0u, (uint64_t)C2MemoryUsage::CPU_READ))
-                         .build());
-
+        // matches size limits in codec library
         addParameter(
             DefineParam(mSize, C2_PARAMKEY_PICTURE_SIZE)
-                .withDefault(new C2StreamPictureSizeInfo::input(0u, 320, 240))
+                .withDefault(new C2StreamPictureSizeInfo::input(0u, 64, 64))
                 .withFields({
-                    C2F(mSize, width).inRange(320, 1920, 2),
-                    C2F(mSize, height).inRange(128, 1088, 2),
+                    C2F(mSize, width).inRange(2, 1920, 2),
+                    C2F(mSize, height).inRange(2, 1088, 2),
                 })
                 .withSetter(SizeSetter)
                 .build());
 
         addParameter(
             DefineParam(mFrameRate, C2_PARAMKEY_FRAME_RATE)
-                .withDefault(new C2StreamFrameRateInfo::output(0u, 30.))
+                .withDefault(new C2StreamFrameRateInfo::output(0u, 1.))
                 .withFields({C2F(mFrameRate, value).greaterThan(0.)})
                 .withSetter(
                     Setter<decltype(*mFrameRate)>::StrictValueWithNoDeps)
+                .build());
+
+        // matches limits in codec library
+        addParameter(
+            DefineParam(mBitrateMode, C2_PARAMKEY_BITRATE_MODE)
+                .withDefault(new C2StreamBitrateModeTuning::output(
+                        0u, C2Config::BITRATE_VARIABLE))
+                .withFields({
+                    C2F(mBitrateMode, value).oneOf({
+                        C2Config::BITRATE_CONST,
+                        C2Config::BITRATE_VARIABLE,
+                        C2Config::BITRATE_IGNORE})
+                })
+                .withSetter(
+                    Setter<decltype(*mBitrateMode)>::StrictValueWithNoDeps)
                 .build());
 
         addParameter(
@@ -96,6 +159,21 @@ class C2SoftHevcEnc::IntfImpl : public C2InterfaceHelper {
                 .withDefault(new C2StreamBitrateInfo::output(0u, 64000))
                 .withFields({C2F(mBitrate, value).inRange(4096, 12000000)})
                 .withSetter(BitrateSetter)
+                .build());
+
+        // matches levels allowed within codec library
+        addParameter(
+                DefineParam(mComplexity, C2_PARAMKEY_COMPLEXITY)
+                .withDefault(new C2StreamComplexityTuning::output(0u, 0))
+                .withFields({C2F(mComplexity, value).inRange(0, 10)})
+                .withSetter(Setter<decltype(*mComplexity)>::NonStrictValueWithNoDeps)
+                .build());
+
+        addParameter(
+                DefineParam(mQuality, C2_PARAMKEY_QUALITY)
+                .withDefault(new C2StreamQualityTuning::output(0u, 80))
+                .withFields({C2F(mQuality, value).inRange(0, 100)})
+                .withSetter(Setter<decltype(*mQuality)>::NonStrictValueWithNoDeps)
                 .build());
 
         addParameter(
@@ -131,13 +209,73 @@ class C2SoftHevcEnc::IntfImpl : public C2InterfaceHelper {
                 .withSetter(
                     Setter<decltype(*mSyncFramePeriod)>::StrictValueWithNoDeps)
                 .build());
+
+        addParameter(
+                DefineParam(mColorAspects, C2_PARAMKEY_COLOR_ASPECTS)
+                .withDefault(new C2StreamColorAspectsInfo::input(
+                        0u, C2Color::RANGE_UNSPECIFIED, C2Color::PRIMARIES_UNSPECIFIED,
+                        C2Color::TRANSFER_UNSPECIFIED, C2Color::MATRIX_UNSPECIFIED))
+                .withFields({
+                    C2F(mColorAspects, range).inRange(
+                                C2Color::RANGE_UNSPECIFIED,     C2Color::RANGE_OTHER),
+                    C2F(mColorAspects, primaries).inRange(
+                                C2Color::PRIMARIES_UNSPECIFIED, C2Color::PRIMARIES_OTHER),
+                    C2F(mColorAspects, transfer).inRange(
+                                C2Color::TRANSFER_UNSPECIFIED,  C2Color::TRANSFER_OTHER),
+                    C2F(mColorAspects, matrix).inRange(
+                                C2Color::MATRIX_UNSPECIFIED,    C2Color::MATRIX_OTHER)
+                })
+                .withSetter(ColorAspectsSetter)
+                .build());
+
+        addParameter(
+                DefineParam(mCodedColorAspects, C2_PARAMKEY_VUI_COLOR_ASPECTS)
+                .withDefault(new C2StreamColorAspectsInfo::output(
+                        0u, C2Color::RANGE_LIMITED, C2Color::PRIMARIES_UNSPECIFIED,
+                        C2Color::TRANSFER_UNSPECIFIED, C2Color::MATRIX_UNSPECIFIED))
+                .withFields({
+                    C2F(mCodedColorAspects, range).inRange(
+                                C2Color::RANGE_UNSPECIFIED,     C2Color::RANGE_OTHER),
+                    C2F(mCodedColorAspects, primaries).inRange(
+                                C2Color::PRIMARIES_UNSPECIFIED, C2Color::PRIMARIES_OTHER),
+                    C2F(mCodedColorAspects, transfer).inRange(
+                                C2Color::TRANSFER_UNSPECIFIED,  C2Color::TRANSFER_OTHER),
+                    C2F(mCodedColorAspects, matrix).inRange(
+                                C2Color::MATRIX_UNSPECIFIED,    C2Color::MATRIX_OTHER)
+                })
+                .withSetter(CodedColorAspectsSetter, mColorAspects)
+                .build());
+
+        addParameter(
+                DefineParam(mPictureQuantization, C2_PARAMKEY_PICTURE_QUANTIZATION)
+                .withDefault(C2StreamPictureQuantizationTuning::output::AllocShared(
+                        0 /* flexCount */, 0u /* stream */))
+                .withFields({C2F(mPictureQuantization, m.values[0].type_).oneOf(
+                                {C2Config::picture_type_t(I_FRAME),
+                                  C2Config::picture_type_t(P_FRAME),
+                                  C2Config::picture_type_t(B_FRAME)}),
+                             C2F(mPictureQuantization, m.values[0].min).any(),
+                             C2F(mPictureQuantization, m.values[0].max).any()})
+                .withSetter(PictureQuantizationSetter)
+                .build());
+    }
+
+    static C2R InputDelaySetter(
+            bool mayBlock,
+            C2P<C2PortActualDelayTuning::input> &me,
+            const C2P<C2StreamGopTuning::output> &gop) {
+        (void)mayBlock;
+        uint32_t maxBframes = 0;
+        ParseGop(gop.v, nullptr, nullptr, &maxBframes);
+        me.set().value = maxBframes + DEFAULT_RC_LOOKAHEAD;
+        return C2R::Ok();
     }
 
     static C2R BitrateSetter(bool mayBlock,
                              C2P<C2StreamBitrateInfo::output>& me) {
         (void)mayBlock;
         C2R res = C2R::Ok();
-        if (me.v.value <= 4096) {
+        if (me.v.value < 4096) {
             me.set().value = 4096;
         }
         return res;
@@ -231,6 +369,18 @@ class C2SoftHevcEnc::IntfImpl : public C2InterfaceHelper {
         return C2R::Ok();
     }
 
+    static C2R GopSetter(bool mayBlock, C2P<C2StreamGopTuning::output> &me) {
+        (void)mayBlock;
+        for (size_t i = 0; i < me.v.flexCount(); ++i) {
+            const C2GopLayerStruct &layer = me.v.m.values[0];
+            if (layer.type_ == C2Config::picture_type_t(P_FRAME | B_FRAME)
+                    && layer.count > MAX_B_FRAMES) {
+                me.set().m.values[i].count = MAX_B_FRAMES;
+            }
+        }
+        return C2R::Ok();
+    }
+
     UWORD32 getProfile_l() const {
         switch (mProfileLevel->profile) {
         case PROFILE_HEVC_MAIN:  [[fallthrough]];
@@ -278,11 +428,14 @@ class C2SoftHevcEnc::IntfImpl : public C2InterfaceHelper {
         return (uint32_t)c2_max(c2_min(period + 0.5, double(UINT32_MAX)), 1.);
     }
 
-   std::shared_ptr<C2StreamPictureSizeInfo::input> getSize_l() const {
+    std::shared_ptr<C2StreamPictureSizeInfo::input> getSize_l() const {
         return mSize;
     }
     std::shared_ptr<C2StreamFrameRateInfo::output> getFrameRate_l() const {
         return mFrameRate;
+    }
+    std::shared_ptr<C2StreamBitrateModeTuning::output> getBitrateMode_l() const {
+        return mBitrateMode;
     }
     std::shared_ptr<C2StreamBitrateInfo::output> getBitrate_l() const {
         return mBitrate;
@@ -290,32 +443,133 @@ class C2SoftHevcEnc::IntfImpl : public C2InterfaceHelper {
     std::shared_ptr<C2StreamRequestSyncFrameTuning::output> getRequestSync_l() const {
         return mRequestSync;
     }
+    std::shared_ptr<C2StreamComplexityTuning::output> getComplexity_l() const {
+        return mComplexity;
+    }
+    std::shared_ptr<C2StreamQualityTuning::output> getQuality_l() const {
+        return mQuality;
+    }
+    std::shared_ptr<C2StreamGopTuning::output> getGop_l() const {
+        return mGop;
+    }
+    static C2R ColorAspectsSetter(bool mayBlock, C2P<C2StreamColorAspectsInfo::input> &me) {
+        (void)mayBlock;
+        if (me.v.range > C2Color::RANGE_OTHER) {
+                me.set().range = C2Color::RANGE_OTHER;
+        }
+        if (me.v.primaries > C2Color::PRIMARIES_OTHER) {
+                me.set().primaries = C2Color::PRIMARIES_OTHER;
+        }
+        if (me.v.transfer > C2Color::TRANSFER_OTHER) {
+                me.set().transfer = C2Color::TRANSFER_OTHER;
+        }
+        if (me.v.matrix > C2Color::MATRIX_OTHER) {
+                me.set().matrix = C2Color::MATRIX_OTHER;
+        }
+        return C2R::Ok();
+    }
+    static C2R CodedColorAspectsSetter(bool mayBlock, C2P<C2StreamColorAspectsInfo::output> &me,
+                                       const C2P<C2StreamColorAspectsInfo::input> &coded) {
+        (void)mayBlock;
+        me.set().range = coded.v.range;
+        me.set().primaries = coded.v.primaries;
+        me.set().transfer = coded.v.transfer;
+        me.set().matrix = coded.v.matrix;
+        return C2R::Ok();
+    }
+    static C2R PictureQuantizationSetter(bool mayBlock,
+                                         C2P<C2StreamPictureQuantizationTuning::output> &me) {
+        (void)mayBlock;
+
+        // these are the ones we're going to set, so want them to default
+        // to the DEFAULT values for the codec
+        int32_t iMin = HEVC_QP_MIN, pMin = HEVC_QP_MIN, bMin = HEVC_QP_MIN;
+        int32_t iMax = HEVC_QP_MAX, pMax = HEVC_QP_MAX, bMax = HEVC_QP_MAX;
+
+        for (size_t i = 0; i < me.v.flexCount(); ++i) {
+            const C2PictureQuantizationStruct &layer = me.v.m.values[i];
+
+            // layerMin is clamped to [HEVC_QP_MIN, layerMax] to avoid error
+            // cases where layer.min > layer.max
+            int32_t layerMax = std::clamp(layer.max, HEVC_QP_MIN, HEVC_QP_MAX);
+            int32_t layerMin = std::clamp(layer.min, HEVC_QP_MIN, layerMax);
+            if (layer.type_ == C2Config::picture_type_t(I_FRAME)) {
+                iMax = layerMax;
+                iMin = layerMin;
+                ALOGV("iMin %d iMax %d", iMin, iMax);
+            } else if (layer.type_ == C2Config::picture_type_t(P_FRAME)) {
+                pMax = layerMax;
+                pMin = layerMin;
+                ALOGV("pMin %d pMax %d", pMin, pMax);
+            } else if (layer.type_ == C2Config::picture_type_t(B_FRAME)) {
+                bMax = layerMax;
+                bMin = layerMin;
+                ALOGV("bMin %d bMax %d", bMin, bMax);
+            }
+        }
+
+        ALOGV("PictureQuantizationSetter(entry): i %d-%d p %d-%d b %d-%d",
+              iMin, iMax, pMin, pMax, bMin, bMax);
+
+        int32_t maxFrameQP = std::min(std::min(iMax, pMax), bMax);
+        int32_t minFrameQP = std::max(std::max(iMin, pMin), bMin);
+        if (minFrameQP > maxFrameQP) {
+            minFrameQP = maxFrameQP;
+        }
+
+        // put them back into the structure
+        for (size_t i = 0; i < me.v.flexCount(); ++i) {
+            const C2PictureQuantizationStruct &layer = me.v.m.values[i];
+
+            if (layer.type_ == C2Config::picture_type_t(I_FRAME) ||
+                layer.type_ == C2Config::picture_type_t(P_FRAME) ||
+                layer.type_ == C2Config::picture_type_t(B_FRAME)) {
+                me.set().m.values[i].max = maxFrameQP;
+                me.set().m.values[i].min = minFrameQP;
+            }
+        }
+
+        ALOGV("PictureQuantizationSetter(exit): i = p = b = %d-%d",
+              minFrameQP, maxFrameQP);
+
+        return C2R::Ok();
+    }
+    std::shared_ptr<C2StreamColorAspectsInfo::output> getCodedColorAspects_l() {
+        return mCodedColorAspects;
+    }
+    std::shared_ptr<C2StreamPictureQuantizationTuning::output> getPictureQuantization_l() const {
+        return mPictureQuantization;
+    }
 
    private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
     std::shared_ptr<C2StreamUsageTuning::input> mUsage;
     std::shared_ptr<C2StreamPictureSizeInfo::input> mSize;
     std::shared_ptr<C2StreamFrameRateInfo::output> mFrameRate;
     std::shared_ptr<C2StreamRequestSyncFrameTuning::output> mRequestSync;
     std::shared_ptr<C2StreamBitrateInfo::output> mBitrate;
+    std::shared_ptr<C2StreamBitrateModeTuning::output> mBitrateMode;
+    std::shared_ptr<C2StreamComplexityTuning::output> mComplexity;
+    std::shared_ptr<C2StreamQualityTuning::output> mQuality;
     std::shared_ptr<C2StreamProfileLevelInfo::output> mProfileLevel;
     std::shared_ptr<C2StreamSyncFrameIntervalTuning::output> mSyncFramePeriod;
+    std::shared_ptr<C2StreamGopTuning::output> mGop;
+    std::shared_ptr<C2StreamColorAspectsInfo::input> mColorAspects;
+    std::shared_ptr<C2StreamColorAspectsInfo::output> mCodedColorAspects;
+    std::shared_ptr<C2StreamPictureQuantizationTuning::output> mPictureQuantization;
 };
-constexpr char COMPONENT_NAME[] = "c2.android.hevc.encoder";
 
 static size_t GetCPUCoreCount() {
-    long cpuCoreCount = 1;
+    long cpuCoreCount = 0;
+
 #if defined(_SC_NPROCESSORS_ONLN)
     cpuCoreCount = sysconf(_SC_NPROCESSORS_ONLN);
 #else
     // _SC_NPROC_ONLN must be defined...
     cpuCoreCount = sysconf(_SC_NPROC_ONLN);
 #endif
-    CHECK(cpuCoreCount >= 1);
-    ALOGV("Number of CPU cores: %ld", cpuCoreCount);
+
+    if (cpuCoreCount < 1)
+        cpuCoreCount = 1;
     return (size_t)cpuCoreCount;
 }
 
@@ -337,32 +591,27 @@ C2SoftHevcEnc::C2SoftHevcEnc(const char* name, c2_node_id_t id,
     CREATE_DUMP_FILE(mInFile);
     CREATE_DUMP_FILE(mOutFile);
 
-    gettimeofday(&mTimeStart, nullptr);
-    gettimeofday(&mTimeEnd, nullptr);
+    mTimeStart = mTimeEnd = systemTime();
 }
 
 C2SoftHevcEnc::~C2SoftHevcEnc() {
-    releaseEncoder();
+    onRelease();
 }
 
 c2_status_t C2SoftHevcEnc::onInit() {
-    return initEncoder();
+    return C2_OK;
 }
 
 c2_status_t C2SoftHevcEnc::onStop() {
-    if (!mStarted) {
-        return C2_OK;
-    }
-    return releaseEncoder();
+    return C2_OK;
 }
 
 void C2SoftHevcEnc::onReset() {
-    onStop();
-    initEncoder();
+    releaseEncoder();
 }
 
 void C2SoftHevcEnc::onRelease() {
-    onStop();
+    releaseEncoder();
 }
 
 c2_status_t C2SoftHevcEnc::onFlush_sm() {
@@ -381,9 +630,22 @@ static void fillEmptyWork(const std::unique_ptr<C2Work>& work) {
     work->workletsProcessed = 1u;
 }
 
+static int getQpFromQuality(int quality) {
+    int qp;
+#define MIN_QP 4
+#define MAX_QP 50
+    /* Quality: 100 -> Qp : MIN_QP
+     * Quality: 0 -> Qp : MAX_QP
+     * Qp = ((MIN_QP - MAX_QP) * quality / 100) + MAX_QP;
+     */
+    qp = ((MIN_QP - MAX_QP) * quality / 100) + MAX_QP;
+    qp = std::min(qp, MAX_QP);
+    qp = std::max(qp, MIN_QP);
+    return qp;
+}
 c2_status_t C2SoftHevcEnc::initEncParams() {
     mCodecCtx = nullptr;
-    mNumCores = MIN(GetCPUCoreCount(), CODEC_MAX_CORES);
+    mNumCores = std::min(GetCPUCoreCount(), (size_t) CODEC_MAX_CORES);
     memset(&mEncParams, 0, sizeof(ihevce_static_cfg_params_t));
 
     // default configuration
@@ -392,12 +654,57 @@ c2_status_t C2SoftHevcEnc::initEncParams() {
         ALOGE("HEVC default init failed : 0x%x", err);
         return C2_CORRUPTED;
     }
-
+    mBframes = 0;
+    if (mGop && mGop->flexCount() > 0) {
+        uint32_t syncInterval = 1;
+        uint32_t iInterval = 1;
+        uint32_t maxBframes = 0;
+        ParseGop(*mGop, &syncInterval, &iInterval, &maxBframes);
+        if (syncInterval > 0) {
+            ALOGD("Updating IDR interval from GOP: old %u new %u", mIDRInterval, syncInterval);
+            mIDRInterval = syncInterval;
+        }
+        if (iInterval > 0) {
+            ALOGD("Updating I interval from GOP: old %u new %u", mIInterval, iInterval);
+            mIInterval = iInterval;
+        }
+        if (mBframes != maxBframes) {
+            ALOGD("Updating max B frames from GOP: old %u new %u", mBframes, maxBframes);
+            mBframes = maxBframes;
+        }
+    }
+    ColorAspects sfAspects;
+    if (!C2Mapper::map(mColorAspects->primaries, &sfAspects.mPrimaries)) {
+        sfAspects.mPrimaries = android::ColorAspects::PrimariesUnspecified;
+    }
+    if (!C2Mapper::map(mColorAspects->range, &sfAspects.mRange)) {
+        sfAspects.mRange = android::ColorAspects::RangeUnspecified;
+    }
+    if (!C2Mapper::map(mColorAspects->matrix, &sfAspects.mMatrixCoeffs)) {
+        sfAspects.mMatrixCoeffs = android::ColorAspects::MatrixUnspecified;
+    }
+    if (!C2Mapper::map(mColorAspects->transfer, &sfAspects.mTransfer)) {
+        sfAspects.mTransfer = android::ColorAspects::TransferUnspecified;
+    }
+    int32_t primaries, transfer, matrixCoeffs;
+    bool range;
+    ColorUtils::convertCodecColorAspectsToIsoAspects(sfAspects,
+            &primaries,
+            &transfer,
+            &matrixCoeffs,
+            &range);
+    mEncParams.s_out_strm_prms.i4_vui_enable = 1;
+    mEncParams.s_vui_sei_prms.u1_colour_description_present_flag = 1;
+    mEncParams.s_vui_sei_prms.u1_colour_primaries = primaries;
+    mEncParams.s_vui_sei_prms.u1_transfer_characteristics = transfer;
+    mEncParams.s_vui_sei_prms.u1_matrix_coefficients = matrixCoeffs;
+    mEncParams.s_vui_sei_prms.u1_video_full_range_flag = range;
     // update configuration
     mEncParams.s_src_prms.i4_width = mSize->width;
     mEncParams.s_src_prms.i4_height = mSize->height;
     mEncParams.s_src_prms.i4_frm_rate_denom = 1000;
-    mEncParams.s_src_prms.i4_frm_rate_num = mFrameRate->value * mEncParams.s_src_prms.i4_frm_rate_denom;
+    mEncParams.s_src_prms.i4_frm_rate_num =
+        mFrameRate->value * mEncParams.s_src_prms.i4_frm_rate_denom;
     mEncParams.s_tgt_lyr_prms.as_tgt_params[0].i4_quality_preset = IHEVCE_QUALITY_P5;
     mEncParams.s_tgt_lyr_prms.as_tgt_params[0].ai4_tgt_bitrate[0] =
         mBitrate->value;
@@ -405,12 +712,78 @@ c2_status_t C2SoftHevcEnc::initEncParams() {
         mBitrate->value << 1;
     mEncParams.s_tgt_lyr_prms.as_tgt_params[0].i4_codec_level = mHevcEncLevel;
     mEncParams.s_coding_tools_prms.i4_max_i_open_gop_period = mIDRInterval;
-    mEncParams.s_coding_tools_prms.i4_max_cra_open_gop_period = mIDRInterval;
+    mEncParams.s_coding_tools_prms.i4_max_cra_open_gop_period = mIInterval;
     mIvVideoColorFormat = IV_YUV_420P;
     mEncParams.s_multi_thrd_prms.i4_max_num_cores = mNumCores;
     mEncParams.s_out_strm_prms.i4_codec_profile = mHevcEncProfile;
-    mEncParams.s_config_prms.i4_rate_control_mode = 2;
-    mEncParams.s_lap_prms.i4_rc_look_ahead_pics = 0;
+    mEncParams.s_lap_prms.i4_rc_look_ahead_pics = DEFAULT_RC_LOOKAHEAD;
+    if (mBframes == 0) {
+        mEncParams.s_coding_tools_prms.i4_max_temporal_layers = 0;
+    } else if (mBframes <= 2) {
+        mEncParams.s_coding_tools_prms.i4_max_temporal_layers = 1;
+    } else if (mBframes <= 6) {
+        mEncParams.s_coding_tools_prms.i4_max_temporal_layers = 2;
+    } else {
+        mEncParams.s_coding_tools_prms.i4_max_temporal_layers = 3;
+    }
+
+    // we resolved out-of-bound and unspecified values in PictureQuantizationSetter()
+    // so we can start with defaults that are overridden as needed.
+    int32_t maxFrameQP = mEncParams.s_config_prms.i4_max_frame_qp;
+    int32_t minFrameQP = mEncParams.s_config_prms.i4_min_frame_qp;
+
+    for (size_t i = 0; i < mQpBounds->flexCount(); ++i) {
+        const C2PictureQuantizationStruct &layer = mQpBounds->m.values[i];
+
+        // no need to loop, hevc library takes same range for I/P/B picture type
+        if (layer.type_ == C2Config::picture_type_t(I_FRAME) ||
+            layer.type_ == C2Config::picture_type_t(P_FRAME) ||
+            layer.type_ == C2Config::picture_type_t(B_FRAME)) {
+
+            maxFrameQP = layer.max;
+            minFrameQP = layer.min;
+            break;
+        }
+    }
+    mEncParams.s_config_prms.i4_max_frame_qp = maxFrameQP;
+    mEncParams.s_config_prms.i4_min_frame_qp = minFrameQP;
+
+    ALOGV("MaxFrameQp: %d MinFrameQp: %d", maxFrameQP, minFrameQP);
+
+    mEncParams.s_tgt_lyr_prms.as_tgt_params[0].ai4_frame_qp[0] =
+        std::clamp(kDefaultInitQP, minFrameQP, maxFrameQP);
+
+    switch (mBitrateMode->value) {
+        case C2Config::BITRATE_IGNORE: {
+            mEncParams.s_config_prms.i4_rate_control_mode = 3;
+            // ensure initial qp values are within our newly configured bounds
+            int32_t frameQp = getQpFromQuality(mQuality->value);
+            mEncParams.s_tgt_lyr_prms.as_tgt_params[0].ai4_frame_qp[0] =
+                std::clamp(frameQp, minFrameQP, maxFrameQP);
+            break;
+        }
+        case C2Config::BITRATE_CONST:
+            mEncParams.s_config_prms.i4_rate_control_mode = 5;
+            break;
+        case C2Config::BITRATE_VARIABLE:
+            [[fallthrough]];
+        default:
+            mEncParams.s_config_prms.i4_rate_control_mode = 2;
+            break;
+        break;
+    }
+
+    if (mComplexity->value == 10) {
+        mEncParams.s_tgt_lyr_prms.as_tgt_params[0].i4_quality_preset = IHEVCE_QUALITY_P0;
+    } else if (mComplexity->value >= 8) {
+        mEncParams.s_tgt_lyr_prms.as_tgt_params[0].i4_quality_preset = IHEVCE_QUALITY_P2;
+    } else if (mComplexity->value >= 7) {
+        mEncParams.s_tgt_lyr_prms.as_tgt_params[0].i4_quality_preset = IHEVCE_QUALITY_P3;
+    } else if (mComplexity->value >= 5) {
+        mEncParams.s_tgt_lyr_prms.as_tgt_params[0].i4_quality_preset = IHEVCE_QUALITY_P4;
+    } else {
+        mEncParams.s_tgt_lyr_prms.as_tgt_params[0].i4_quality_preset = IHEVCE_QUALITY_P5;
+    }
 
     return C2_OK;
 }
@@ -431,20 +804,28 @@ c2_status_t C2SoftHevcEnc::releaseEncoder() {
 
 c2_status_t C2SoftHevcEnc::drain(uint32_t drainMode,
                                  const std::shared_ptr<C2BlockPool>& pool) {
-    (void)drainMode;
-    (void)pool;
-    return C2_OK;
+    return drainInternal(drainMode, pool, nullptr);
 }
+
 c2_status_t C2SoftHevcEnc::initEncoder() {
     CHECK(!mCodecCtx);
+
     {
         IntfImpl::Lock lock = mIntf->lock();
         mSize = mIntf->getSize_l();
+        mBitrateMode = mIntf->getBitrateMode_l();
         mBitrate = mIntf->getBitrate_l();
         mFrameRate = mIntf->getFrameRate_l();
         mHevcEncProfile = mIntf->getProfile_l();
         mHevcEncLevel = mIntf->getLevel_l();
         mIDRInterval = mIntf->getSyncFramePeriod_l();
+        mIInterval = mIntf->getSyncFramePeriod_l();
+        mComplexity = mIntf->getComplexity_l();
+        mQuality = mIntf->getQuality_l();
+        mGop = mIntf->getGop_l();
+        mRequestSync = mIntf->getRequestSync_l();
+        mColorAspects = mIntf->getCodedColorAspects_l();
+        mQpBounds = mIntf->getPictureQuantization_l();;
     }
 
     c2_status_t status = initEncParams();
@@ -468,9 +849,9 @@ c2_status_t C2SoftHevcEnc::initEncoder() {
 
 c2_status_t C2SoftHevcEnc::setEncodeArgs(ihevce_inp_buf_t* ps_encode_ip,
                                          const C2GraphicView* const input,
-                                         uint64_t timestamp) {
+                                         uint64_t workIndex) {
     ihevce_static_cfg_params_t* params = &mEncParams;
-    memset(ps_encode_ip, 0, sizeof(ihevce_inp_buf_t));
+    memset(ps_encode_ip, 0, sizeof(*ps_encode_ip));
 
     if (!input) {
         return C2_OK;
@@ -495,13 +876,14 @@ c2_status_t C2SoftHevcEnc::setEncodeArgs(ihevce_inp_buf_t* ps_encode_ip,
     int32_t uStride = layout.planes[C2PlanarLayout::PLANE_U].rowInc;
     int32_t vStride = layout.planes[C2PlanarLayout::PLANE_V].rowInc;
 
-    uint32_t width = mSize->width;
-    uint32_t height = mSize->height;
+    const uint32_t width = mSize->width;
+    const uint32_t height = mSize->height;
 
-    // width and height are always even
-    // width and height are always even (as block size is 16x16)
-    CHECK_EQ((width & 1u), 0u);
-    CHECK_EQ((height & 1u), 0u);
+    // width and height must be even
+    if (width & 1u || height & 1u) {
+        ALOGW("height(%u) and width(%u) must both be even", height, width);
+        return C2_BAD_VALUE;
+    }
 
     size_t yPlaneSize = width * height;
 
@@ -519,7 +901,8 @@ c2_status_t C2SoftHevcEnc::setEncodeArgs(ihevce_inp_buf_t* ps_encode_ip,
             yStride = width;
             uStride = vStride = yStride / 2;
             ConvertRGBToPlanarYUV(yPlane, yStride, height,
-                                  conversionBuffer.size(), *input);
+                                  conversionBuffer.size(), *input,
+                                  mColorAspects->matrix, mColorAspects->range);
             break;
         }
         case C2PlanarLayout::TYPE_YUV: {
@@ -611,7 +994,92 @@ c2_status_t C2SoftHevcEnc::setEncodeArgs(ihevce_inp_buf_t* ps_encode_ip,
     ps_encode_ip->i4_curr_peak_bitrate =
         params->s_tgt_lyr_prms.as_tgt_params[0].ai4_peak_bitrate[0];
     ps_encode_ip->i4_curr_rate_factor = params->s_config_prms.i4_rate_factor;
-    ps_encode_ip->u8_pts = timestamp;
+    ps_encode_ip->u8_pts = workIndex;
+    return C2_OK;
+}
+
+void C2SoftHevcEnc::finishWork(uint64_t index,
+                               const std::unique_ptr<C2Work>& work,
+                               const std::shared_ptr<C2BlockPool>& pool,
+                               ihevce_out_buf_t* ps_encode_op) {
+    std::shared_ptr<C2LinearBlock> block;
+    C2MemoryUsage usage = {C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE};
+    c2_status_t status =
+        pool->fetchLinearBlock(ps_encode_op->i4_bytes_generated, usage, &block);
+    if (C2_OK != status) {
+        ALOGE("fetchLinearBlock for Output failed with status 0x%x", status);
+        mSignalledError = true;
+        work->result = status;
+        work->workletsProcessed = 1u;
+        return;
+    }
+    C2WriteView wView = block->map().get();
+    if (C2_OK != wView.error()) {
+        ALOGE("write view map failed with status 0x%x", wView.error());
+        mSignalledError = true;
+        work->result = wView.error();
+        work->workletsProcessed = 1u;
+        return;
+    }
+    memcpy(wView.data(), ps_encode_op->pu1_output_buf,
+           ps_encode_op->i4_bytes_generated);
+
+    std::shared_ptr<C2Buffer> buffer =
+        createLinearBuffer(block, 0, ps_encode_op->i4_bytes_generated);
+
+    DUMP_TO_FILE(mOutFile, ps_encode_op->pu1_output_buf,
+                 ps_encode_op->i4_bytes_generated);
+
+    if (ps_encode_op->i4_is_key_frame) {
+        ALOGV("IDR frame produced");
+        buffer->setInfo(std::make_shared<C2StreamPictureTypeMaskInfo::output>(
+            0u /* stream id */, C2Config::SYNC_FRAME));
+    }
+
+    auto fillWork = [buffer](const std::unique_ptr<C2Work>& work) {
+        work->worklets.front()->output.flags = (C2FrameData::flags_t)0;
+        work->worklets.front()->output.buffers.clear();
+        work->worklets.front()->output.buffers.push_back(buffer);
+        work->worklets.front()->output.ordinal = work->input.ordinal;
+        work->workletsProcessed = 1u;
+    };
+    if (work && c2_cntr64_t(index) == work->input.ordinal.frameIndex) {
+        fillWork(work);
+        if (mSignalledEos) {
+            work->worklets.front()->output.flags =
+                C2FrameData::FLAG_END_OF_STREAM;
+        }
+    } else {
+        finish(index, fillWork);
+    }
+}
+
+c2_status_t C2SoftHevcEnc::drainInternal(
+        uint32_t drainMode,
+        const std::shared_ptr<C2BlockPool> &pool,
+        const std::unique_ptr<C2Work> &work) {
+
+    if (drainMode == NO_DRAIN) {
+        ALOGW("drain with NO_DRAIN: no-op");
+        return C2_OK;
+    }
+    if (drainMode == DRAIN_CHAIN) {
+        ALOGW("DRAIN_CHAIN not supported");
+        return C2_OMITTED;
+    }
+
+    while (true) {
+        ihevce_out_buf_t s_encode_op{};
+        memset(&s_encode_op, 0, sizeof(s_encode_op));
+
+        ihevce_encode(mCodecCtx, nullptr, &s_encode_op);
+        if (s_encode_op.i4_bytes_generated) {
+            finishWork(s_encode_op.u8_pts, work, pool, &s_encode_op);
+        } else {
+            if (work->workletsProcessed != 1u) fillEmptyWork(work);
+            break;
+        }
+    }
     return C2_OK;
 }
 
@@ -619,7 +1087,7 @@ void C2SoftHevcEnc::process(const std::unique_ptr<C2Work>& work,
                             const std::shared_ptr<C2BlockPool>& pool) {
     // Initialize output work
     work->result = C2_OK;
-    work->workletsProcessed = 1u;
+    work->workletsProcessed = 0u;
     work->worklets.front()->output.flags = work->input.flags;
 
     if (mSignalledError || mSignalledEos) {
@@ -636,6 +1104,7 @@ void C2SoftHevcEnc::process(const std::unique_ptr<C2Work>& work,
             ALOGE("Failed to initialize encoder : 0x%x", status);
             mSignalledError = true;
             work->result = status;
+            work->workletsProcessed = 1u;
             return;
         }
     }
@@ -643,6 +1112,8 @@ void C2SoftHevcEnc::process(const std::unique_ptr<C2Work>& work,
     std::shared_ptr<const C2GraphicView> view;
     std::shared_ptr<C2Buffer> inputBuffer = nullptr;
     bool eos = ((work->input.flags & C2FrameData::FLAG_END_OF_STREAM) != 0);
+    if (eos) mSignalledEos = true;
+
     if (!work->input.buffers.empty()) {
         inputBuffer = work->input.buffers[0];
         view = std::make_shared<const C2GraphicView>(
@@ -650,13 +1121,13 @@ void C2SoftHevcEnc::process(const std::unique_ptr<C2Work>& work,
         if (view->error() != C2_OK) {
             ALOGE("graphic view map err = %d", view->error());
             mSignalledError = true;
+            work->result = C2_CORRUPTED;
+            work->workletsProcessed = 1u;
             return;
         }
     }
-
     IHEVCE_PLUGIN_STATUS_T err = IHEVCE_EOK;
 
-    fillEmptyWork(work);
     if (!mSpsPpsHeaderReceived) {
         ihevce_out_buf_t s_header_op{};
         err = ihevce_encode_header(mCodecCtx, &s_header_op);
@@ -668,6 +1139,7 @@ void C2SoftHevcEnc::process(const std::unique_ptr<C2Work>& work,
                 ALOGE("CSD allocation failed");
                 mSignalledError = true;
                 work->result = C2_NO_MEMORY;
+                work->workletsProcessed = 1u;
                 return;
             }
             memcpy(csd->m.value, s_header_op.pu1_output_buf,
@@ -678,80 +1150,91 @@ void C2SoftHevcEnc::process(const std::unique_ptr<C2Work>& work,
             mSpsPpsHeaderReceived = true;
         }
         if (!inputBuffer) {
+            work->workletsProcessed = 1u;
             return;
         }
     }
+
+    // handle dynamic bitrate change
+    {
+        IntfImpl::Lock lock = mIntf->lock();
+        std::shared_ptr<C2StreamBitrateInfo::output> bitrate = mIntf->getBitrate_l();
+        lock.unlock();
+
+        if (bitrate != mBitrate) {
+            mBitrate = bitrate;
+            mEncParams.s_tgt_lyr_prms.as_tgt_params[0].ai4_tgt_bitrate[0] =
+                mBitrate->value;
+            mEncParams.s_tgt_lyr_prms.as_tgt_params[0].ai4_peak_bitrate[0] =
+                mBitrate->value << 1;
+        }
+    }
+
     ihevce_inp_buf_t s_encode_ip{};
     ihevce_out_buf_t s_encode_op{};
-    uint64_t timestamp = work->input.ordinal.timestamp.peekull();
+    uint64_t workIndex = work->input.ordinal.frameIndex.peekull();
 
-    status = setEncodeArgs(&s_encode_ip, view.get(), timestamp);
+    status = setEncodeArgs(&s_encode_ip, view.get(), workIndex);
     if (C2_OK != status) {
-        mSignalledError = true;
         ALOGE("setEncodeArgs failed : 0x%x", status);
-        work->result = status;
-        return;
-    }
-
-    uint64_t timeDelay = 0;
-    uint64_t timeTaken = 0;
-    GETTIME(&mTimeStart, nullptr);
-    TIME_DIFF(mTimeEnd, mTimeStart, timeDelay);
-
-    ihevce_inp_buf_t* ps_encode_ip = (inputBuffer) ? &s_encode_ip : nullptr;
-
-    err = ihevce_encode(mCodecCtx, ps_encode_ip, &s_encode_op);
-    if (IHEVCE_EOK != err) {
-        ALOGE("Encode Frame failed : 0x%x", err);
         mSignalledError = true;
-        work->result = C2_CORRUPTED;
+        work->result = status;
+        work->workletsProcessed = 1u;
         return;
     }
+    // handle request key frame
+    {
+        IntfImpl::Lock lock = mIntf->lock();
+        std::shared_ptr<C2StreamRequestSyncFrameTuning::output> requestSync;
+        requestSync = mIntf->getRequestSync_l();
+        lock.unlock();
+        if (requestSync != mRequestSync) {
+            // we can handle IDR immediately
+            if (requestSync->value) {
+                // unset request
+                C2StreamRequestSyncFrameTuning::output clearSync(0u, C2_FALSE);
+                std::vector<std::unique_ptr<C2SettingResult>> failures;
+                mIntf->config({ &clearSync }, C2_MAY_BLOCK, &failures);
+                ALOGV("Got sync request");
+                //Force this as an IDR frame
+                s_encode_ip.i4_force_idr_flag = 1;
+            }
+            mRequestSync = requestSync;
+        }
+    }
 
-    GETTIME(&mTimeEnd, nullptr);
+    nsecs_t timeDelay = 0;
+    nsecs_t timeTaken = 0;
+    memset(&s_encode_op, 0, sizeof(s_encode_op));
+    mTimeStart = systemTime();
+    timeDelay = mTimeStart - mTimeEnd;
+
+    if (inputBuffer) {
+        err = ihevce_encode(mCodecCtx, &s_encode_ip, &s_encode_op);
+        if (IHEVCE_EOK != err) {
+            ALOGE("Encode Frame failed : 0x%x", err);
+            mSignalledError = true;
+            work->result = C2_CORRUPTED;
+            work->workletsProcessed = 1u;
+            return;
+        }
+    } else if (!eos) {
+        fillEmptyWork(work);
+    }
+
     /* Compute time taken for decode() */
-    TIME_DIFF(mTimeStart, mTimeEnd, timeTaken);
+    mTimeEnd = systemTime();
+    timeTaken = mTimeEnd - mTimeStart;
 
-    ALOGV("timeTaken=%6d delay=%6d numBytes=%6d", (int)timeTaken,
-          (int)timeDelay, s_encode_op.i4_bytes_generated);
+    ALOGV("timeTaken=%6" PRId64 " delay=%6" PRId64 " numBytes=%6d", timeTaken,
+          timeDelay, s_encode_op.i4_bytes_generated);
 
     if (s_encode_op.i4_bytes_generated) {
-        std::shared_ptr<C2LinearBlock> block;
-        C2MemoryUsage usage = {C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE};
-        status = pool->fetchLinearBlock(s_encode_op.i4_bytes_generated, usage, &block);
-        if (C2_OK != status) {
-            ALOGE("fetchLinearBlock for Output failed with status 0x%x", status);
-            work->result = C2_NO_MEMORY;
-            mSignalledError = true;
-            return;
-        }
-        C2WriteView wView = block->map().get();
-        if (C2_OK != wView.error()) {
-            ALOGE("write view map failed with status 0x%x", wView.error());
-            work->result = wView.error();
-            mSignalledError = true;
-            return;
-        }
-        memcpy(wView.data(), s_encode_op.pu1_output_buf,
-               s_encode_op.i4_bytes_generated);
-
-        std::shared_ptr<C2Buffer> buffer =
-            createLinearBuffer(block, 0, s_encode_op.i4_bytes_generated);
-
-        DUMP_TO_FILE(mOutFile, s_encode_op.pu1_output_buf,
-                     s_encode_op.i4_bytes_generated);
-
-        work->worklets.front()->output.ordinal.timestamp = s_encode_op.u8_pts;
-        if (s_encode_op.i4_is_key_frame) {
-            ALOGV("IDR frame produced");
-            buffer->setInfo(
-                std::make_shared<C2StreamPictureTypeMaskInfo::output>(
-                    0u /* stream id */, C2Config::SYNC_FRAME));
-        }
-        work->worklets.front()->output.buffers.push_back(buffer);
+        finishWork(s_encode_op.u8_pts, work, pool, &s_encode_op);
     }
+
     if (eos) {
-        mSignalledEos = true;
+        drainInternal(DRAIN_COMPONENT_WITH_EOS, pool, work);
     }
 }
 
@@ -761,8 +1244,9 @@ class C2SoftHevcEncFactory : public C2ComponentFactory {
         : mHelper(std::static_pointer_cast<C2ReflectorHelper>(
               GetCodec2PlatformComponentStore()->getParamReflector())) {}
 
-    virtual c2_status_t createComponent(
-        c2_node_id_t id, std::shared_ptr<C2Component>* const component,
+    c2_status_t createComponent(
+        c2_node_id_t id,
+        std::shared_ptr<C2Component>* const component,
         std::function<void(C2Component*)> deleter) override {
         *component = std::shared_ptr<C2Component>(
             new C2SoftHevcEnc(
@@ -772,8 +1256,9 @@ class C2SoftHevcEncFactory : public C2ComponentFactory {
         return C2_OK;
     }
 
-    virtual c2_status_t createInterface(
-        c2_node_id_t id, std::shared_ptr<C2ComponentInterface>* const interface,
+    c2_status_t createInterface(
+        c2_node_id_t id,
+        std::shared_ptr<C2ComponentInterface>* const interface,
         std::function<void(C2ComponentInterface*)> deleter) override {
         *interface = std::shared_ptr<C2ComponentInterface>(
             new SimpleInterface<C2SoftHevcEnc::IntfImpl>(
@@ -783,7 +1268,7 @@ class C2SoftHevcEncFactory : public C2ComponentFactory {
         return C2_OK;
     }
 
-    virtual ~C2SoftHevcEncFactory() override = default;
+    ~C2SoftHevcEncFactory() override = default;
 
    private:
     std::shared_ptr<C2ReflectorHelper> mHelper;
@@ -791,11 +1276,13 @@ class C2SoftHevcEncFactory : public C2ComponentFactory {
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftHevcEncFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

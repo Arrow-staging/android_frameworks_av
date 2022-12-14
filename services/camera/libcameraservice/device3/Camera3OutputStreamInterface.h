@@ -34,7 +34,7 @@ class Camera3OutputStreamInterface : public virtual Camera3StreamInterface {
      * Set the transform on the output stream; one of the
      * HAL_TRANSFORM_* / NATIVE_WINDOW_TRANSFORM_* constants.
      */
-    virtual status_t setTransform(int transform) = 0;
+    virtual status_t setTransform(int transform, bool mayChangeMirror) = 0;
 
     /**
      * Return if this output stream is for video encoding.
@@ -95,6 +95,48 @@ class Camera3OutputStreamInterface : public virtual Camera3StreamInterface {
      * Query the physical camera id for the output stream.
      */
     virtual const String8& getPhysicalCameraId() const = 0;
+
+    /**
+     * Set the batch size for buffer operations. The output stream will request
+     * buffers from buffer queue on a batch basis. Currently only video streams
+     * are allowed to set the batch size. Also if the stream is managed by
+     * buffer manager (Surface group in Java API) then batching is also not
+     * supported. Changing batch size on the fly while there is already batched
+     * buffers in the stream is also not supported.
+     * If the batch size is larger than the max dequeue count set
+     * by the camera HAL, the batch size will be set to the max dequeue count
+     * instead.
+     */
+    virtual status_t setBatchSize(size_t batchSize = 1) = 0;
+
+    /**
+     * Notify the output stream that the minimum frame duration has changed, or
+     * frame rate has switched between variable and fixed.
+     *
+     * The minimum frame duration is calculated based on the upper bound of
+     * AE_TARGET_FPS_RANGE in the capture request.
+     */
+    virtual void onMinDurationChanged(nsecs_t duration, bool fixedFps) = 0;
+};
+
+// Helper class to organize a synchronized mapping of stream IDs to stream instances
+class StreamSet {
+  public:
+    status_t add(int streamId, sp<camera3::Camera3OutputStreamInterface>);
+    ssize_t remove(int streamId);
+    sp<camera3::Camera3OutputStreamInterface> get(int streamId);
+    // get by (underlying) vector index
+    sp<camera3::Camera3OutputStreamInterface> operator[] (size_t index);
+    size_t size() const;
+    std::vector<int> getStreamIds();
+    void clear();
+
+    StreamSet() {};
+    StreamSet(const StreamSet& other);
+
+  private:
+    mutable std::mutex mLock;
+    KeyedVector<int, sp<camera3::Camera3OutputStreamInterface>> mData;
 };
 
 } // namespace camera3

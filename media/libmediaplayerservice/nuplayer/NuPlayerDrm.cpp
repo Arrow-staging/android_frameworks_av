@@ -19,8 +19,7 @@
 
 #include "NuPlayerDrm.h"
 
-#include <binder/IServiceManager.h>
-#include <mediadrm/IMediaDrmService.h>
+#include <mediadrm/DrmUtils.h>
 #include <utils/Log.h>
 
 
@@ -30,60 +29,13 @@ namespace android {
 
 sp<IDrm> NuPlayerDrm::CreateDrm(status_t *pstatus)
 {
-    status_t &status = *pstatus;
-    sp<IServiceManager> sm = defaultServiceManager();
-    sp<IBinder> binder = sm->getService(String16("media.drm"));
-    ALOGV("CreateDrm binder %p", (binder != NULL ? binder.get() : 0));
-
-    sp<IMediaDrmService> service = interface_cast<IMediaDrmService>(binder);
-    if (service == NULL) {
-        ALOGE("CreateDrm failed at IMediaDrmService");
-        return NULL;
-    }
-
-    sp<IDrm> drm = service->makeDrm();
-    if (drm == NULL) {
-        ALOGE("CreateDrm failed at makeDrm");
-        return NULL;
-    }
-
-    // this is before plugin creation so NO_INIT is fine
-    status = drm->initCheck();
-    if (status != OK && status != NO_INIT) {
-        ALOGE("CreateDrm failed drm->initCheck(): %d", status);
-        return NULL;
-    }
-    return drm;
+    return DrmUtils::MakeDrm(pstatus);
 }
 
 sp<ICrypto> NuPlayerDrm::createCrypto(status_t *pstatus)
 {
-    status_t &status = *pstatus;
-    sp<IServiceManager> sm = defaultServiceManager();
-    sp<IBinder> binder = sm->getService(String16("media.drm"));
 
-    sp<IMediaDrmService> service = interface_cast<IMediaDrmService>(binder);
-    if (service == NULL) {
-        status = UNKNOWN_ERROR;
-        ALOGE("CreateCrypto failed at IMediaDrmService");
-        return NULL;
-    }
-
-    sp<ICrypto> crypto = service->makeCrypto();
-    if (crypto == NULL) {
-        status = UNKNOWN_ERROR;
-        ALOGE("createCrypto failed");
-        return NULL;
-    }
-
-    // this is before plugin creation so NO_INIT is fine
-    status = crypto->initCheck();
-    if (status != OK && status != NO_INIT) {
-        ALOGE("createCrypto failed crypto->initCheck(): %d", status);
-        return NULL;
-    }
-
-    return crypto;
+    return DrmUtils::MakeCrypto(pstatus);
 }
 
 Vector<DrmUUID> NuPlayerDrm::parsePSSH(const void *pssh, size_t psshsize)
@@ -239,8 +191,8 @@ NuPlayerDrm::CryptoInfo *NuPlayerDrm::makeCryptoInfo(
         uint8_t key[kBlockSize],
         uint8_t iv[kBlockSize],
         CryptoPlugin::Mode mode,
-        size_t *clearbytes,
-        size_t *encryptedbytes)
+        uint32_t *clearbytes,
+        uint32_t *encryptedbytes)
 {
     // size needed to store all the crypto data
     size_t cryptosize;
@@ -284,7 +236,7 @@ NuPlayerDrm::CryptoInfo *NuPlayerDrm::getSampleCryptoInfo(MetaDataBase &meta)
     if (!meta.findData(kKeyEncryptedSizes, &type, &crypteddata, &cryptedsize)) {
         return NULL;
     }
-    size_t numSubSamples = cryptedsize / sizeof(size_t);
+    size_t numSubSamples = cryptedsize / sizeof(uint32_t);
 
     if (numSubSamples <= 0) {
         ALOGE("getSampleCryptoInfo INVALID numSubSamples: %zu", numSubSamples);
@@ -333,8 +285,8 @@ NuPlayerDrm::CryptoInfo *NuPlayerDrm::getSampleCryptoInfo(MetaDataBase &meta)
             (uint8_t*) key,
             (uint8_t*) iv,
             (CryptoPlugin::Mode)mode,
-            (size_t*) cleardata,
-            (size_t*) crypteddata);
+            (uint32_t*) cleardata,
+            (uint32_t*) crypteddata);
 }
 
 }   // namespace android

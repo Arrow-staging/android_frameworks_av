@@ -19,6 +19,7 @@
 
 #include "ProductStrategy.h"
 
+#include <media/AudioProductStrategy.h>
 #include <media/TypeConverter.h>
 #include <utils/String8.h>
 #include <cstdint>
@@ -72,10 +73,18 @@ bool ProductStrategy::matches(const audio_attributes_t attr) const
 audio_stream_type_t ProductStrategy::getStreamTypeForAttributes(
         const audio_attributes_t &attr) const
 {
-    const auto iter = std::find_if(begin(mAttributesVector), end(mAttributesVector),
+    const auto &iter = std::find_if(begin(mAttributesVector), end(mAttributesVector),
                                    [&attr](const auto &supportedAttr) {
         return AudioProductStrategy::attributesMatches(supportedAttr.mAttributes, attr); });
-    return iter != end(mAttributesVector) ? iter->mStream : AUDIO_STREAM_DEFAULT;
+    if (iter == end(mAttributesVector)) {
+        return AUDIO_STREAM_DEFAULT;
+    }
+    audio_stream_type_t streamType = iter->mStream;
+    ALOGW_IF(streamType == AUDIO_STREAM_DEFAULT,
+             "%s: Strategy %s supporting attributes %s has not stream type associated"
+             "fallback on MUSIC. Do not use stream volume API", __func__, mName.c_str(),
+             toString(attr).c_str());
+    return streamType != AUDIO_STREAM_DEFAULT ? streamType : AUDIO_STREAM_MUSIC;
 }
 
 audio_attributes_t ProductStrategy::getAttributesForStreamType(audio_stream_type_t streamType) const
@@ -141,11 +150,8 @@ volume_group_t ProductStrategy::getDefaultVolumeGroup() const
 void ProductStrategy::dump(String8 *dst, int spaces) const
 {
     dst->appendFormat("\n%*s-%s (id: %d)\n", spaces, "", mName.c_str(), mId);
-    std::string deviceLiteral;
-    if (!OutputDeviceConverter::toString(mApplicableDevices, deviceLiteral)) {
-        ALOGE("%s: failed to convert device %d", __FUNCTION__, mApplicableDevices);
-    }
-    dst->appendFormat("%*sSelected Device: {type:%s, @:%s}\n", spaces + 2, "",
+    std::string deviceLiteral = deviceTypesToString(mApplicableDevices);
+    dst->appendFormat("%*sSelected Device: {%s, @:%s}\n", spaces + 2, "",
                        deviceLiteral.c_str(), mDeviceAddress.c_str());
 
     for (const auto &attr : mAttributesVector) {
@@ -159,7 +165,7 @@ void ProductStrategy::dump(String8 *dst, int spaces) const
 }
 
 product_strategy_t ProductStrategyMap::getProductStrategyForAttributes(
-        const audio_attributes_t &attr) const
+        const audio_attributes_t &attr, bool fallbackOnDefault) const
 {
     for (const auto &iter : *this) {
         if (iter.second->matches(attr)) {
@@ -168,7 +174,7 @@ product_strategy_t ProductStrategyMap::getProductStrategyForAttributes(
     }
     ALOGV("%s: No matching product strategy for attributes %s, return default", __FUNCTION__,
           toString(attr).c_str());
-    return getDefault();
+    return fallbackOnDefault? getDefault() : PRODUCT_STRATEGY_NONE;
 }
 
 audio_attributes_t ProductStrategyMap::getAttributesForStreamType(audio_stream_type_t stream) const
@@ -235,14 +241,14 @@ product_strategy_t ProductStrategyMap::getProductStrategyForStream(audio_stream_
 }
 
 
-audio_devices_t ProductStrategyMap::getDeviceTypesForProductStrategy(
+DeviceTypeSet ProductStrategyMap::getDeviceTypesForProductStrategy(
         product_strategy_t strategy) const
 {
     if (find(strategy) == end()) {
         ALOGE("Invalid %d strategy requested, returning device for default strategy", strategy);
         product_strategy_t defaultStrategy = getDefault();
         if (defaultStrategy == PRODUCT_STRATEGY_NONE) {
-            return AUDIO_DEVICE_NONE;
+            return {AUDIO_DEVICE_NONE};
         }
         return at(getDefault())->getDeviceTypes();
     }
@@ -262,7 +268,8 @@ std::string ProductStrategyMap::getDeviceAddressForProductStrategy(product_strat
     return at(psId)->getDeviceAddress();
 }
 
-volume_group_t ProductStrategyMap::getVolumeGroupForAttributes(const audio_attributes_t &attr) const
+volume_group_t ProductStrategyMap::getVolumeGroupForAttributes(
+        const audio_attributes_t &attr, bool fallbackOnDefault) const
 {
     for (const auto &iter : *this) {
         volume_group_t group = iter.second->getVolumeGroupForAttributes(attr);
@@ -270,14 +277,11 @@ volume_group_t ProductStrategyMap::getVolumeGroupForAttributes(const audio_attri
             return group;
         }
     }
-    product_strategy_t defaultStrategy = getDefault();
-    if (defaultStrategy == PRODUCT_STRATEGY_NONE) {
-        return VOLUME_GROUP_NONE;
-    }
-    return at(defaultStrategy)->getDefaultVolumeGroup();
+    return fallbackOnDefault ? getDefaultVolumeGroup() : VOLUME_GROUP_NONE;
 }
 
-volume_group_t ProductStrategyMap::getVolumeGroupForStreamType(audio_stream_type_t stream) const
+volume_group_t ProductStrategyMap::getVolumeGroupForStreamType(
+        audio_stream_type_t stream, bool fallbackOnDefault) const
 {
     for (const auto &iter : *this) {
         volume_group_t group = iter.second->getVolumeGroupForStreamType(stream);
@@ -285,6 +289,12 @@ volume_group_t ProductStrategyMap::getVolumeGroupForStreamType(audio_stream_type
             return group;
         }
     }
+    ALOGW("%s: no volume group for %s, using default", __func__, toString(stream).c_str());
+    return fallbackOnDefault ? getDefaultVolumeGroup() : VOLUME_GROUP_NONE;
+}
+
+volume_group_t ProductStrategyMap::getDefaultVolumeGroup() const
+{
     product_strategy_t defaultStrategy = getDefault();
     if (defaultStrategy == PRODUCT_STRATEGY_NONE) {
         return VOLUME_GROUP_NONE;
@@ -306,5 +316,16 @@ void ProductStrategyMap::dump(String8 *dst, int spaces) const
     }
 }
 
+void dumpProductStrategyDevicesRoleMap(
+        const ProductStrategyDevicesRoleMap& productStrategyDeviceRoleMap,
+        String8 *dst,
+        int spaces) {
+    dst->appendFormat("\n%*sDevice role per product strategy dump:", spaces, "");
+    for (const auto& [strategyRolePair, devices] : productStrategyDeviceRoleMap) {
+        dst->appendFormat("\n%*sStrategy(%u) Device Role(%u) Devices(%s)", spaces + 2, "",
+                strategyRolePair.first, strategyRolePair.second,
+                dumpAudioDeviceTypeAddrVector(devices, true /*includeSensitiveInfo*/).c_str());
+    }
+    dst->appendFormat("\n");
 }
-
+}

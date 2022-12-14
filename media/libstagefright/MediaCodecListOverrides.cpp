@@ -18,11 +18,9 @@
 #define LOG_TAG "MediaCodecListOverrides"
 #include <utils/Log.h>
 
-#include "MediaCodecListOverrides.h"
-
 #include <cutils/properties.h>
 #include <gui/Surface.h>
-#include <media/ICrypto.h>
+#include <mediadrm/ICrypto.h>
 #include <media/IMediaCodecList.h>
 #include <media/MediaCodecInfo.h>
 #include <media/MediaResourcePolicy.h>
@@ -30,6 +28,7 @@
 #include <media/stagefright/foundation/AMessage.h>
 #include <media/stagefright/MediaCodec.h>
 #include <media/stagefright/MediaCodecList.h>
+#include <media/stagefright/MediaCodecListOverrides.h>
 
 namespace android {
 
@@ -264,7 +263,9 @@ void profileCodecs(
             }
         }
     }
-    global_results->add(kPolicySupportsMultipleSecureCodecs, supportMultipleSecureCodecs);
+    global_results->add(
+            MediaResourcePolicy::kPolicySupportsMultipleSecureCodecs(),
+            supportMultipleSecureCodecs);
 }
 
 static AString globalResultsToXml(const CodecSettings &results) {

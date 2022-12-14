@@ -20,6 +20,7 @@
 #include <map>
 #include <set>
 #include <condition_variable>
+#include <utils/Timers.h>
 #include "Accessor.h"
 
 namespace android {
@@ -71,13 +72,16 @@ public:
 
     static void createInvalidator();
 
+    static void createEvictor();
+
 private:
     // ConnectionId = pid : (timestamp_created + seqId)
     // in order to guarantee uniqueness for each connection
     static uint32_t sSeqId;
-    static int32_t sPid;
 
     const std::shared_ptr<BufferPoolAllocator> mAllocator;
+
+    nsecs_t mScheduleEvictTs;
 
     /**
      * Buffer pool implementation.
@@ -111,6 +115,7 @@ private:
 
         std::map<BufferId, std::unique_ptr<InternalBuffer>> mBuffers;
         std::set<BufferId> mFreeBuffers;
+        std::set<ConnectionId> mConnectionIds;
 
         struct Invalidation {
             static std::atomic<std::uint32_t> sInvSeqId;
@@ -187,6 +192,12 @@ private:
             Stats()
                 : mSizeCached(0), mBuffersCached(0), mSizeInUse(0), mBuffersInUse(0),
                   mTotalAllocations(0), mTotalRecycles(0), mTotalTransfers(0), mTotalFetches(0) {}
+
+            /// # of currently unused buffers
+            size_t buffersNotInUse() const {
+                ALOG_ASSERT(mBuffersCached >= mBuffersInUse);
+                return mBuffersCached - mBuffersInUse;
+            }
 
             /// A new buffer is allocated on an allocation request.
             void onBufferAllocated(size_t allocSize) {
@@ -389,6 +400,25 @@ private:
         std::mutex &mutex,
         std::condition_variable &cv,
         bool &ready);
+
+    struct AccessorEvictor {
+        std::map<const std::weak_ptr<Accessor::Impl>, nsecs_t, std::owner_less<>> mAccessors;
+        std::mutex mMutex;
+        std::condition_variable mCv;
+
+        AccessorEvictor();
+        void addAccessor(const std::weak_ptr<Accessor::Impl> &impl, nsecs_t ts);
+    };
+
+    static std::unique_ptr<AccessorEvictor> sEvictor;
+
+    static void evictorThread(
+        std::map<const std::weak_ptr<Accessor::Impl>, nsecs_t, std::owner_less<>> &accessors,
+        std::mutex &mutex,
+        std::condition_variable &cv);
+
+    void scheduleEvictIfNeeded();
+
 };
 
 }  // namespace implementation

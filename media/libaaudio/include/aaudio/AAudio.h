@@ -20,7 +20,7 @@
  */
 
 /**
- * @file AAudio.h
+ * @file aaudio/AAudio.h
  */
 
 /**
@@ -29,6 +29,8 @@
 #ifndef AAUDIO_AAUDIO_H
 #define AAUDIO_AAUDIO_H
 
+#include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 
 #ifdef __cplusplus
@@ -37,7 +39,7 @@ extern "C" {
 
 /**
  * This is used to represent a value that has not been specified.
- * For example, an application could use AAUDIO_UNSPECIFIED to indicate
+ * For example, an application could use {@link #AAUDIO_UNSPECIFIED} to indicate
  * that is did not not care what the specific value of a parameter was
  * and would accept whatever it was given.
  */
@@ -63,7 +65,7 @@ enum {
 
     /**
      * This format uses the int16_t data type.
-     * The maximum range of the data is -32768 to 32767.
+     * The maximum range of the data is -32768 (0x8000) to 32767 (0x7FFF).
      */
     AAUDIO_FORMAT_PCM_I16,
 
@@ -72,10 +74,37 @@ enum {
      * The nominal range of the data is [-1.0f, 1.0f).
      * Values outside that range may be clipped.
      *
-     * See also 'floatData' at
-     * https://developer.android.com/reference/android/media/AudioTrack#write(float[],%20int,%20int,%20int)
+     * See also the float Data in
+     * <a href="/reference/android/media/AudioTrack#write(float[],%20int,%20int,%20int)">
+     *   write(float[], int, int, int)</a>.
      */
-    AAUDIO_FORMAT_PCM_FLOAT
+    AAUDIO_FORMAT_PCM_FLOAT,
+
+    /**
+     * This format uses 24-bit samples packed into 3 bytes.
+     * The bytes are in little-endian order, so the least significant byte
+     * comes first in the byte array.
+     *
+     * The maximum range of the data is -8388608 (0x800000)
+     * to 8388607 (0x7FFFFF).
+     *
+     * Note that the lower precision bits may be ignored by the device.
+     *
+     * Available since API level 31.
+     */
+    AAUDIO_FORMAT_PCM_I24_PACKED,
+
+    /**
+     * This format uses 32-bit samples stored in an int32_t data type.
+     * The maximum range of the data is -2147483648 (0x80000000)
+     * to 2147483647 (0x7FFFFFFF).
+     *
+     * Note that the lower precision bits may be ignored by the device.
+     *
+     * Available since API level 31.
+     */
+    AAUDIO_FORMAT_PCM_I32
+
 };
 typedef int32_t aaudio_format_t;
 
@@ -170,21 +199,69 @@ enum {
 };
 typedef int32_t  aaudio_result_t;
 
+/**
+ * AAudio Stream states, for details, refer to
+ * <a href="/ndk/guides/audio/aaudio/aaudio#using-streams">Using an Audio Stream</a>
+ */
 enum
 {
+
+    /**
+     * The stream is created but not initialized yet.
+     */
     AAUDIO_STREAM_STATE_UNINITIALIZED = 0,
+    /**
+     * The stream is in an unrecognized state.
+     */
     AAUDIO_STREAM_STATE_UNKNOWN,
+
+    /**
+     * The stream is open and ready to use.
+     */
     AAUDIO_STREAM_STATE_OPEN,
+    /**
+     * The stream is just starting up.
+     */
     AAUDIO_STREAM_STATE_STARTING,
+    /**
+     * The stream has started.
+     */
     AAUDIO_STREAM_STATE_STARTED,
+    /**
+     * The stream is pausing.
+     */
     AAUDIO_STREAM_STATE_PAUSING,
+    /**
+     * The stream has paused, could be restarted or flushed.
+     */
     AAUDIO_STREAM_STATE_PAUSED,
+    /**
+     * The stream is being flushed.
+     */
     AAUDIO_STREAM_STATE_FLUSHING,
+    /**
+     * The stream is flushed, ready to be restarted.
+     */
     AAUDIO_STREAM_STATE_FLUSHED,
+    /**
+     * The stream is stopping.
+     */
     AAUDIO_STREAM_STATE_STOPPING,
+    /**
+     * The stream has been stopped.
+     */
     AAUDIO_STREAM_STATE_STOPPED,
+    /**
+     * The stream is closing.
+     */
     AAUDIO_STREAM_STATE_CLOSING,
+    /**
+     * The stream has been closed.
+     */
     AAUDIO_STREAM_STATE_CLOSED,
+    /**
+     * The stream is disconnected from audio device.
+     */
     AAUDIO_STREAM_STATE_DISCONNECTED
 };
 typedef int32_t aaudio_stream_state_t;
@@ -227,12 +304,16 @@ enum {
 };
 typedef int32_t aaudio_performance_mode_t;
 
+#define AAUDIO_SYSTEM_USAGE_OFFSET 1000
+
 /**
  * The USAGE attribute expresses "why" you are playing a sound, what is this sound used for.
  * This information is used by certain platforms or routing policies
  * to make more refined volume or routing decisions.
  *
- * Note that these match the equivalent values in AudioAttributes in the Android Java API.
+ * Note that these match the equivalent values in
+ * <a href="/reference/android/media/AudioAttributes">AudioAttributes</a>
+ * in the Android Java API.
  *
  * Added in API level 28.
  */
@@ -296,19 +377,45 @@ enum {
     /**
      * Use this for audio responses to user queries, audio instructions or help utterances.
      */
-    AAUDIO_USAGE_ASSISTANT = 16
+    AAUDIO_USAGE_ASSISTANT = 16,
+
+    /**
+     * Use this in case of playing sounds in an emergency.
+     * Privileged MODIFY_AUDIO_ROUTING permission required.
+     */
+    AAUDIO_SYSTEM_USAGE_EMERGENCY = AAUDIO_SYSTEM_USAGE_OFFSET,
+
+    /**
+     * Use this for safety sounds and alerts, for example backup camera obstacle detection.
+     * Privileged MODIFY_AUDIO_ROUTING permission required.
+     */
+    AAUDIO_SYSTEM_USAGE_SAFETY = AAUDIO_SYSTEM_USAGE_OFFSET + 1,
+
+    /**
+     * Use this for vehicle status alerts and information, for example the check engine light.
+     * Privileged MODIFY_AUDIO_ROUTING permission required.
+     */
+    AAUDIO_SYSTEM_USAGE_VEHICLE_STATUS = AAUDIO_SYSTEM_USAGE_OFFSET + 2,
+
+    /**
+     * Use this for traffic announcements, etc.
+     * Privileged MODIFY_AUDIO_ROUTING permission required.
+     */
+    AAUDIO_SYSTEM_USAGE_ANNOUNCEMENT = AAUDIO_SYSTEM_USAGE_OFFSET + 3,
 };
 typedef int32_t aaudio_usage_t;
 
 /**
  * The CONTENT_TYPE attribute describes "what" you are playing.
  * It expresses the general category of the content. This information is optional.
- * But in case it is known (for instance {@link #AAUDIO_CONTENT_TYPE_MOVIE} for a
- * movie streaming service or {@link #AAUDIO_CONTENT_TYPE_SPEECH} for
+ * But in case it is known (for instance AAUDIO_CONTENT_TYPE_MOVIE for a
+ * movie streaming service or AAUDIO_CONTENT_TYPE_SPEECH for
  * an audio book application) this information might be used by the audio framework to
  * enforce audio focus.
  *
- * Note that these match the equivalent values in AudioAttributes in the Android Java API.
+ * Note that these match the equivalent values in
+ * <a href="/reference/android/media/AudioAttributes">AudioAttributes</a>
+ * in the Android Java API.
  *
  * Added in API level 28.
  */
@@ -336,6 +443,22 @@ enum {
     AAUDIO_CONTENT_TYPE_SONIFICATION = 4
 };
 typedef int32_t aaudio_content_type_t;
+
+enum {
+
+    /**
+     * Constant indicating the audio content associated with these attributes will follow the
+     * default platform behavior with regards to which content will be spatialized or not.
+     */
+    AAUDIO_SPATIALIZATION_BEHAVIOR_AUTO = 1,
+
+    /**
+     * Constant indicating the audio content associated with these attributes should never
+     * be spatialized.
+     */
+    AAUDIO_SPATIALIZATION_BEHAVIOR_NEVER = 2,
+};
+typedef int32_t aaudio_spatialization_behavior_t;
 
 /**
  * Defines the audio source.
@@ -378,10 +501,57 @@ enum {
      * Use this preset for capturing audio meant to be processed in real time
      * and played back for live performance (e.g karaoke).
      * The capture path will minimize latency and coupling with playback path.
+     * Available since API level 29.
      */
     AAUDIO_INPUT_PRESET_VOICE_PERFORMANCE = 10,
 };
 typedef int32_t aaudio_input_preset_t;
+
+/**
+ * Specifying if audio may or may not be captured by other apps or the system.
+ *
+ * Note that these match the equivalent values in
+ * <a href="/reference/android/media/AudioAttributes">AudioAttributes</a>
+ * in the Android Java API.
+ *
+ * Added in API level 29.
+ */
+enum {
+    /**
+     * Indicates that the audio may be captured by any app.
+     *
+     * For privacy, the following usages can not be recorded: AAUDIO_VOICE_COMMUNICATION*,
+     * AAUDIO_USAGE_NOTIFICATION*, AAUDIO_USAGE_ASSISTANCE* and {@link #AAUDIO_USAGE_ASSISTANT}.
+     *
+     * On <a href="/reference/android/os/Build.VERSION_CODES#Q">Build.VERSION_CODES</a>,
+     * this means only {@link #AAUDIO_USAGE_MEDIA} and {@link #AAUDIO_USAGE_GAME} may be captured.
+     *
+     * See <a href="/reference/android/media/AudioAttributes.html#ALLOW_CAPTURE_BY_ALL">
+     * ALLOW_CAPTURE_BY_ALL</a>.
+     */
+    AAUDIO_ALLOW_CAPTURE_BY_ALL = 1,
+    /**
+     * Indicates that the audio may only be captured by system apps.
+     *
+     * System apps can capture for many purposes like accessibility, user guidance...
+     * but have strong restriction. See
+     * <a href="/reference/android/media/AudioAttributes.html#ALLOW_CAPTURE_BY_SYSTEM">
+     * ALLOW_CAPTURE_BY_SYSTEM</a>
+     * for what the system apps can do with the capture audio.
+     */
+    AAUDIO_ALLOW_CAPTURE_BY_SYSTEM = 2,
+    /**
+     * Indicates that the audio may not be recorded by any app, even if it is a system app.
+     *
+     * It is encouraged to use {@link #AAUDIO_ALLOW_CAPTURE_BY_SYSTEM} instead of this value as system apps
+     * provide significant and useful features for the user (eg. accessibility).
+     * See <a href="/reference/android/media/AudioAttributes.html#ALLOW_CAPTURE_BY_NONE">
+     * ALLOW_CAPTURE_BY_NONE</a>.
+     */
+    AAUDIO_ALLOW_CAPTURE_BY_NONE = 3,
+};
+
+typedef int32_t aaudio_allowed_capture_policy_t;
 
 /**
  * These may be used with AAudioStreamBuilder_setSessionId().
@@ -411,6 +581,145 @@ enum {
 };
 typedef int32_t aaudio_session_id_t;
 
+/**
+ * Defines the audio channel mask.
+ * Channel masks are used to describe the samples and their
+ * arrangement in the audio frame. They are also used in the endpoint
+ * (e.g. a USB audio interface, a DAC connected to headphones) to
+ * specify allowable configurations of a particular device.
+ *
+ * Added in API level 32.
+ */
+enum {
+    /**
+     * Invalid channel mask
+     */
+    AAUDIO_CHANNEL_INVALID = -1,
+
+    /**
+     * Output audio channel mask
+     */
+    AAUDIO_CHANNEL_FRONT_LEFT = 1 << 0,
+    AAUDIO_CHANNEL_FRONT_RIGHT = 1 << 1,
+    AAUDIO_CHANNEL_FRONT_CENTER = 1 << 2,
+    AAUDIO_CHANNEL_LOW_FREQUENCY = 1 << 3,
+    AAUDIO_CHANNEL_BACK_LEFT = 1 << 4,
+    AAUDIO_CHANNEL_BACK_RIGHT = 1 << 5,
+    AAUDIO_CHANNEL_FRONT_LEFT_OF_CENTER = 1 << 6,
+    AAUDIO_CHANNEL_FRONT_RIGHT_OF_CENTER = 1 << 7,
+    AAUDIO_CHANNEL_BACK_CENTER = 1 << 8,
+    AAUDIO_CHANNEL_SIDE_LEFT = 1 << 9,
+    AAUDIO_CHANNEL_SIDE_RIGHT = 1 << 10,
+    AAUDIO_CHANNEL_TOP_CENTER = 1 << 11,
+    AAUDIO_CHANNEL_TOP_FRONT_LEFT = 1 << 12,
+    AAUDIO_CHANNEL_TOP_FRONT_CENTER = 1 << 13,
+    AAUDIO_CHANNEL_TOP_FRONT_RIGHT = 1 << 14,
+    AAUDIO_CHANNEL_TOP_BACK_LEFT = 1 << 15,
+    AAUDIO_CHANNEL_TOP_BACK_CENTER = 1 << 16,
+    AAUDIO_CHANNEL_TOP_BACK_RIGHT = 1 << 17,
+    AAUDIO_CHANNEL_TOP_SIDE_LEFT = 1 << 18,
+    AAUDIO_CHANNEL_TOP_SIDE_RIGHT = 1 << 19,
+    AAUDIO_CHANNEL_BOTTOM_FRONT_LEFT = 1 << 20,
+    AAUDIO_CHANNEL_BOTTOM_FRONT_CENTER = 1 << 21,
+    AAUDIO_CHANNEL_BOTTOM_FRONT_RIGHT = 1 << 22,
+    AAUDIO_CHANNEL_LOW_FREQUENCY_2 = 1 << 23,
+    AAUDIO_CHANNEL_FRONT_WIDE_LEFT = 1 << 24,
+    AAUDIO_CHANNEL_FRONT_WIDE_RIGHT = 1 << 25,
+
+    AAUDIO_CHANNEL_MONO = AAUDIO_CHANNEL_FRONT_LEFT,
+    AAUDIO_CHANNEL_STEREO = AAUDIO_CHANNEL_FRONT_LEFT |
+                            AAUDIO_CHANNEL_FRONT_RIGHT,
+    AAUDIO_CHANNEL_2POINT1 = AAUDIO_CHANNEL_FRONT_LEFT |
+                             AAUDIO_CHANNEL_FRONT_RIGHT |
+                             AAUDIO_CHANNEL_LOW_FREQUENCY,
+    AAUDIO_CHANNEL_TRI = AAUDIO_CHANNEL_FRONT_LEFT |
+                         AAUDIO_CHANNEL_FRONT_RIGHT |
+                         AAUDIO_CHANNEL_FRONT_CENTER,
+    AAUDIO_CHANNEL_TRI_BACK = AAUDIO_CHANNEL_FRONT_LEFT |
+                              AAUDIO_CHANNEL_FRONT_RIGHT |
+                              AAUDIO_CHANNEL_BACK_CENTER,
+    AAUDIO_CHANNEL_3POINT1 = AAUDIO_CHANNEL_FRONT_LEFT |
+                             AAUDIO_CHANNEL_FRONT_RIGHT |
+                             AAUDIO_CHANNEL_FRONT_CENTER |
+                             AAUDIO_CHANNEL_LOW_FREQUENCY,
+    AAUDIO_CHANNEL_2POINT0POINT2 = AAUDIO_CHANNEL_FRONT_LEFT |
+                                   AAUDIO_CHANNEL_FRONT_RIGHT |
+                                   AAUDIO_CHANNEL_TOP_SIDE_LEFT |
+                                   AAUDIO_CHANNEL_TOP_SIDE_RIGHT,
+    AAUDIO_CHANNEL_2POINT1POINT2 = AAUDIO_CHANNEL_2POINT0POINT2 |
+                                   AAUDIO_CHANNEL_LOW_FREQUENCY,
+    AAUDIO_CHANNEL_3POINT0POINT2 = AAUDIO_CHANNEL_FRONT_LEFT |
+                                   AAUDIO_CHANNEL_FRONT_RIGHT |
+                                   AAUDIO_CHANNEL_FRONT_CENTER |
+                                   AAUDIO_CHANNEL_TOP_SIDE_LEFT |
+                                   AAUDIO_CHANNEL_TOP_SIDE_RIGHT,
+    AAUDIO_CHANNEL_3POINT1POINT2 = AAUDIO_CHANNEL_3POINT0POINT2 |
+                                   AAUDIO_CHANNEL_LOW_FREQUENCY,
+    AAUDIO_CHANNEL_QUAD = AAUDIO_CHANNEL_FRONT_LEFT |
+                          AAUDIO_CHANNEL_FRONT_RIGHT |
+                          AAUDIO_CHANNEL_BACK_LEFT |
+                          AAUDIO_CHANNEL_BACK_RIGHT,
+    AAUDIO_CHANNEL_QUAD_SIDE = AAUDIO_CHANNEL_FRONT_LEFT |
+                               AAUDIO_CHANNEL_FRONT_RIGHT |
+                               AAUDIO_CHANNEL_SIDE_LEFT |
+                               AAUDIO_CHANNEL_SIDE_RIGHT,
+    AAUDIO_CHANNEL_SURROUND = AAUDIO_CHANNEL_FRONT_LEFT |
+                              AAUDIO_CHANNEL_FRONT_RIGHT |
+                              AAUDIO_CHANNEL_FRONT_CENTER |
+                              AAUDIO_CHANNEL_BACK_CENTER,
+    AAUDIO_CHANNEL_PENTA = AAUDIO_CHANNEL_QUAD |
+                           AAUDIO_CHANNEL_FRONT_CENTER,
+    // aka 5POINT1_BACK
+    AAUDIO_CHANNEL_5POINT1 = AAUDIO_CHANNEL_FRONT_LEFT |
+                             AAUDIO_CHANNEL_FRONT_RIGHT |
+                             AAUDIO_CHANNEL_FRONT_CENTER |
+                             AAUDIO_CHANNEL_LOW_FREQUENCY |
+                             AAUDIO_CHANNEL_BACK_LEFT |
+                             AAUDIO_CHANNEL_BACK_RIGHT,
+    AAUDIO_CHANNEL_5POINT1_SIDE = AAUDIO_CHANNEL_FRONT_LEFT |
+                                  AAUDIO_CHANNEL_FRONT_RIGHT |
+                                  AAUDIO_CHANNEL_FRONT_CENTER |
+                                  AAUDIO_CHANNEL_LOW_FREQUENCY |
+                                  AAUDIO_CHANNEL_SIDE_LEFT |
+                                  AAUDIO_CHANNEL_SIDE_RIGHT,
+    AAUDIO_CHANNEL_6POINT1 = AAUDIO_CHANNEL_FRONT_LEFT |
+                             AAUDIO_CHANNEL_FRONT_RIGHT |
+                             AAUDIO_CHANNEL_FRONT_CENTER |
+                             AAUDIO_CHANNEL_LOW_FREQUENCY |
+                             AAUDIO_CHANNEL_BACK_LEFT |
+                             AAUDIO_CHANNEL_BACK_RIGHT |
+                             AAUDIO_CHANNEL_BACK_CENTER,
+    AAUDIO_CHANNEL_7POINT1 = AAUDIO_CHANNEL_5POINT1 |
+                             AAUDIO_CHANNEL_SIDE_LEFT |
+                             AAUDIO_CHANNEL_SIDE_RIGHT,
+    AAUDIO_CHANNEL_5POINT1POINT2 = AAUDIO_CHANNEL_5POINT1 |
+                                   AAUDIO_CHANNEL_TOP_SIDE_LEFT |
+                                   AAUDIO_CHANNEL_TOP_SIDE_RIGHT,
+    AAUDIO_CHANNEL_5POINT1POINT4 = AAUDIO_CHANNEL_5POINT1 |
+                                   AAUDIO_CHANNEL_TOP_FRONT_LEFT |
+                                   AAUDIO_CHANNEL_TOP_FRONT_RIGHT |
+                                   AAUDIO_CHANNEL_TOP_BACK_LEFT |
+                                   AAUDIO_CHANNEL_TOP_BACK_RIGHT,
+    AAUDIO_CHANNEL_7POINT1POINT2 = AAUDIO_CHANNEL_7POINT1 |
+                                   AAUDIO_CHANNEL_TOP_SIDE_LEFT |
+                                   AAUDIO_CHANNEL_TOP_SIDE_RIGHT,
+    AAUDIO_CHANNEL_7POINT1POINT4 = AAUDIO_CHANNEL_7POINT1 |
+                                   AAUDIO_CHANNEL_TOP_FRONT_LEFT |
+                                   AAUDIO_CHANNEL_TOP_FRONT_RIGHT |
+                                   AAUDIO_CHANNEL_TOP_BACK_LEFT |
+                                   AAUDIO_CHANNEL_TOP_BACK_RIGHT,
+    AAUDIO_CHANNEL_9POINT1POINT4 = AAUDIO_CHANNEL_7POINT1POINT4 |
+                                   AAUDIO_CHANNEL_FRONT_WIDE_LEFT |
+                                   AAUDIO_CHANNEL_FRONT_WIDE_RIGHT,
+    AAUDIO_CHANNEL_9POINT1POINT6 = AAUDIO_CHANNEL_9POINT1POINT4 |
+                                   AAUDIO_CHANNEL_TOP_SIDE_LEFT |
+                                   AAUDIO_CHANNEL_TOP_SIDE_RIGHT,
+
+    AAUDIO_CHANNEL_FRONT_BACK = AAUDIO_CHANNEL_FRONT_CENTER |
+                                AAUDIO_CHANNEL_BACK_CENTER,
+};
+typedef uint32_t aaudio_channel_mask_t;
+
 typedef struct AAudioStreamStruct         AAudioStream;
 typedef struct AAudioStreamBuilderStruct  AAudioStreamBuilder;
 
@@ -428,6 +737,8 @@ typedef struct AAudioStreamBuilderStruct  AAudioStreamBuilder;
  * This is intended for developers to use when debugging.
  * It is not for display to users.
  *
+ * Available since API level 26.
+ *
  * @return pointer to a text representation of an AAudio result code.
  */
 AAUDIO_API const char * AAudio_convertResultToText(aaudio_result_t returnCode) __INTRODUCED_IN(26);
@@ -437,6 +748,8 @@ AAUDIO_API const char * AAudio_convertResultToText(aaudio_result_t returnCode) _
  * or an English message saying the state is unrecognized.
  * This is intended for developers to use when debugging.
  * It is not for display to users.
+ *
+ * Available since API level 26.
  *
  * @return pointer to a text representation of an AAudio state.
  */
@@ -452,39 +765,88 @@ AAUDIO_API const char * AAudio_convertStreamStateToText(aaudio_stream_state_t st
  *
  * The deviceId is initially unspecified, meaning that the current default device will be used.
  *
- * The default direction is AAUDIO_DIRECTION_OUTPUT.
- * The default sharing mode is AAUDIO_SHARING_MODE_SHARED.
+ * The default direction is {@link #AAUDIO_DIRECTION_OUTPUT}.
+ * The default sharing mode is {@link #AAUDIO_SHARING_MODE_SHARED}.
  * The data format, samplesPerFrames and sampleRate are unspecified and will be
  * chosen by the device when it is opened.
  *
  * AAudioStreamBuilder_delete() must be called when you are done using the builder.
+ *
+ * Available since API level 26.
  */
 AAUDIO_API aaudio_result_t AAudio_createStreamBuilder(AAudioStreamBuilder** builder)
         __INTRODUCED_IN(26);
 
 /**
- * Request an audio device identified device using an ID.
- * On Android, for example, the ID could be obtained from the Java AudioManager.
+ * Request an audio device identified by an ID.
  *
- * The default, if you do not call this function, is AAUDIO_UNSPECIFIED,
+ * The ID could be obtained from the Java AudioManager.
+ * AudioManager.getDevices() returns an array of {@link AudioDeviceInfo},
+ * which contains a getId() method. That ID can be passed to this function.
+ *
+ * It is possible that you may not get the device that you requested.
+ * So if it is important to you, you should call
+ * AAudioStream_getDeviceId() after the stream is opened to
+ * verify the actual ID.
+ *
+ * The default, if you do not call this function, is {@link #AAUDIO_UNSPECIFIED},
  * in which case the primary device will be used.
  *
+ * Available since API level 26.
+ *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param deviceId device identifier or AAUDIO_UNSPECIFIED
+ * @param deviceId device identifier or {@link #AAUDIO_UNSPECIFIED}
  */
 AAUDIO_API void AAudioStreamBuilder_setDeviceId(AAudioStreamBuilder* builder,
                                                 int32_t deviceId) __INTRODUCED_IN(26);
 
 /**
+ * Declare the name of the package creating the stream.
+ *
+ * This is usually {@code Context#getPackageName()}.
+ *
+ * The default, if you do not call this function, is a random package in the calling uid.
+ * The vast majority of apps have only one package per calling UID.
+ * If an invalid package name is set, input streams may not be given permission to
+ * record when started.
+ *
+ * The package name is usually the applicationId in your app's build.gradle file.
+ *
+ * Available since API level 31.
+ *
+ * @param builder reference provided by AAudio_createStreamBuilder()
+ * @param packageName packageName of the calling app.
+ */
+AAUDIO_API void AAudioStreamBuilder_setPackageName(AAudioStreamBuilder* builder,
+                                                   const char * packageName) __INTRODUCED_IN(31);
+
+/**
+ * Declare the attribution tag of the context creating the stream.
+ *
+ * This is usually {@code Context#getAttributionTag()}.
+ *
+ * The default, if you do not call this function, is null.
+ *
+ * Available since API level 31.
+ *
+ * @param builder reference provided by AAudio_createStreamBuilder()
+ * @param attributionTag attributionTag of the calling context.
+ */
+AAUDIO_API void AAudioStreamBuilder_setAttributionTag(AAudioStreamBuilder* builder,
+        const char * attributionTag) __INTRODUCED_IN(31);
+
+/**
  * Request a sample rate in Hertz.
  *
- * The default, if you do not call this function, is AAUDIO_UNSPECIFIED.
+ * The default, if you do not call this function, is {@link #AAUDIO_UNSPECIFIED}.
  * An optimal value will then be chosen when the stream is opened.
  * After opening a stream with an unspecified value, the application must
  * query for the actual value, which may vary by device.
  *
  * If an exact value is specified then an opened stream will use that value.
  * If a stream cannot be opened with the specified value then the open will fail.
+ *
+ * Available since API level 26.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
  * @param sampleRate frames per second. Common rates include 44100 and 48000 Hz.
@@ -495,13 +857,20 @@ AAUDIO_API void AAudioStreamBuilder_setSampleRate(AAudioStreamBuilder* builder,
 /**
  * Request a number of channels for the stream.
  *
- * The default, if you do not call this function, is AAUDIO_UNSPECIFIED.
+ * The default, if you do not call this function, is {@link #AAUDIO_UNSPECIFIED}.
  * An optimal value will then be chosen when the stream is opened.
  * After opening a stream with an unspecified value, the application must
  * query for the actual value, which may vary by device.
  *
  * If an exact value is specified then an opened stream will use that value.
  * If a stream cannot be opened with the specified value then the open will fail.
+ *
+ * As the channel count provided here may be different from the corresponding channel count
+ * of channel mask used in {@link AAudioStreamBuilder_setChannelMask}, the last called function
+ * will be respected if both this function and {@link AAudioStreamBuilder_setChannelMask} are
+ * called.
+ *
+ * Available since API level 26.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
  * @param channelCount Number of channels desired.
@@ -512,16 +881,20 @@ AAUDIO_API void AAudioStreamBuilder_setChannelCount(AAudioStreamBuilder* builder
 /**
  * Identical to AAudioStreamBuilder_setChannelCount().
  *
+ * Available since API level 26.
+ *
  * @param builder reference provided by AAudio_createStreamBuilder()
  * @param samplesPerFrame Number of samples in a frame.
+ *
+ * @deprecated use {@link AAudioStreamBuilder_setChannelCount}
  */
 AAUDIO_API void AAudioStreamBuilder_setSamplesPerFrame(AAudioStreamBuilder* builder,
                                                        int32_t samplesPerFrame) __INTRODUCED_IN(26);
 
 /**
- * Request a sample data format, for example AAUDIO_FORMAT_PCM_I16.
+ * Request a sample data format, for example {@link #AAUDIO_FORMAT_PCM_I16}.
  *
- * The default, if you do not call this function, is AAUDIO_UNSPECIFIED.
+ * The default, if you do not call this function, is {@link #AAUDIO_UNSPECIFIED}.
  * An optimal value will then be chosen when the stream is opened.
  * After opening a stream with an unspecified value, the application must
  * query for the actual value, which may vary by device.
@@ -529,8 +902,11 @@ AAUDIO_API void AAudioStreamBuilder_setSamplesPerFrame(AAudioStreamBuilder* buil
  * If an exact value is specified then an opened stream will use that value.
  * If a stream cannot be opened with the specified value then the open will fail.
  *
+ * Available since API level 26.
+ *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param format common formats are AAUDIO_FORMAT_PCM_FLOAT and AAUDIO_FORMAT_PCM_I16.
+ * @param format common formats are {@link #AAUDIO_FORMAT_PCM_FLOAT} and
+ *               {@link #AAUDIO_FORMAT_PCM_I16}.
  */
 AAUDIO_API void AAudioStreamBuilder_setFormat(AAudioStreamBuilder* builder,
                                               aaudio_format_t format) __INTRODUCED_IN(26);
@@ -538,13 +914,15 @@ AAUDIO_API void AAudioStreamBuilder_setFormat(AAudioStreamBuilder* builder,
 /**
  * Request a mode for sharing the device.
  *
- * The default, if you do not call this function, is AAUDIO_SHARING_MODE_SHARED.
+ * The default, if you do not call this function, is {@link #AAUDIO_SHARING_MODE_SHARED}.
  *
  * The requested sharing mode may not be available.
  * The application can query for the actual mode after the stream is opened.
  *
+ * Available since API level 26.
+ *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param sharingMode AAUDIO_SHARING_MODE_SHARED or AAUDIO_SHARING_MODE_EXCLUSIVE
+ * @param sharingMode {@link #AAUDIO_SHARING_MODE_SHARED} or {@link #AAUDIO_SHARING_MODE_EXCLUSIVE}
  */
 AAUDIO_API void AAudioStreamBuilder_setSharingMode(AAudioStreamBuilder* builder,
         aaudio_sharing_mode_t sharingMode) __INTRODUCED_IN(26);
@@ -552,10 +930,12 @@ AAUDIO_API void AAudioStreamBuilder_setSharingMode(AAudioStreamBuilder* builder,
 /**
  * Request the direction for a stream.
  *
- * The default, if you do not call this function, is AAUDIO_DIRECTION_OUTPUT.
+ * The default, if you do not call this function, is {@link #AAUDIO_DIRECTION_OUTPUT}.
+ *
+ * Available since API level 26.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param direction AAUDIO_DIRECTION_OUTPUT or AAUDIO_DIRECTION_INPUT
+ * @param direction {@link #AAUDIO_DIRECTION_OUTPUT} or {@link #AAUDIO_DIRECTION_INPUT}
  */
 AAUDIO_API void AAudioStreamBuilder_setDirection(AAudioStreamBuilder* builder,
         aaudio_direction_t direction) __INTRODUCED_IN(26);
@@ -564,10 +944,12 @@ AAUDIO_API void AAudioStreamBuilder_setDirection(AAudioStreamBuilder* builder,
  * Set the requested buffer capacity in frames.
  * The final AAudioStream capacity may differ, but will probably be at least this big.
  *
- * The default, if you do not call this function, is AAUDIO_UNSPECIFIED.
+ * The default, if you do not call this function, is {@link #AAUDIO_UNSPECIFIED}.
+ *
+ * Available since API level 26.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param numFrames the desired buffer capacity in frames or AAUDIO_UNSPECIFIED
+ * @param numFrames the desired buffer capacity in frames or {@link #AAUDIO_UNSPECIFIED}
  */
 AAUDIO_API void AAudioStreamBuilder_setBufferCapacityInFrames(AAudioStreamBuilder* builder,
         int32_t numFrames) __INTRODUCED_IN(26);
@@ -575,53 +957,87 @@ AAUDIO_API void AAudioStreamBuilder_setBufferCapacityInFrames(AAudioStreamBuilde
 /**
  * Set the requested performance mode.
  *
- * Supported modes are AAUDIO_PERFORMANCE_MODE_NONE, AAUDIO_PERFORMANCE_MODE_POWER_SAVING
- * and AAUDIO_PERFORMANCE_MODE_LOW_LATENCY.
+ * Supported modes are {@link #AAUDIO_PERFORMANCE_MODE_NONE},
+ * {@link #AAUDIO_PERFORMANCE_MODE_POWER_SAVING} * and {@link #AAUDIO_PERFORMANCE_MODE_LOW_LATENCY}.
  *
- * The default, if you do not call this function, is AAUDIO_PERFORMANCE_MODE_NONE.
+ * The default, if you do not call this function, is {@link #AAUDIO_PERFORMANCE_MODE_NONE}.
  *
  * You may not get the mode you requested.
- * You can call AAudioStream_getPerformanceMode() to find out the final mode for the stream.
+ * You can call AAudioStream_getPerformanceMode()
+ * to find out the final mode for the stream.
+ *
+ * Available since API level 26.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param mode the desired performance mode, eg. AAUDIO_PERFORMANCE_MODE_LOW_LATENCY
+ * @param mode the desired performance mode, eg. {@link #AAUDIO_PERFORMANCE_MODE_LOW_LATENCY}
  */
 AAUDIO_API void AAudioStreamBuilder_setPerformanceMode(AAudioStreamBuilder* builder,
         aaudio_performance_mode_t mode) __INTRODUCED_IN(26);
 
 /**
- * Set the intended use case for the stream.
+ * Set the intended use case for the output stream.
  *
  * The AAudio system will use this information to optimize the
  * behavior of the stream.
  * This could, for example, affect how volume and focus is handled for the stream.
  *
- * The default, if you do not call this function, is AAUDIO_USAGE_MEDIA.
+ * The default, if you do not call this function, is {@link #AAUDIO_USAGE_MEDIA}.
  *
- * Added in API level 28.
+ * Available since API level 28.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param usage the desired usage, eg. AAUDIO_USAGE_GAME
+ * @param usage the desired usage, eg. {@link #AAUDIO_USAGE_GAME}
  */
 AAUDIO_API void AAudioStreamBuilder_setUsage(AAudioStreamBuilder* builder,
         aaudio_usage_t usage) __INTRODUCED_IN(28);
 
 /**
- * Set the type of audio data that the stream will carry.
+ * Set the type of audio data that the output stream will carry.
  *
  * The AAudio system will use this information to optimize the
  * behavior of the stream.
  * This could, for example, affect whether a stream is paused when a notification occurs.
  *
- * The default, if you do not call this function, is AAUDIO_CONTENT_TYPE_MUSIC.
+ * The default, if you do not call this function, is {@link #AAUDIO_CONTENT_TYPE_MUSIC}.
  *
- * Added in API level 28.
+ * Available since API level 28.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param contentType the type of audio data, eg. AAUDIO_CONTENT_TYPE_SPEECH
+ * @param contentType the type of audio data, eg. {@link #AAUDIO_CONTENT_TYPE_SPEECH}
  */
 AAUDIO_API void AAudioStreamBuilder_setContentType(AAudioStreamBuilder* builder,
         aaudio_content_type_t contentType) __INTRODUCED_IN(28);
+
+/**
+ * Sets the behavior affecting whether spatialization will be used.
+ *
+ * The AAudio system will use this information to select whether the stream will go
+ * through a spatializer effect or not when the effect is supported and enabled.
+ *
+ * Available since API level 32.
+ *
+ * @param builder reference provided by AAudio_createStreamBuilder()
+ * @param spatializationBehavior the desired behavior with regards to spatialization, eg.
+ *     {@link #AAUDIO_SPATIALIZATION_BEHAVIOR_AUTO}
+ */
+AAUDIO_API void AAudioStreamBuilder_setSpatializationBehavior(AAudioStreamBuilder* builder,
+        aaudio_spatialization_behavior_t spatializationBehavior) __INTRODUCED_IN(32);
+
+/**
+ * Specifies whether the audio data of this output stream has already been processed for
+ * spatialization.
+ *
+ * If the stream has been processed for spatialization, setting this to true will prevent
+ * issues such as double-processing on platforms that will spatialize audio data.
+ *
+ * Available since API level 32.
+ *
+ * @param builder reference provided by AAudio_createStreamBuilder()
+ * @param isSpatialized true if the content is already processed for binaural or transaural spatial
+ *     rendering, false otherwise.
+ */
+AAUDIO_API void AAudioStreamBuilder_setIsContentSpatialized(AAudioStreamBuilder* builder,
+        bool isSpatialized) __INTRODUCED_IN(32);
 
 /**
  * Set the input (capture) preset for the stream.
@@ -631,11 +1047,11 @@ AAUDIO_API void AAudioStreamBuilder_setContentType(AAudioStreamBuilder* builder,
  * This could, for example, affect which microphones are used and how the
  * recorded data is processed.
  *
- * The default, if you do not call this function, is AAUDIO_INPUT_PRESET_VOICE_RECOGNITION.
+ * The default, if you do not call this function, is {@link #AAUDIO_INPUT_PRESET_VOICE_RECOGNITION}.
  * That is because VOICE_RECOGNITION is the preset with the lowest latency
  * on many platforms.
  *
- * Added in API level 28.
+ * Available since API level 28.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
  * @param inputPreset the desired configuration for recording
@@ -643,14 +1059,32 @@ AAUDIO_API void AAudioStreamBuilder_setContentType(AAudioStreamBuilder* builder,
 AAUDIO_API void AAudioStreamBuilder_setInputPreset(AAudioStreamBuilder* builder,
         aaudio_input_preset_t inputPreset) __INTRODUCED_IN(28);
 
+/**
+ * Specify whether this stream audio may or may not be captured by other apps or the system.
+ *
+ * The default is {@link #AAUDIO_ALLOW_CAPTURE_BY_ALL}.
+ *
+ * Note that an application can also set its global policy, in which case the most restrictive
+ * policy is always applied. See
+ * <a href="/reference/android/media/AudioManager#setAllowedCapturePolicy(int)">
+ * setAllowedCapturePolicy(int)</a>
+ *
+ * Available since API level 29.
+ *
+ * @param builder reference provided by AAudio_createStreamBuilder()
+ * @param capturePolicy the desired level of opt-out from being captured.
+ */
+AAUDIO_API void AAudioStreamBuilder_setAllowedCapturePolicy(AAudioStreamBuilder* builder,
+        aaudio_allowed_capture_policy_t capturePolicy) __INTRODUCED_IN(29);
+
 /** Set the requested session ID.
  *
  * The session ID can be used to associate a stream with effects processors.
  * The effects are controlled using the Android AudioEffect Java API.
  *
- * The default, if you do not call this function, is AAUDIO_SESSION_ID_NONE.
+ * The default, if you do not call this function, is {@link #AAUDIO_SESSION_ID_NONE}.
  *
- * If set to AAUDIO_SESSION_ID_ALLOCATE then a session ID will be allocated
+ * If set to {@link #AAUDIO_SESSION_ID_ALLOCATE} then a session ID will be allocated
  * when the stream is opened.
  *
  * The allocated session ID can be obtained by calling AAudioStream_getSessionId()
@@ -665,13 +1099,35 @@ AAUDIO_API void AAudioStreamBuilder_setInputPreset(AAudioStreamBuilder* builder,
  *
  * Allocated session IDs will always be positive and nonzero.
  *
- * Added in API level 28.
+ * Available since API level 28.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param sessionId an allocated sessionID or AAUDIO_SESSION_ID_ALLOCATE
+ * @param sessionId an allocated sessionID or {@link #AAUDIO_SESSION_ID_ALLOCATE}
  */
 AAUDIO_API void AAudioStreamBuilder_setSessionId(AAudioStreamBuilder* builder,
         aaudio_session_id_t sessionId) __INTRODUCED_IN(28);
+
+
+/** Indicates whether this input stream must be marked as privacy sensitive or not.
+ *
+ * When true, this input stream is privacy sensitive and any concurrent capture
+ * is not permitted.
+ *
+ * This is off (false) by default except when the input preset is {@link #AAUDIO_INPUT_PRESET_VOICE_COMMUNICATION}
+ * or {@link #AAUDIO_INPUT_PRESET_CAMCORDER}.
+ *
+ * Always takes precedence over default from input preset when set explicitly.
+ *
+ * Only relevant if the stream direction is {@link #AAUDIO_DIRECTION_INPUT}.
+ *
+ * Added in API level 30.
+ *
+ * @param builder reference provided by AAudio_createStreamBuilder()
+ * @param privacySensitive true if capture from this stream must be marked as privacy sensitive,
+ * false otherwise.
+ */
+AAUDIO_API void AAudioStreamBuilder_setPrivacySensitive(AAudioStreamBuilder* builder,
+        bool privacySensitive) __INTRODUCED_IN(30);
 
 /**
  * Return one of these values from the data callback function.
@@ -751,17 +1207,21 @@ typedef aaudio_data_callback_result_t (*AAudioStream_dataCallback)(
  *
  * Note that when using this callback, the audio data will be passed in or out
  * of the function as an argument.
- * So you cannot call AAudioStream_write() or AAudioStream_read() on the same stream
- * that has an active data callback.
+ * So you cannot call AAudioStream_write() or AAudioStream_read()
+ * on the same stream that has an active data callback.
  *
- * The callback function will start being called after AAudioStream_requestStart() is called.
+ * The callback function will start being called after AAudioStream_requestStart()
+ * is called.
  * It will stop being called after AAudioStream_requestPause() or
  * AAudioStream_requestStop() is called.
  *
- * This callback function will be called on a real-time thread owned by AAudio. See
- * {@link AAudioStream_dataCallback} for more information.
+ * This callback function will be called on a real-time thread owned by AAudio.
+ * The low latency streams may have callback threads with higher priority than normal streams.
+ * See {@link #AAudioStream_dataCallback} for more information.
  *
  * Note that the AAudio callbacks will never be called simultaneously from multiple threads.
+ *
+ * Available since API level 26.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
  * @param callback pointer to a function that will process audio data.
@@ -773,9 +1233,9 @@ AAUDIO_API void AAudioStreamBuilder_setDataCallback(AAudioStreamBuilder* builder
 
 /**
  * Set the requested data callback buffer size in frames.
- * See {@link AAudioStream_dataCallback}.
+ * See {@link #AAudioStream_dataCallback}.
  *
- * The default, if you do not call this function, is AAUDIO_UNSPECIFIED.
+ * The default, if you do not call this function, is {@link #AAUDIO_UNSPECIFIED}.
  *
  * For the lowest possible latency, do not call this function. AAudio will then
  * call the dataProc callback function with whatever size is optimal.
@@ -791,8 +1251,10 @@ AAUDIO_API void AAudioStreamBuilder_setDataCallback(AAudioStreamBuilder* builder
  * If you do call this function then the requested size should be less than
  * half the buffer capacity, to allow double buffering.
  *
+ * Available since API level 26.
+ *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @param numFrames the desired buffer size in frames or AAUDIO_UNSPECIFIED
+ * @param numFrames the desired buffer size in frames or {@link #AAUDIO_UNSPECIFIED}
  */
 AAUDIO_API void AAudioStreamBuilder_setFramesPerDataCallback(AAudioStreamBuilder* builder,
                                                              int32_t numFrames) __INTRODUCED_IN(26);
@@ -842,6 +1304,8 @@ typedef void (*AAudioStream_errorCallback)(
  *
  * Note that the AAudio callbacks will never be called simultaneously from multiple threads.
  *
+ * Available since API level 26.
+ *
  * @param builder reference provided by AAudio_createStreamBuilder()
  * @param callback pointer to a function that will be called if an error occurs.
  * @param userData pointer to an application data structure that will be passed
@@ -853,12 +1317,14 @@ AAUDIO_API void AAudioStreamBuilder_setErrorCallback(AAudioStreamBuilder* builde
 /**
  * Open a stream based on the options in the StreamBuilder.
  *
- * AAudioStream_close must be called when finished with the stream to recover
+ * AAudioStream_close() must be called when finished with the stream to recover
  * the memory and to free the associated resources.
+ *
+ * Available since API level 26.
  *
  * @param builder reference provided by AAudio_createStreamBuilder()
  * @param stream pointer to a variable to receive the new stream reference
- * @return AAUDIO_OK or a negative error.
+ * @return {@link #AAUDIO_OK} or a negative error.
  */
 AAUDIO_API aaudio_result_t  AAudioStreamBuilder_openStream(AAudioStreamBuilder* builder,
         AAudioStream** stream) __INTRODUCED_IN(26);
@@ -866,21 +1332,78 @@ AAUDIO_API aaudio_result_t  AAudioStreamBuilder_openStream(AAudioStreamBuilder* 
 /**
  * Delete the resources associated with the StreamBuilder.
  *
+ * Available since API level 26.
+ *
  * @param builder reference provided by AAudio_createStreamBuilder()
- * @return AAUDIO_OK or a negative error.
+ * @return {@link #AAUDIO_OK} or a negative error.
  */
 AAUDIO_API aaudio_result_t  AAudioStreamBuilder_delete(AAudioStreamBuilder* builder)
     __INTRODUCED_IN(26);
+
+/**
+ * Set audio channel mask for the stream.
+ *
+ * The default, if you do not call this function, is {@link #AAUDIO_UNSPECIFIED}.
+ * If both channel mask and count are not set, then stereo will then be chosen when the
+ * stream is opened.
+ * After opening a stream with an unspecified value, the application must query for the
+ * actual value, which may vary by device.
+ *
+ * If an exact value is specified then an opened stream will use that value.
+ * If a stream cannot be opened with the specified value then the open will fail.
+ *
+ * As the corresponding channel count of provided channel mask here may be different
+ * from the channel count used in {@link AAudioStreamBuilder_setChannelCount} or
+ * {@link AAudioStreamBuilder_setSamplesPerFrame}, the last called function will be
+ * respected if this function and {@link AAudioStreamBuilder_setChannelCount} or
+ * {@link AAudioStreamBuilder_setSamplesPerFrame} are called.
+ *
+ * Available since API level 32.
+ *
+ * @param builder reference provided by AAudio_createStreamBuilder()
+ * @param channelMask Audio channel mask desired.
+ */
+AAUDIO_API void AAudioStreamBuilder_setChannelMask(AAudioStreamBuilder* builder,
+        aaudio_channel_mask_t channelMask) __INTRODUCED_IN(32);
 
 // ============================================================
 // Stream Control
 // ============================================================
 
 /**
- * Free the resources associated with a stream created by AAudioStreamBuilder_openStream()
+ * Free the audio resources associated with a stream created by
+ * AAudioStreamBuilder_openStream().
+ * AAudioStream_close() should be called at some point after calling
+ * this function.
+ *
+ * After this call, the stream will be in {@link #AAUDIO_STREAM_STATE_CLOSING}
+ *
+ * This function is useful if you want to release the audio resources immediately,
+ * but still allow queries to the stream to occur from other threads. This often
+ * happens if you are monitoring stream progress from a UI thread.
+ *
+ * NOTE: This function is only fully implemented for MMAP streams,
+ * which are low latency streams supported by some devices.
+ * On other "Legacy" streams some audio resources will still be in use
+ * and some callbacks may still be in process after this call.
+ *
+ * Available since API level 30.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
- * @return AAUDIO_OK or a negative error.
+ * @return {@link #AAUDIO_OK} or a negative error.
+ */
+AAUDIO_API aaudio_result_t  AAudioStream_release(AAudioStream* stream) __INTRODUCED_IN(30);
+
+/**
+ * Delete the internal data structures associated with the stream created
+ * by AAudioStreamBuilder_openStream().
+ *
+ * If AAudioStream_release() has not been called then it will be called automatically.
+ *
+ * Available since API level 26.
+ *
+ * @param stream reference provided by AAudioStreamBuilder_openStream()
+ * @return {@link #AAUDIO_OK} or a negative error.
  */
 AAUDIO_API aaudio_result_t  AAudioStream_close(AAudioStream* stream) __INTRODUCED_IN(26);
 
@@ -888,24 +1411,30 @@ AAUDIO_API aaudio_result_t  AAudioStream_close(AAudioStream* stream) __INTRODUCE
  * Asynchronously request to start playing the stream. For output streams, one should
  * write to the stream to fill the buffer before starting.
  * Otherwise it will underflow.
- * After this call the state will be in AAUDIO_STREAM_STATE_STARTING or AAUDIO_STREAM_STATE_STARTED.
+ * After this call the state will be in {@link #AAUDIO_STREAM_STATE_STARTING} or
+ * {@link #AAUDIO_STREAM_STATE_STARTED}.
+ *
+ * Available since API level 26.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
- * @return AAUDIO_OK or a negative error.
+ * @return {@link #AAUDIO_OK} or a negative error.
  */
 AAUDIO_API aaudio_result_t  AAudioStream_requestStart(AAudioStream* stream) __INTRODUCED_IN(26);
 
 /**
  * Asynchronous request for the stream to pause.
  * Pausing a stream will freeze the data flow but not flush any buffers.
- * Use AAudioStream_Start() to resume playback after a pause.
- * After this call the state will be in AAUDIO_STREAM_STATE_PAUSING or AAUDIO_STREAM_STATE_PAUSED.
+ * Use AAudioStream_requestStart() to resume playback after a pause.
+ * After this call the state will be in {@link #AAUDIO_STREAM_STATE_PAUSING} or
+ * {@link #AAUDIO_STREAM_STATE_PAUSED}.
  *
- * This will return AAUDIO_ERROR_UNIMPLEMENTED for input streams.
+ * This will return {@link #AAUDIO_ERROR_UNIMPLEMENTED} for input streams.
  * For input streams use AAudioStream_requestStop().
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
- * @return AAUDIO_OK or a negative error.
+ * @return {@link #AAUDIO_OK} or a negative error.
  */
 AAUDIO_API aaudio_result_t  AAudioStream_requestPause(AAudioStream* stream) __INTRODUCED_IN(26);
 
@@ -914,32 +1443,40 @@ AAUDIO_API aaudio_result_t  AAudioStream_requestPause(AAudioStream* stream) __IN
  * Flushing will discard any pending data.
  * This call only works if the stream is pausing or paused. TODO review
  * Frame counters are not reset by a flush. They may be advanced.
- * After this call the state will be in AAUDIO_STREAM_STATE_FLUSHING or AAUDIO_STREAM_STATE_FLUSHED.
+ * After this call the state will be in {@link #AAUDIO_STREAM_STATE_FLUSHING} or
+ * {@link #AAUDIO_STREAM_STATE_FLUSHED}.
  *
- * This will return AAUDIO_ERROR_UNIMPLEMENTED for input streams.
+ * This will return {@link #AAUDIO_ERROR_UNIMPLEMENTED} for input streams.
+ *
+ * Available since API level 26.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
- * @return AAUDIO_OK or a negative error.
+ * @return {@link #AAUDIO_OK} or a negative error.
  */
 AAUDIO_API aaudio_result_t  AAudioStream_requestFlush(AAudioStream* stream) __INTRODUCED_IN(26);
 
 /**
  * Asynchronous request for the stream to stop.
  * The stream will stop after all of the data currently buffered has been played.
- * After this call the state will be in AAUDIO_STREAM_STATE_STOPPING or AAUDIO_STREAM_STATE_STOPPED.
+ * After this call the state will be in {@link #AAUDIO_STREAM_STATE_STOPPING} or
+ * {@link #AAUDIO_STREAM_STATE_STOPPED}.
+ *
+ * Available since API level 26.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
- * @return AAUDIO_OK or a negative error.
+ * @return {@link #AAUDIO_OK} or a negative error.
  */
 AAUDIO_API aaudio_result_t  AAudioStream_requestStop(AAudioStream* stream) __INTRODUCED_IN(26);
 
 /**
- * Query the current state of the client, eg. AAUDIO_STREAM_STATE_PAUSING
+ * Query the current state of the client, eg. {@link #AAUDIO_STREAM_STATE_PAUSING}
  *
  * This function will immediately return the state without updating the state.
  * If you want to update the client state based on the server state then
  * call AAudioStream_waitForStateChange() with currentState
- * set to AAUDIO_STREAM_STATE_UNKNOWN and a zero timeout.
+ * set to {@link #AAUDIO_STREAM_STATE_UNKNOWN} and a zero timeout.
+ *
+ * Available since API level 26.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  */
@@ -961,11 +1498,13 @@ AAUDIO_API aaudio_stream_state_t AAudioStream_getState(AAudioStream* stream) __I
  * }
  * </code></pre>
  *
+ * Available since API level 26.
+ *
  * @param stream A reference provided by AAudioStreamBuilder_openStream()
  * @param inputState The state we want to avoid.
  * @param nextState Pointer to a variable that will be set to the new state.
  * @param timeoutNanoseconds Maximum number of nanoseconds to wait for completion.
- * @return AAUDIO_OK or a negative error.
+ * @return {@link #AAUDIO_OK} or a negative error.
  */
 AAUDIO_API aaudio_result_t AAudioStream_waitForStateChange(AAudioStream* stream,
         aaudio_stream_state_t inputState, aaudio_stream_state_t *nextState,
@@ -989,6 +1528,8 @@ AAUDIO_API aaudio_result_t AAudioStream_waitForStateChange(AAudioStream* stream,
  *
  * If the call times out then zero or a partial frame count will be returned.
  *
+ * Available since API level 26.
+ *
  * @param stream A stream created using AAudioStreamBuilder_openStream().
  * @param buffer The address of the first sample.
  * @param numFrames Number of frames to read. Only complete frames will be written.
@@ -1011,6 +1552,8 @@ AAUDIO_API aaudio_result_t AAudioStream_read(AAudioStream* stream,
  * This call is "strong non-blocking" unless it has to wait for room in the buffer.
  *
  * If the call times out then zero or a partial frame count will be returned.
+ *
+ * Available since API level 26.
  *
  * @param stream A stream created using AAudioStreamBuilder_openStream().
  * @param buffer The address of the first sample.
@@ -1037,6 +1580,8 @@ AAUDIO_API aaudio_result_t AAudioStream_write(AAudioStream* stream,
  * You can check the return value or call AAudioStream_getBufferSizeInFrames()
  * to see what the actual final size is.
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @param numFrames requested number of frames that can be filled without blocking
  * @return actual buffer size in frames or a negative error
@@ -1046,6 +1591,8 @@ AAUDIO_API aaudio_result_t AAudioStream_setBufferSizeInFrames(AAudioStream* stre
 
 /**
  * Query the maximum number of frames that can be filled without blocking.
+ *
+ * Available since API level 26.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return buffer size in frames.
@@ -1062,6 +1609,8 @@ AAUDIO_API int32_t AAudioStream_getBufferSizeInFrames(AAudioStream* stream) __IN
  * For some endpoints, the burst size can vary dynamically.
  * But these tend to be devices with high latency.
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return burst size
  */
@@ -1069,6 +1618,8 @@ AAUDIO_API int32_t AAudioStream_getFramesPerBurst(AAudioStream* stream) __INTROD
 
 /**
  * Query maximum buffer capacity in frames.
+ *
+ * Available since API level 26.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return  buffer capacity in frames
@@ -1082,17 +1633,19 @@ AAUDIO_API int32_t AAudioStream_getBufferCapacityInFrames(AAudioStream* stream) 
  * This call can be used if the application needs to know the value of numFrames before
  * the stream is started. This is not normally necessary.
  *
- * If a specific size was requested by calling AAudioStreamBuilder_setFramesPerDataCallback()
- * then this will be the same size.
+ * If a specific size was requested by calling
+ * AAudioStreamBuilder_setFramesPerDataCallback() then this will be the same size.
  *
  * If AAudioStreamBuilder_setFramesPerDataCallback() was not called then this will
- * return the size chosen by AAudio, or AAUDIO_UNSPECIFIED.
+ * return the size chosen by AAudio, or {@link #AAUDIO_UNSPECIFIED}.
  *
- * AAUDIO_UNSPECIFIED indicates that the callback buffer size for this stream
+ * {@link #AAUDIO_UNSPECIFIED} indicates that the callback buffer size for this stream
  * may vary from one dataProc callback to the next.
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
- * @return callback buffer size in frames or AAUDIO_UNSPECIFIED
+ * @return callback buffer size in frames or {@link #AAUDIO_UNSPECIFIED}
  */
 AAUDIO_API int32_t AAudioStream_getFramesPerDataCallback(AAudioStream* stream) __INTRODUCED_IN(26);
 
@@ -1108,12 +1661,16 @@ AAUDIO_API int32_t AAudioStream_getFramesPerDataCallback(AAudioStream* stream) _
  * Note that some INPUT devices may not support this function.
  * In that case a 0 will always be returned.
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return the underrun or overrun count
  */
 AAUDIO_API int32_t AAudioStream_getXRunCount(AAudioStream* stream) __INTRODUCED_IN(26);
 
 /**
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return actual sample rate
  */
@@ -1123,6 +1680,8 @@ AAUDIO_API int32_t AAudioStream_getSampleRate(AAudioStream* stream) __INTRODUCED
  * A stream has one or more channels of data.
  * A frame will contain one sample for each channel.
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return actual number of channels
  */
@@ -1131,18 +1690,24 @@ AAUDIO_API int32_t AAudioStream_getChannelCount(AAudioStream* stream) __INTRODUC
 /**
  * Identical to AAudioStream_getChannelCount().
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return actual number of samples frame
  */
 AAUDIO_API int32_t AAudioStream_getSamplesPerFrame(AAudioStream* stream) __INTRODUCED_IN(26);
 
 /**
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return actual device ID
  */
 AAUDIO_API int32_t AAudioStream_getDeviceId(AAudioStream* stream) __INTRODUCED_IN(26);
 
 /**
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return actual data format
  */
@@ -1150,6 +1715,9 @@ AAUDIO_API aaudio_format_t AAudioStream_getFormat(AAudioStream* stream) __INTROD
 
 /**
  * Provide actual sharing mode.
+ *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return  actual sharing mode
  */
@@ -1159,12 +1727,16 @@ AAUDIO_API aaudio_sharing_mode_t AAudioStream_getSharingMode(AAudioStream* strea
 /**
  * Get the performance mode used by the stream.
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  */
 AAUDIO_API aaudio_performance_mode_t AAudioStream_getPerformanceMode(AAudioStream* stream)
         __INTRODUCED_IN(26);
 
 /**
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return direction
  */
@@ -1177,6 +1749,8 @@ AAUDIO_API aaudio_direction_t AAudioStream_getDirection(AAudioStream* stream) __
  * For an input stream, this will be advanced by the endpoint.
  *
  * The frame position is monotonically increasing.
+ *
+ * Available since API level 26.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return frames written
@@ -1191,6 +1765,8 @@ AAUDIO_API int64_t AAudioStream_getFramesWritten(AAudioStream* stream) __INTRODU
  *
  * The frame position is monotonically increasing.
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return frames read
  */
@@ -1202,21 +1778,22 @@ AAUDIO_API int64_t AAudioStream_getFramesRead(AAudioStream* stream) __INTRODUCED
  * The session ID can be used to associate a stream with effects processors.
  * The effects are controlled using the Android AudioEffect Java API.
  *
- * If AAudioStreamBuilder_setSessionId() was called with AAUDIO_SESSION_ID_ALLOCATE
+ * If AAudioStreamBuilder_setSessionId() was
+ * called with {@link #AAUDIO_SESSION_ID_ALLOCATE}
  * then a new session ID should be allocated once when the stream is opened.
  *
  * If AAudioStreamBuilder_setSessionId() was called with a previously allocated
  * session ID then that value should be returned.
  *
  * If AAudioStreamBuilder_setSessionId() was not called then this function should
- * return AAUDIO_SESSION_ID_NONE.
+ * return {@link #AAUDIO_SESSION_ID_NONE}.
  *
  * The sessionID for a stream should not change once the stream has been opened.
  *
- * Added in API level 28.
+ * Available since API level 28.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
- * @return session ID or AAUDIO_SESSION_ID_NONE
+ * @return session ID or {@link #AAUDIO_SESSION_ID_NONE}
  */
 AAUDIO_API aaudio_session_id_t AAudioStream_getSessionId(AAudioStream* stream) __INTRODUCED_IN(28);
 
@@ -1225,22 +1802,24 @@ AAUDIO_API aaudio_session_id_t AAudioStream_getSessionId(AAudioStream* stream) _
  * This can be used to synchronize audio with video or MIDI.
  * It can also be used to align a recorded stream with a playback stream.
  *
- * Timestamps are only valid when the stream is in AAUDIO_STREAM_STATE_STARTED.
- * AAUDIO_ERROR_INVALID_STATE will be returned if the stream is not started.
+ * Timestamps are only valid when the stream is in {@link #AAUDIO_STREAM_STATE_STARTED}.
+ * {@link #AAUDIO_ERROR_INVALID_STATE} will be returned if the stream is not started.
  * Note that because requestStart() is asynchronous, timestamps will not be valid until
  * a short time after calling requestStart().
- * So AAUDIO_ERROR_INVALID_STATE should not be considered a fatal error.
+ * So {@link #AAUDIO_ERROR_INVALID_STATE} should not be considered a fatal error.
  * Just try calling again later.
  *
  * If an error occurs, then the position and time will not be modified.
  *
  * The position and time passed back are monotonically increasing.
  *
+ * Available since API level 26.
+ *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @param clockid CLOCK_MONOTONIC or CLOCK_BOOTTIME
  * @param framePosition pointer to a variable to receive the position
  * @param timeNanoseconds pointer to a variable to receive the time
- * @return AAUDIO_OK or a negative error
+ * @return {@link #AAUDIO_OK} or a negative error
  */
 AAUDIO_API aaudio_result_t AAudioStream_getTimestamp(AAudioStream* stream,
         clockid_t clockid, int64_t *framePosition, int64_t *timeNanoseconds) __INTRODUCED_IN(26);
@@ -1248,7 +1827,7 @@ AAUDIO_API aaudio_result_t AAudioStream_getTimestamp(AAudioStream* stream,
 /**
  * Return the use case for the stream.
  *
- * Added in API level 28.
+ * Available since API level 28.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
  * @return frames read
@@ -1258,24 +1837,87 @@ AAUDIO_API aaudio_usage_t AAudioStream_getUsage(AAudioStream* stream) __INTRODUC
 /**
  * Return the content type for the stream.
  *
- * Added in API level 28.
+ * Available since API level 28.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
- * @return content type, for example AAUDIO_CONTENT_TYPE_MUSIC
+ * @return content type, for example {@link #AAUDIO_CONTENT_TYPE_MUSIC}
  */
 AAUDIO_API aaudio_content_type_t AAudioStream_getContentType(AAudioStream* stream)
         __INTRODUCED_IN(28);
 
 /**
- * Return the input preset for the stream.
+ * Return the spatialization behavior for the stream.
  *
- * Added in API level 28.
+ * If none was explicitly set, it will return the default
+ * {@link #AAUDIO_SPATIALIZATION_BEHAVIOR_AUTO} behavior.
+ *
+ * Available since API level 32.
  *
  * @param stream reference provided by AAudioStreamBuilder_openStream()
- * @return input preset, for example AAUDIO_INPUT_PRESET_CAMCORDER
+ * @return spatialization behavior, for example {@link #AAUDIO_SPATIALIZATION_BEHAVIOR_AUTO}
+ */
+AAUDIO_API aaudio_spatialization_behavior_t AAudioStream_getSpatializationBehavior(
+        AAudioStream* stream) __INTRODUCED_IN(32);
+
+/**
+ * Return whether the content of the stream is spatialized.
+ *
+ * Available since API level 32.
+ *
+ * @param stream reference provided by AAudioStreamBuilder_openStream()
+ * @return true if the content is spatialized
+ */
+AAUDIO_API bool AAudioStream_isContentSpatialized(AAudioStream* stream) __INTRODUCED_IN(32);
+
+
+/**
+ * Return the input preset for the stream.
+ *
+ * Available since API level 28.
+ *
+ * @param stream reference provided by AAudioStreamBuilder_openStream()
+ * @return input preset, for example {@link #AAUDIO_INPUT_PRESET_CAMCORDER}
  */
 AAUDIO_API aaudio_input_preset_t AAudioStream_getInputPreset(AAudioStream* stream)
         __INTRODUCED_IN(28);
+
+/**
+ * Return the policy that determines whether the audio may or may not be captured
+ * by other apps or the system.
+ *
+ * Available since API level 29.
+ *
+ * @param stream reference provided by AAudioStreamBuilder_openStream()
+ * @return the allowed capture policy, for example {@link #AAUDIO_ALLOW_CAPTURE_BY_ALL}
+ */
+AAUDIO_API aaudio_allowed_capture_policy_t AAudioStream_getAllowedCapturePolicy(
+        AAudioStream* stream) __INTRODUCED_IN(29);
+
+
+/**
+ * Return whether this input stream is marked as privacy sensitive or not.
+ *
+ * See {@link #AAudioStreamBuilder_setPrivacySensitive()}.
+ *
+ * Added in API level 30.
+ *
+ * @param stream reference provided by AAudioStreamBuilder_openStream()
+ * @return true if privacy sensitive, false otherwise
+ */
+AAUDIO_API bool AAudioStream_isPrivacySensitive(AAudioStream* stream)
+        __INTRODUCED_IN(30);
+
+/**
+ * Return the channel mask for the stream. This will be the mask set using
+ * {@link #AAudioStreamBuilder_setChannelMask}, or {@link #AAUDIO_UNSPECIFIED} otherwise.
+ *
+ * Available since API level 32.
+ *
+ * @param stream reference provided by AAudioStreamBuilder_openStream()
+ * @return actual channel mask
+ */
+AAUDIO_API aaudio_channel_mask_t AAudioStream_getChannelMask(AAudioStream* stream)
+        __INTRODUCED_IN(32);
 
 #ifdef __cplusplus
 }

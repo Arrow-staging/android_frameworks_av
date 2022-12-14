@@ -22,10 +22,12 @@
 
 #include <C2PlatformSupport.h>
 #include <SimpleC2Interface.h>
-
+#include <g711Dec.h>
 #include "C2SoftG711Dec.h"
 
 namespace android {
+
+namespace {
 
 #ifdef ALAW
 constexpr char COMPONENT_NAME[] = "c2.android.g711.alaw.decoder";
@@ -33,37 +35,33 @@ constexpr char COMPONENT_NAME[] = "c2.android.g711.alaw.decoder";
 constexpr char COMPONENT_NAME[] = "c2.android.g711.mlaw.decoder";
 #endif
 
-class C2SoftG711Dec::IntfImpl : public C2InterfaceHelper {
+}  // namespace
+
+class C2SoftG711Dec::IntfImpl : public SimpleInterface<void>::BaseParams {
 public:
     explicit IntfImpl(const std::shared_ptr<C2ReflectorHelper> &helper)
-        : C2InterfaceHelper(helper) {
-
+        : SimpleInterface<void>::BaseParams(
+                helper,
+                COMPONENT_NAME,
+                C2Component::KIND_DECODER,
+                C2Component::DOMAIN_AUDIO,
+#ifdef ALAW
+                MEDIA_MIMETYPE_AUDIO_G711_ALAW
+#else
+                MEDIA_MIMETYPE_AUDIO_G711_MLAW
+#endif
+                ) {
+        noPrivateBuffers();
+        noInputReferences();
+        noOutputReferences();
+        noInputLatency();
+        noTimeStretch();
         setDerivedInstance(this);
 
         addParameter(
-                DefineParam(mInputFormat, C2_PARAMKEY_INPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::input(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mOutputFormat, C2_PARAMKEY_OUTPUT_STREAM_BUFFER_TYPE)
-                .withConstValue(new C2StreamBufferTypeSetting::output(0u, C2BufferData::LINEAR))
-                .build());
-
-        addParameter(
-                DefineParam(mInputMediaType, C2_PARAMKEY_INPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::input>(
-#ifdef ALAW
-                        MEDIA_MIMETYPE_AUDIO_G711_ALAW
-#else
-                        MEDIA_MIMETYPE_AUDIO_G711_MLAW
-#endif
-                )).build());
-
-        addParameter(
-                DefineParam(mOutputMediaType, C2_PARAMKEY_OUTPUT_MEDIA_TYPE)
-                .withConstValue(AllocSharedString<C2PortMediaTypeSetting::output>(
-                        MEDIA_MIMETYPE_AUDIO_RAW))
+                DefineParam(mAttrib, C2_PARAMKEY_COMPONENT_ATTRIBUTES)
+                .withConstValue(new C2ComponentAttributesSetting(
+                    C2Component::ATTRIB_IS_TEMPORAL))
                 .build());
 
         addParameter(
@@ -76,7 +74,7 @@ public:
         addParameter(
                 DefineParam(mChannelCount, C2_PARAMKEY_CHANNEL_COUNT)
                 .withDefault(new C2StreamChannelCountInfo::output(0u, 1))
-                .withFields({C2F(mChannelCount, value).equalTo(1)})
+                .withFields({C2F(mChannelCount, value).inRange(1, 6)})
                 .withSetter(Setter<decltype(*mChannelCount)>::StrictValueWithNoDeps)
                 .build());
 
@@ -94,10 +92,6 @@ public:
     }
 
 private:
-    std::shared_ptr<C2StreamBufferTypeSetting::input> mInputFormat;
-    std::shared_ptr<C2StreamBufferTypeSetting::output> mOutputFormat;
-    std::shared_ptr<C2PortMediaTypeSetting::input> mInputMediaType;
-    std::shared_ptr<C2PortMediaTypeSetting::output> mOutputMediaType;
     std::shared_ptr<C2StreamSampleRateInfo::output> mSampleRate;
     std::shared_ptr<C2StreamChannelCountInfo::output> mChannelCount;
     std::shared_ptr<C2StreamBitrateInfo::input> mBitrate;
@@ -205,7 +199,7 @@ void C2SoftG711Dec::process(
 
     work->worklets.front()->output.flags = work->input.flags;
     work->worklets.front()->output.buffers.clear();
-    work->worklets.front()->output.buffers.push_back(createLinearBuffer(block));
+    work->worklets.front()->output.buffers.push_back(createLinearBuffer(block, 0, outSize));
     work->worklets.front()->output.ordinal = work->input.ordinal;
 
     if (eos) {
@@ -229,53 +223,6 @@ c2_status_t C2SoftG711Dec::drain(
 
     return C2_OK;
 }
-
-#ifdef ALAW
-void C2SoftG711Dec::DecodeALaw(
-        int16_t *out, const uint8_t *in, size_t inSize) {
-    while (inSize > 0) {
-        inSize--;
-        int32_t x = *in++;
-
-        int32_t ix = x ^ 0x55;
-        ix &= 0x7f;
-
-        int32_t iexp = ix >> 4;
-        int32_t mant = ix & 0x0f;
-
-        if (iexp > 0) {
-            mant += 16;
-        }
-
-        mant = (mant << 4) + 8;
-
-        if (iexp > 1) {
-            mant = mant << (iexp - 1);
-        }
-
-        *out++ = (x > 127) ? mant : -mant;
-    }
-}
-#else
-void C2SoftG711Dec::DecodeMLaw(
-        int16_t *out, const uint8_t *in, size_t inSize) {
-    while (inSize > 0) {
-        inSize--;
-        int32_t x = *in++;
-
-        int32_t mantissa = ~x;
-        int32_t exponent = (mantissa >> 4) & 7;
-        int32_t segment = exponent + 1;
-        mantissa &= 0x0f;
-
-        int32_t step = 4 << segment;
-
-        int32_t abs = (0x80l << exponent) + step * mantissa + step / 2 - 4 * 33;
-
-        *out++ = (x < 0x80) ? -abs : abs;
-    }
-}
-#endif
 
 class C2SoftG711DecFactory : public C2ComponentFactory {
 public:
@@ -312,11 +259,13 @@ private:
 
 }  // namespace android
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" ::C2ComponentFactory* CreateCodec2Factory() {
     ALOGV("in %s", __func__);
     return new ::android::C2SoftG711DecFactory();
 }
 
+__attribute__((cfi_canonical_jump_table))
 extern "C" void DestroyCodec2Factory(::C2ComponentFactory* factory) {
     ALOGV("in %s", __func__);
     delete factory;

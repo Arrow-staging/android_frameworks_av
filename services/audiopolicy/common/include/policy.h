@@ -19,6 +19,8 @@
 #include <system/audio.h>
 #include <vector>
 
+#include <media/AudioContainers.h>
+
 namespace android {
 
 using StreamTypeVector = std::vector<audio_stream_type_t>;
@@ -40,15 +42,7 @@ static const uint32_t SONIFICATION_RESPECTFUL_AFTER_MUSIC_DELAY = 5000;
 
 // For mixed output and inputs, the policy will use max mixer channel count.
 // Do not limit channel count otherwise
-#define MAX_MIXER_CHANNEL_COUNT FCC_8
-
-/**
- * A device mask for all audio input and output devices where matching inputs/outputs on device
- * type alone is not enough: the address must match too
- */
-#define APM_AUDIO_DEVICE_OUT_MATCH_ADDRESS_ALL (AUDIO_DEVICE_OUT_REMOTE_SUBMIX|AUDIO_DEVICE_OUT_BUS)
-
-#define APM_AUDIO_DEVICE_IN_MATCH_ADDRESS_ALL (AUDIO_DEVICE_IN_REMOTE_SUBMIX|AUDIO_DEVICE_IN_BUS)
+#define MAX_MIXER_CHANNEL_COUNT FCC_LIMIT
 
 /**
  * Alias to AUDIO_DEVICE_OUT_DEFAULT defined for clarification when this value is used by volume
@@ -71,6 +65,34 @@ static inline bool is_state_in_call(int state)
 }
 
 /**
+ * Check whether the output device type is one
+ * where addresses are used to distinguish between one connected device and another
+ *
+ * @param[in] device to consider
+ *
+ * @return true if the device needs distinguish on address, false otherwise..
+ */
+static inline bool apm_audio_out_device_distinguishes_on_address(audio_devices_t device)
+{
+    return device == AUDIO_DEVICE_OUT_REMOTE_SUBMIX ||
+           device == AUDIO_DEVICE_OUT_BUS;
+}
+
+/**
+ * Check whether the input device type is one
+ * where addresses are used to distinguish between one connected device and another
+ *
+ * @param[in] device to consider
+ *
+ * @return true if the device needs distinguish on address, false otherwise..
+ */
+static inline bool apm_audio_in_device_distinguishes_on_address(audio_devices_t device)
+{
+    return device == AUDIO_DEVICE_IN_REMOTE_SUBMIX ||
+           device == AUDIO_DEVICE_IN_BUS;
+}
+
+/**
  * Check whether the device type is one
  * where addresses are used to distinguish between one connected device and another
  *
@@ -80,10 +102,8 @@ static inline bool is_state_in_call(int state)
  */
 static inline bool device_distinguishes_on_address(audio_devices_t device)
 {
-    return (((device & AUDIO_DEVICE_BIT_IN) != 0) &&
-            ((~AUDIO_DEVICE_BIT_IN & device & APM_AUDIO_DEVICE_IN_MATCH_ADDRESS_ALL) != 0)) ||
-           (((device & AUDIO_DEVICE_BIT_IN) == 0) &&
-            ((device & APM_AUDIO_DEVICE_OUT_MATCH_ADDRESS_ALL) != 0));
+    return apm_audio_in_device_distinguishes_on_address(device) ||
+           apm_audio_out_device_distinguishes_on_address(device);
 }
 
 /**
@@ -95,10 +115,7 @@ static inline bool device_distinguishes_on_address(audio_devices_t device)
  */
 static inline bool device_has_encoding_capability(audio_devices_t device)
 {
-    if (device & AUDIO_DEVICE_OUT_ALL_A2DP) {
-        return true;
-    }
-    return false;
+    return audio_is_a2dp_out_device(device);
 }
 
 /**
@@ -116,6 +133,7 @@ static inline bool device_has_encoding_capability(audio_devices_t device)
  * - AUDIO_SOURCE_FM_TUNER
  * - AUDIO_SOURCE_VOICE_RECOGNITION
  * - AUDIO_SOURCE_HOTWORD
+ * - AUDIO_SOURCE_ULTRASOUND
  *
  * @return the corresponding input source priority or 0 if priority is irrelevant for this source.
  *      This happens when the specified source cannot share a given input stream (e.g remote submix)
@@ -125,22 +143,24 @@ static inline int32_t source_priority(audio_source_t inputSource)
 {
     switch (inputSource) {
     case AUDIO_SOURCE_VOICE_COMMUNICATION:
-        return 9;
+        return 10;
     case AUDIO_SOURCE_CAMCORDER:
-        return 8;
+        return 9;
     case AUDIO_SOURCE_VOICE_PERFORMANCE:
-        return 7;
+        return 8;
     case AUDIO_SOURCE_UNPROCESSED:
-        return 6;
+        return 7;
     case AUDIO_SOURCE_MIC:
-        return 5;
+        return 6;
     case AUDIO_SOURCE_ECHO_REFERENCE:
-        return 4;
+        return 5;
     case AUDIO_SOURCE_FM_TUNER:
-        return 3;
+        return 4;
     case AUDIO_SOURCE_VOICE_RECOGNITION:
-        return 2;
+        return 3;
     case AUDIO_SOURCE_HOTWORD:
+        return 2;
+    case AUDIO_SOURCE_ULTRASOUND:
         return 1;
     default:
         break;
@@ -183,4 +203,46 @@ static inline bool hasStream(const android::StreamTypeVector &streams,
 static inline bool hasVoiceStream(const android::StreamTypeVector &streams)
 {
     return hasStream(streams, AUDIO_STREAM_VOICE_CALL);
+}
+
+/**
+ * @brief extract one device relevant from multiple device selection
+ * @param deviceTypes collection of audio device type
+ * @return the device type that is selected
+ */
+static inline audio_devices_t apm_extract_one_audio_device(
+        const android::DeviceTypeSet& deviceTypes) {
+    if (deviceTypes.empty()) {
+        return AUDIO_DEVICE_NONE;
+    } else if (deviceTypes.size() == 1) {
+        return *(deviceTypes.begin());
+    } else {
+        // Multiple device selection is either:
+        //  - speaker + one other device: give priority to speaker in this case.
+        //  - one A2DP device + another device: happens with duplicated output. In this case
+        // retain the device on the A2DP output as the other must not correspond to an active
+        // selection if not the speaker.
+        //  - HDMI-CEC system audio mode only output: give priority to available item in order.
+        if (deviceTypes.count(AUDIO_DEVICE_OUT_SPEAKER) != 0) {
+            return AUDIO_DEVICE_OUT_SPEAKER;
+        } else if (deviceTypes.count(AUDIO_DEVICE_OUT_SPEAKER_SAFE) != 0) {
+            return AUDIO_DEVICE_OUT_SPEAKER_SAFE;
+        } else if (deviceTypes.count(AUDIO_DEVICE_OUT_HDMI_ARC) != 0) {
+            return AUDIO_DEVICE_OUT_HDMI_ARC;
+        } else if (deviceTypes.count(AUDIO_DEVICE_OUT_HDMI_EARC) != 0) {
+            return AUDIO_DEVICE_OUT_HDMI_EARC;
+        } else if (deviceTypes.count(AUDIO_DEVICE_OUT_AUX_LINE) != 0) {
+            return AUDIO_DEVICE_OUT_AUX_LINE;
+        } else if (deviceTypes.count(AUDIO_DEVICE_OUT_SPDIF) != 0) {
+            return AUDIO_DEVICE_OUT_SPDIF;
+        } else {
+            std::vector<audio_devices_t> a2dpDevices = android::Intersection(
+                    deviceTypes, android::getAudioDeviceOutAllA2dpSet());
+            if (a2dpDevices.empty() || a2dpDevices.size() > 1) {
+                ALOGW("%s invalid device combination: %s",
+                      __func__, android::dumpDeviceTypes(deviceTypes).c_str());
+            }
+            return a2dpDevices.empty() ? AUDIO_DEVICE_NONE : a2dpDevices[0];
+        }
+    }
 }

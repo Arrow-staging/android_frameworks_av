@@ -25,27 +25,151 @@
 
 #include <gtest/gtest.h>
 #include <unistd.h>
+#include <thread>
 
 // Callback function that does nothing.
 aaudio_data_callback_result_t NoopDataCallbackProc(
-        AAudioStream *stream,
-        void *userData,
+        AAudioStream * stream,
+        void * /* userData */,
         void *audioData,
         int32_t numFrames
 ) {
-    (void) stream;
-    (void) userData;
-    (void) audioData;
-    (void) numFrames;
+    aaudio_direction_t direction = AAudioStream_getDirection(stream);
+    if (direction == AAUDIO_DIRECTION_INPUT) {
+        return AAUDIO_CALLBACK_RESULT_CONTINUE;
+    }
+    // Check to make sure the buffer is initialized to all zeros.
+    int channels = AAudioStream_getChannelCount(stream);
+    int numSamples = channels * numFrames;
+    bool allZeros = true;
+    float * const floatData = reinterpret_cast<float *>(audioData);
+    for (int i = 0; i < numSamples; i++) {
+        allZeros &= (floatData[i] == 0.0f);
+        floatData[i] = 0.0f;
+    }
+    EXPECT_TRUE(allZeros);
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
-// Test AAudioStream_setBufferSizeInFrames()
-
 constexpr int64_t NANOS_PER_MILLISECOND = 1000 * 1000;
+constexpr int64_t MICROS_PER_MILLISECOND = 1000;
+
+void checkReleaseThenClose(aaudio_performance_mode_t perfMode,
+        aaudio_sharing_mode_t sharingMode,
+        aaudio_direction_t direction = AAUDIO_DIRECTION_OUTPUT) {
+    AAudioStreamBuilder* aaudioBuilder = nullptr;
+    AAudioStream* aaudioStream = nullptr;
+
+    // Use an AAudioStreamBuilder to contain requested parameters.
+    ASSERT_EQ(AAUDIO_OK, AAudio_createStreamBuilder(&aaudioBuilder));
+
+    // Request stream properties.
+    AAudioStreamBuilder_setDataCallback(aaudioBuilder,
+                                        NoopDataCallbackProc,
+                                        nullptr);
+    AAudioStreamBuilder_setPerformanceMode(aaudioBuilder, perfMode);
+    AAudioStreamBuilder_setSharingMode(aaudioBuilder, sharingMode);
+    AAudioStreamBuilder_setDirection(aaudioBuilder, direction);
+    AAudioStreamBuilder_setFormat(aaudioBuilder, AAUDIO_FORMAT_PCM_FLOAT);
+
+    // Create an AAudioStream using the Builder.
+    ASSERT_EQ(AAUDIO_OK,
+              AAudioStreamBuilder_openStream(aaudioBuilder, &aaudioStream));
+    AAudioStreamBuilder_delete(aaudioBuilder);
+
+    ASSERT_EQ(AAUDIO_OK, AAudioStream_requestStart(aaudioStream));
+
+    sleep(1);
+
+    EXPECT_EQ(AAUDIO_OK, AAudioStream_requestStop(aaudioStream));
+
+    EXPECT_EQ(AAUDIO_OK, AAudioStream_release(aaudioStream));
+    EXPECT_EQ(AAUDIO_STREAM_STATE_CLOSING, AAudioStream_getState(aaudioStream));
+
+    // We should be able to call this again without crashing.
+    EXPECT_EQ(AAUDIO_OK, AAudioStream_release(aaudioStream));
+    EXPECT_EQ(AAUDIO_STREAM_STATE_CLOSING, AAudioStream_getState(aaudioStream));
+
+    // We expect these not to crash.
+    AAudioStream_setBufferSizeInFrames(aaudioStream, 0);
+    AAudioStream_setBufferSizeInFrames(aaudioStream, 99999999);
+
+    // We should NOT be able to start or change a stream after it has been released.
+    EXPECT_EQ(AAUDIO_ERROR_INVALID_STATE, AAudioStream_requestStart(aaudioStream));
+    EXPECT_EQ(AAUDIO_STREAM_STATE_CLOSING, AAudioStream_getState(aaudioStream));
+    // Pause is only implemented for OUTPUT.
+    if (direction == AAUDIO_DIRECTION_OUTPUT) {
+        EXPECT_EQ(AAUDIO_ERROR_INVALID_STATE,
+                  AAudioStream_requestPause(aaudioStream));
+    }
+    EXPECT_EQ(AAUDIO_STREAM_STATE_CLOSING, AAudioStream_getState(aaudioStream));
+    EXPECT_EQ(AAUDIO_ERROR_INVALID_STATE, AAudioStream_requestStop(aaudioStream));
+    EXPECT_EQ(AAUDIO_STREAM_STATE_CLOSING, AAudioStream_getState(aaudioStream));
+
+    // Does this crash?
+    EXPECT_GT(AAudioStream_getFramesRead(aaudioStream), 0);
+    EXPECT_GT(AAudioStream_getFramesWritten(aaudioStream), 0);
+    EXPECT_GT(AAudioStream_getFramesPerBurst(aaudioStream), 0);
+    EXPECT_GE(AAudioStream_getXRunCount(aaudioStream), 0);
+    EXPECT_GT(AAudioStream_getBufferCapacityInFrames(aaudioStream), 0);
+    EXPECT_GT(AAudioStream_getBufferSizeInFrames(aaudioStream), 0);
+
+    int64_t timestampFrames = 0;
+    int64_t timestampNanos = 0;
+    aaudio_result_t result = AAudioStream_getTimestamp(aaudioStream, CLOCK_MONOTONIC,
+            &timestampFrames, &timestampNanos);
+    EXPECT_TRUE(result == AAUDIO_ERROR_INVALID_STATE || result == AAUDIO_ERROR_UNIMPLEMENTED);
+
+    // Verify Closing State. Does this crash?
+    aaudio_stream_state_t state = AAUDIO_STREAM_STATE_UNKNOWN;
+    EXPECT_EQ(AAUDIO_OK, AAudioStream_waitForStateChange(aaudioStream,
+                                                         AAUDIO_STREAM_STATE_UNKNOWN, &state,
+                                                         500 * NANOS_PER_MILLISECOND));
+    EXPECT_EQ(AAUDIO_STREAM_STATE_CLOSING, state);
+
+    EXPECT_EQ(AAUDIO_OK, AAudioStream_close(aaudioStream));
+}
+
+TEST(test_various, aaudio_release_close_none_output) {
+    checkReleaseThenClose(AAUDIO_PERFORMANCE_MODE_NONE,
+            AAUDIO_SHARING_MODE_SHARED,
+            AAUDIO_DIRECTION_OUTPUT);
+    // No EXCLUSIVE streams with MODE_NONE.
+}
+
+TEST(test_various, aaudio_release_close_none_input) {
+    checkReleaseThenClose(AAUDIO_PERFORMANCE_MODE_NONE,
+            AAUDIO_SHARING_MODE_SHARED,
+            AAUDIO_DIRECTION_INPUT);
+    // No EXCLUSIVE streams with MODE_NONE.
+}
+
+TEST(test_various, aaudio_release_close_low_shared_output) {
+    checkReleaseThenClose(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
+            AAUDIO_SHARING_MODE_SHARED,
+            AAUDIO_DIRECTION_OUTPUT);
+}
+
+TEST(test_various, aaudio_release_close_low_shared_input) {
+    checkReleaseThenClose(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
+            AAUDIO_SHARING_MODE_SHARED,
+            AAUDIO_DIRECTION_INPUT);
+}
+
+TEST(test_various, aaudio_release_close_low_exclusive_output) {
+    checkReleaseThenClose(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
+            AAUDIO_SHARING_MODE_EXCLUSIVE,
+            AAUDIO_DIRECTION_OUTPUT);
+}
+
+TEST(test_various, aaudio_release_close_low_exclusive_input) {
+    checkReleaseThenClose(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
+            AAUDIO_SHARING_MODE_EXCLUSIVE,
+            AAUDIO_DIRECTION_INPUT);
+}
 
 enum FunctionToCall {
-    CALL_START, CALL_STOP, CALL_PAUSE, CALL_FLUSH
+    CALL_START, CALL_STOP, CALL_PAUSE, CALL_FLUSH, CALL_RELEASE
 };
 
 void checkStateTransition(aaudio_performance_mode_t perfMode,
@@ -62,6 +186,7 @@ void checkStateTransition(aaudio_performance_mode_t perfMode,
     // Request stream properties.
     AAudioStreamBuilder_setDataCallback(aaudioBuilder, NoopDataCallbackProc, nullptr);
     AAudioStreamBuilder_setPerformanceMode(aaudioBuilder, perfMode);
+    AAudioStreamBuilder_setFormat(aaudioBuilder, AAUDIO_FORMAT_PCM_FLOAT);
 
     // Create an AAudioStream using the Builder.
     ASSERT_EQ(AAUDIO_OK, AAudioStreamBuilder_openStream(aaudioBuilder, &aaudioStream));
@@ -97,11 +222,27 @@ void checkStateTransition(aaudio_performance_mode_t perfMode,
             } else if (originalState == AAUDIO_STREAM_STATE_PAUSED) {
                 ASSERT_EQ(AAUDIO_OK, AAudioStream_requestPause(aaudioStream));
                 inputState = AAUDIO_STREAM_STATE_PAUSING;
+            } else if (originalState == AAUDIO_STREAM_STATE_FLUSHING) {
+                ASSERT_EQ(AAUDIO_OK, AAudioStream_requestPause(aaudioStream));
+                // We can only flush() after pause is complete.
+                ASSERT_EQ(AAUDIO_OK, AAudioStream_waitForStateChange(aaudioStream,
+                                                                 AAUDIO_STREAM_STATE_PAUSING,
+                                                                 &state,
+                                                                 1000 * NANOS_PER_MILLISECOND));
+                ASSERT_EQ(AAUDIO_STREAM_STATE_PAUSED, state);
+                ASSERT_EQ(AAUDIO_OK, AAudioStream_requestFlush(aaudioStream));
+                // That will put the stream into the FLUSHING state.
+                // The FLUSHING state will persist until we process functionToCall.
+                // That is because the transition to FLUSHED is caused by the callback,
+                // or by calling write() or waitForStateChange(). But those will not
+                // occur.
+            } else if (originalState == AAUDIO_STREAM_STATE_CLOSING) {
+                ASSERT_EQ(AAUDIO_OK, AAudioStream_release(aaudioStream));
             }
         }
     }
 
-    // Wait until past transitional state.
+    // Wait until we get past the transitional state if requested.
     if (inputState != AAUDIO_STREAM_STATE_UNINITIALIZED) {
         ASSERT_EQ(AAUDIO_OK, AAudioStream_waitForStateChange(aaudioStream,
                                                              inputState,
@@ -128,12 +269,20 @@ void checkStateTransition(aaudio_performance_mode_t perfMode,
             EXPECT_EQ(expectedResult, AAudioStream_requestFlush(aaudioStream));
             transitionalState = AAUDIO_STREAM_STATE_FLUSHING;
             break;
+        case FunctionToCall::CALL_RELEASE:
+            EXPECT_EQ(expectedResult, AAudioStream_release(aaudioStream));
+            // Set to UNINITIALIZED so the waitForStateChange() below will
+            // will return immediately with the current state.
+            transitionalState = AAUDIO_STREAM_STATE_UNINITIALIZED;
+            break;
     }
 
-    EXPECT_EQ(AAUDIO_OK, AAudioStream_waitForStateChange(aaudioStream,
-                                                         transitionalState,
-                                                         &state,
-                                                         1000 * NANOS_PER_MILLISECOND));
+    EXPECT_EQ(AAUDIO_OK,
+            AAudioStream_waitForStateChange(aaudioStream,
+                    transitionalState,
+                    &state,
+                    1000 * NANOS_PER_MILLISECOND));
+
     // We should not change state when a function fails.
     if (expectedResult != AAUDIO_OK) {
         ASSERT_EQ(originalState, expectedState);
@@ -413,6 +562,88 @@ checkStateTransition(AAUDIO_PERFORMANCE_MODE_NONE,
         AAUDIO_STREAM_STATE_FLUSHED);
 }
 
+// FLUSHING ================================================================
+TEST(test_various, aaudio_state_lowlat_flushing_start) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
+        AAUDIO_STREAM_STATE_FLUSHING,
+        FunctionToCall::CALL_START,
+        AAUDIO_OK,
+        AAUDIO_STREAM_STATE_STARTED);
+}
+
+TEST(test_various, aaudio_state_none_flushing_start) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_NONE,
+        AAUDIO_STREAM_STATE_FLUSHING,
+        FunctionToCall::CALL_START,
+        AAUDIO_OK,
+        AAUDIO_STREAM_STATE_STARTED);
+}
+
+TEST(test_various, aaudio_state_lowlat_flushing_release) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
+        AAUDIO_STREAM_STATE_FLUSHING,
+        FunctionToCall::CALL_RELEASE,
+        AAUDIO_OK,
+        AAUDIO_STREAM_STATE_CLOSING);
+}
+
+TEST(test_various, aaudio_state_none_flushing_release) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_NONE,
+        AAUDIO_STREAM_STATE_FLUSHING,
+        FunctionToCall::CALL_RELEASE,
+        AAUDIO_OK,
+        AAUDIO_STREAM_STATE_CLOSING);
+}
+
+TEST(test_various, aaudio_state_lowlat_starting_release) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
+        AAUDIO_STREAM_STATE_STARTING,
+        FunctionToCall::CALL_RELEASE,
+        AAUDIO_OK,
+        AAUDIO_STREAM_STATE_CLOSING);
+}
+
+TEST(test_various, aaudio_state_none_starting_release) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_NONE,
+        AAUDIO_STREAM_STATE_STARTING,
+        FunctionToCall::CALL_RELEASE,
+        AAUDIO_OK,
+        AAUDIO_STREAM_STATE_CLOSING);
+}
+
+// CLOSING ================================================================
+TEST(test_various, aaudio_state_lowlat_closing_start) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
+        AAUDIO_STREAM_STATE_CLOSING,
+        FunctionToCall::CALL_START,
+        AAUDIO_ERROR_INVALID_STATE,
+        AAUDIO_STREAM_STATE_CLOSING);
+}
+
+TEST(test_various, aaudio_state_none_closing_start) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_NONE,
+        AAUDIO_STREAM_STATE_CLOSING,
+        FunctionToCall::CALL_START,
+        AAUDIO_ERROR_INVALID_STATE,
+        AAUDIO_STREAM_STATE_CLOSING);
+}
+
+TEST(test_various, aaudio_state_lowlat_closing_stop) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY,
+        AAUDIO_STREAM_STATE_CLOSING,
+        FunctionToCall::CALL_STOP,
+        AAUDIO_ERROR_INVALID_STATE,
+        AAUDIO_STREAM_STATE_CLOSING);
+}
+
+TEST(test_various, aaudio_state_none_closing_stop) {
+checkStateTransition(AAUDIO_PERFORMANCE_MODE_NONE,
+        AAUDIO_STREAM_STATE_CLOSING,
+        FunctionToCall::CALL_STOP,
+        AAUDIO_ERROR_INVALID_STATE,
+        AAUDIO_STREAM_STATE_CLOSING);
+}
+
 // ==========================================================================
 TEST(test_various, aaudio_set_buffer_size) {
 
@@ -441,7 +672,7 @@ TEST(test_various, aaudio_set_buffer_size) {
            bufferCapacity, bufferCapacity % framesPerBurst);
 
     actualSize = AAudioStream_setBufferSizeInFrames(aaudioStream, 0);
-    EXPECT_GT(actualSize, 0);
+    EXPECT_GE(actualSize, 0); // 0 is legal in R
     EXPECT_LE(actualSize, bufferCapacity);
 
     actualSize = AAudioStream_setBufferSizeInFrames(aaudioStream, 2 * framesPerBurst);
@@ -469,7 +700,7 @@ TEST(test_various, aaudio_set_buffer_size) {
     EXPECT_LE(actualSize, bufferCapacity);
 
     actualSize = AAudioStream_setBufferSizeInFrames(aaudioStream, INT32_MIN);
-    EXPECT_GT(actualSize, 0);
+    EXPECT_GE(actualSize, 0); // 0 is legal in R
     EXPECT_LE(actualSize, bufferCapacity);
 
     AAudioStream_close(aaudioStream);
@@ -531,6 +762,58 @@ TEST(test_various, aaudio_callback_once_none) {
 
 TEST(test_various, aaudio_callback_once_lowlat) {
     checkCallbackOnce(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
+}
+
+void waitForStateChangeToClosingorClosed(AAudioStream **stream, std::atomic<bool>* isReady)
+{
+    *isReady = true;
+    aaudio_stream_state_t state = AAUDIO_STREAM_STATE_UNKNOWN;
+    EXPECT_EQ(AAUDIO_OK, AAudioStream_waitForStateChange(*stream,
+                                                         AAUDIO_STREAM_STATE_OPEN, &state,
+                                                         10000 * NANOS_PER_MILLISECOND));
+    if ((state != AAUDIO_STREAM_STATE_CLOSING) && (state != AAUDIO_STREAM_STATE_CLOSED)){
+        FAIL() << "ERROR - State not closing or closed. Current state: " <<
+                AAudio_convertStreamStateToText(state);
+    }
+}
+
+void testWaitForStateChangeClose(aaudio_performance_mode_t perfMode) {
+    AAudioStreamBuilder *aaudioBuilder = nullptr;
+    AAudioStream *aaudioStream = nullptr;
+
+    ASSERT_EQ(AAUDIO_OK, AAudio_createStreamBuilder(&aaudioBuilder));
+    AAudioStreamBuilder_setPerformanceMode(aaudioBuilder, perfMode);
+    ASSERT_EQ(AAUDIO_OK, AAudioStreamBuilder_openStream(aaudioBuilder, &aaudioStream));
+
+    // Verify Open State
+    aaudio_stream_state_t state = AAUDIO_STREAM_STATE_UNKNOWN;
+    EXPECT_EQ(AAUDIO_OK, AAudioStream_waitForStateChange(aaudioStream,
+                                                         AAUDIO_STREAM_STATE_UNKNOWN, &state,
+                                                         1000 * NANOS_PER_MILLISECOND));
+    EXPECT_EQ(AAUDIO_STREAM_STATE_OPEN, state);
+
+    std::atomic<bool> isWaitThreadReady{false};
+
+    // Spawn a new thread to wait for the state change
+    std::thread waitThread (waitForStateChangeToClosingorClosed, &aaudioStream,
+                            &isWaitThreadReady);
+
+    // Wait for worker thread to be ready
+    while (!isWaitThreadReady) {
+        usleep(MICROS_PER_MILLISECOND);
+    }
+    // Sleep an additional millisecond to make sure waitForAudioThread is called
+    usleep(MICROS_PER_MILLISECOND);
+    EXPECT_EQ(AAUDIO_OK, AAudioStream_close(aaudioStream));
+    waitThread.join();
+}
+
+TEST(test_various, wait_for_state_change_close_none) {
+    testWaitForStateChangeClose(AAUDIO_PERFORMANCE_MODE_NONE);
+}
+
+TEST(test_various, wait_for_state_change_close_lowlat) {
+    testWaitForStateChangeClose(AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
 }
 
 // ************************************************************

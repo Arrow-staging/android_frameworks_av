@@ -44,6 +44,8 @@ public:
     virtual status_t setPreviewSurface(const sp<IGraphicBufferProducer>& surface) = 0;
     virtual status_t setVideoSource(int vs) = 0;
     virtual status_t setAudioSource(int as) = 0;
+    virtual status_t setPrivacySensitive(bool privacySensitive) = 0;
+    virtual status_t isPrivacySensitive(bool *privacySensitive) const = 0;
     virtual status_t setOutputFormat(int of) = 0;
     virtual status_t setVideoEncoder(int ve) = 0;
     virtual status_t setAudioEncoder(int ae) = 0;
@@ -73,7 +75,10 @@ public:
     virtual status_t enableAudioDeviceCallback(bool enabled) = 0;
     virtual status_t getActiveMicrophones(
                         std::vector<media::MicrophoneInfo>* activeMicrophones) = 0;
+    virtual status_t setPreferredMicrophoneDirection(audio_microphone_direction_t direction) = 0;
+    virtual status_t setPreferredMicrophoneFieldDimension(float zoom) = 0;
     virtual status_t getPortId(audio_port_handle_t *portId) = 0;
+    virtual status_t getRtpDataUsage(uint64_t *bytes) = 0;
 };
 
 // ----------------------------------------------------------------------------

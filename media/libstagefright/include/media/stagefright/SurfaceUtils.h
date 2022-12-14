@@ -19,8 +19,10 @@
 #define SURFACE_UTILS_H_
 
 #include <utils/Errors.h>
+#include <utils/StrongPointer.h>
 
 struct ANativeWindow;
+class Surface;
 
 namespace android {
 
@@ -36,9 +38,20 @@ status_t setNativeWindowSizeFormatAndUsage(
         int width, int height, int format, int rotation, int usage, bool reconnect);
 void setNativeWindowHdrMetadata(
         ANativeWindow *nativeWindow /* nonnull */, HDRStaticInfo *info /* nonnull */);
+status_t setNativeWindowRotation(
+        ANativeWindow *nativeWindow /* nonnull */, int rotation);
 status_t pushBlankBuffersToNativeWindow(ANativeWindow *nativeWindow /* nonnull */);
 status_t nativeWindowConnect(ANativeWindow *surface, const char *reason);
 status_t nativeWindowDisconnect(ANativeWindow *surface, const char *reason);
+
+/**
+ * Disable buffer dropping behavior of BufferQueue if target sdk of application
+ * is Q or later. If the caller is not an app (e.g. MediaPlayer in mediaserver)
+ * retain buffer dropping behavior.
+ *
+ * @return NO_ERROR
+ */
+status_t disableLegacyBufferDropPostQ(const sp<Surface> &surface);
 
 } // namespace android
 

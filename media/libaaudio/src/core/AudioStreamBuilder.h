@@ -31,9 +31,9 @@ namespace aaudio {
  */
 class AudioStreamBuilder : public AAudioStreamParameters {
 public:
-    AudioStreamBuilder();
+    AudioStreamBuilder() = default;
 
-    ~AudioStreamBuilder();
+    ~AudioStreamBuilder() = default;
 
     bool isSharingModeMatchRequired() const {
         return mSharingModeMatchRequired;
@@ -98,11 +98,26 @@ public:
         return this;
     }
 
+    AudioStreamBuilder* setPrivacySensitiveRequest(bool privacySensitive) {
+        mPrivacySensitiveReq =
+            privacySensitive ? PRIVACY_SENSITIVE_ENABLED : PRIVACY_SENSITIVE_DISABLED;
+        return this;
+    }
+
     aaudio_result_t build(AudioStream **streamPtr);
 
     virtual aaudio_result_t validate() const override;
 
+
+    void logParameters() const;
+
+    // Mark the stream so it can be deleted.
+    static void stopUsingStream(AudioStream *stream);
+
 private:
+    // Extract a raw pointer that we can pass to a 'C' app.
+    static AudioStream *startUsingStream(android::sp<AudioStream> &spAudioStream);
+
     bool                       mSharingModeMatchRequired = false; // must match sharing mode requested
     aaudio_performance_mode_t  mPerformanceMode = AAUDIO_PERFORMANCE_MODE_NONE;
 
@@ -112,6 +127,14 @@ private:
 
     AAudioStream_errorCallback mErrorCallbackProc = nullptr;
     void                      *mErrorCallbackUserData = nullptr;
+
+    enum {
+        PRIVACY_SENSITIVE_DEFAULT = -1,
+        PRIVACY_SENSITIVE_DISABLED = 0,
+        PRIVACY_SENSITIVE_ENABLED = 1,
+    };
+    typedef int32_t privacy_sensitive_t;
+    privacy_sensitive_t        mPrivacySensitiveReq = PRIVACY_SENSITIVE_DEFAULT;
 };
 
 } /* namespace aaudio */

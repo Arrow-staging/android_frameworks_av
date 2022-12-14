@@ -14,20 +14,27 @@
  * limitations under the License.
  */
 
-#define LOG_TAG (mInService ? "AudioStreamInternalCapture_Service" \
-                          : "AudioStreamInternalCapture_Client")
 //#define LOG_NDEBUG 0
 #include <utils/Log.h>
 
 #include <algorithm>
-#include <audio_utils/primitives.h>
+#include <audio_utils/format.h>
 #include <aaudio/AAudio.h>
+#include <media/MediaMetricsItem.h>
 
 #include "client/AudioStreamInternalCapture.h"
 #include "utility/AudioClock.h"
 
 #define ATRACE_TAG ATRACE_TAG_AUDIO
 #include <utils/Trace.h>
+
+// We do this after the #includes because if a header uses ALOG.
+// it would fail on the reference to mInService.
+#undef LOG_TAG
+// This file is used in both client and server processes.
+// This is needed to make sense of the logs more easily.
+#define LOG_TAG (mInService ? "AudioStreamInternalCapture_Service" \
+                          : "AudioStreamInternalCapture_Client")
 
 using android::WrappingBuffer;
 
@@ -39,11 +46,9 @@ AudioStreamInternalCapture::AudioStreamInternalCapture(AAudioServiceInterface  &
 
 }
 
-AudioStreamInternalCapture::~AudioStreamInternalCapture() {}
-
-void AudioStreamInternalCapture::advanceClientToMatchServerPosition() {
-    int64_t readCounter = mAudioEndpoint.getDataReadCounter();
-    int64_t writeCounter = mAudioEndpoint.getDataWriteCounter();
+void AudioStreamInternalCapture::advanceClientToMatchServerPosition(int32_t serverMargin) {
+    int64_t readCounter = mAudioEndpoint->getDataReadCounter();
+    int64_t writeCounter = mAudioEndpoint->getDataWriteCounter() + serverMargin;
 
     // Bump offset so caller does not see the retrograde motion in getFramesRead().
     int64_t offset = readCounter - writeCounter;
@@ -53,7 +58,7 @@ void AudioStreamInternalCapture::advanceClientToMatchServerPosition() {
 
     // Force readCounter to match writeCounter.
     // This is because we cannot change the write counter in the hardware.
-    mAudioEndpoint.setDataReadCounter(writeCounter);
+    mAudioEndpoint->setDataReadCounter(writeCounter);
 }
 
 // Write the data, block if needed and timeoutMillis > 0
@@ -86,25 +91,30 @@ aaudio_result_t AudioStreamInternalCapture::processDataNow(void *buffer, int32_t
     }
     // If we have gotten this far then we have at least one timestamp from server.
 
-    if (mAudioEndpoint.isFreeRunning()) {
+    if (mAudioEndpoint->isFreeRunning()) {
         //ALOGD("AudioStreamInternalCapture::processDataNow() - update remote counter");
         // Update data queue based on the timing model.
-        int64_t estimatedRemoteCounter = mClockModel.convertTimeToPosition(currentNanoTime);
+        // Jitter in the DSP can cause late writes to the FIFO.
+        // This might be caused by resampling.
+        // We want to read the FIFO after the latest possible time
+        // that the DSP could have written the data.
+        int64_t estimatedRemoteCounter = mClockModel.convertLatestTimeToPosition(currentNanoTime);
         // TODO refactor, maybe use setRemoteCounter()
-        mAudioEndpoint.setDataWriteCounter(estimatedRemoteCounter);
+        mAudioEndpoint->setDataWriteCounter(estimatedRemoteCounter);
     }
 
     // This code assumes that we have already received valid timestamps.
     if (mNeedCatchUp.isRequested()) {
         // Catch an MMAP pointer that is already advancing.
         // This will avoid initial underruns caused by a slow cold start.
-        advanceClientToMatchServerPosition();
+        advanceClientToMatchServerPosition(0 /*serverMargin*/);
         mNeedCatchUp.acknowledge();
     }
 
-    // If the write index passed the read index then consider it an overrun.
+    // If the capture buffer is full beyond capacity then consider it an overrun.
     // For shared streams, the xRunCount is passed up from the service.
-    if (mAudioEndpoint.isFreeRunning() && mAudioEndpoint.getEmptyFramesAvailable() < 0) {
+    if (mAudioEndpoint->isFreeRunning()
+        && mAudioEndpoint->getFullFramesAvailable() > mAudioEndpoint->getBufferCapacityInFrames()) {
         mXRunCount++;
         if (ATRACE_ENABLED()) {
             ATRACE_INT("aaOverRuns", mXRunCount);
@@ -138,8 +148,8 @@ aaudio_result_t AudioStreamInternalCapture::processDataNow(void *buffer, int32_t
                 // Calculate frame position based off of the readCounter because
                 // the writeCounter might have just advanced in the background,
                 // causing us to sleep until a later burst.
-                int64_t nextPosition = mAudioEndpoint.getDataReadCounter() + mFramesPerBurst;
-                wakeTime = mClockModel.convertPositionToTime(nextPosition);
+                int64_t nextPosition = mAudioEndpoint->getDataReadCounter() + getFramesPerBurst();
+                wakeTime = mClockModel.convertPositionToLatestTime(nextPosition);
             }
                 break;
             default:
@@ -161,7 +171,7 @@ aaudio_result_t AudioStreamInternalCapture::readNowWithConversion(void *buffer,
     uint8_t *destination = (uint8_t *) buffer;
     int32_t framesLeft = numFrames;
 
-    mAudioEndpoint.getFullFramesAvailable(&wrappingBuffer);
+    mAudioEndpoint->getFullFramesAvailable(&wrappingBuffer);
 
     // Read data in one or two parts.
     for (int partIndex = 0; framesLeft > 0 && partIndex < WrappingBuffer::SIZE; partIndex++) {
@@ -178,58 +188,45 @@ aaudio_result_t AudioStreamInternalCapture::readNowWithConversion(void *buffer,
 
         const audio_format_t sourceFormat = getDeviceFormat();
         const audio_format_t destinationFormat = getFormat();
-        // TODO factor this out into a utility function
-        if (sourceFormat == destinationFormat) {
-            memcpy(destination, wrappingBuffer.data[partIndex], numBytes);
-        } else if (sourceFormat == AUDIO_FORMAT_PCM_16_BIT
-                   && destinationFormat == AUDIO_FORMAT_PCM_FLOAT) {
-            memcpy_to_float_from_i16(
-                    (float *) destination,
-                    (const int16_t *) wrappingBuffer.data[partIndex],
-                    numSamples);
-        } else if (sourceFormat == AUDIO_FORMAT_PCM_FLOAT
-                   && destinationFormat == AUDIO_FORMAT_PCM_16_BIT) {
-            memcpy_to_i16_from_float(
-                    (int16_t *) destination,
-                    (const float *) wrappingBuffer.data[partIndex],
-                    numSamples);
-        } else {
-            ALOGE("%s() - Format conversion not supported! audio_format_t source = %u, dest = %u",
-                __func__, sourceFormat, destinationFormat);
-            return AAUDIO_ERROR_INVALID_FORMAT;
-        }
+
+        memcpy_by_audio_format(destination, destinationFormat,
+                wrappingBuffer.data[partIndex], sourceFormat, numSamples);
+
         destination += numBytes;
         framesLeft -= framesToProcess;
     }
 
     int32_t framesProcessed = numFrames - framesLeft;
-    mAudioEndpoint.advanceReadIndex(framesProcessed);
+    mAudioEndpoint->advanceReadIndex(framesProcessed);
 
     //ALOGD("readNowWithConversion() returns %d", framesProcessed);
     return framesProcessed;
 }
 
 int64_t AudioStreamInternalCapture::getFramesWritten() {
-    const int64_t framesWrittenHardware = isClockModelInControl()
-            ? mClockModel.convertTimeToPosition(AudioClock::getNanoseconds())
-            : mAudioEndpoint.getDataWriteCounter();
-    // Add service offset and prevent retrograde motion.
-    mLastFramesWritten = std::max(mLastFramesWritten,
-                                  framesWrittenHardware + mFramesOffsetFromService);
+    if (mAudioEndpoint) {
+        const int64_t framesWrittenHardware = isClockModelInControl()
+                ? mClockModel.convertTimeToPosition(AudioClock::getNanoseconds())
+                : mAudioEndpoint->getDataWriteCounter();
+        // Add service offset and prevent retrograde motion.
+        mLastFramesWritten = std::max(mLastFramesWritten,
+                                      framesWrittenHardware + mFramesOffsetFromService);
+    }
     return mLastFramesWritten;
 }
 
 int64_t AudioStreamInternalCapture::getFramesRead() {
-    int64_t frames = mAudioEndpoint.getDataReadCounter() + mFramesOffsetFromService;
-    //ALOGD("getFramesRead() returns %lld", (long long)frames);
-    return frames;
+    if (mAudioEndpoint) {
+        mLastFramesRead = mAudioEndpoint->getDataReadCounter() + mFramesOffsetFromService;
+    }
+    return mLastFramesRead;
 }
 
 // Read data from the stream and pass it to the callback for processing.
 void *AudioStreamInternalCapture::callbackLoop() {
     aaudio_result_t result = AAUDIO_OK;
     aaudio_data_callback_result_t callbackResult = AAUDIO_CALLBACK_RESULT_CONTINUE;
-    if (!isDataCallbackSet()) return NULL;
+    if (!isDataCallbackSet()) return nullptr;
 
     // result might be a frame count
     while (mCallbackEnabled.load() && isActive() && (result >= 0)) {
@@ -238,7 +235,7 @@ void *AudioStreamInternalCapture::callbackLoop() {
         int64_t timeoutNanos = calculateReasonableTimeout(mCallbackFrames);
 
         // This is a BLOCKING READ!
-        result = read(mCallbackBuffer, mCallbackFrames, timeoutNanos);
+        result = read(mCallbackBuffer.get(), mCallbackFrames, timeoutNanos);
         if ((result != mCallbackFrames)) {
             ALOGE("callbackLoop: read() returned %d", result);
             if (result >= 0) {
@@ -250,16 +247,16 @@ void *AudioStreamInternalCapture::callbackLoop() {
         }
 
         // Call application using the AAudio callback interface.
-        callbackResult = maybeCallDataCallback(mCallbackBuffer, mCallbackFrames);
+        callbackResult = maybeCallDataCallback(mCallbackBuffer.get(), mCallbackFrames);
 
         if (callbackResult == AAUDIO_CALLBACK_RESULT_STOP) {
             ALOGD("%s(): callback returned AAUDIO_CALLBACK_RESULT_STOP", __func__);
-            result = systemStopFromCallback();
+            result = systemStopInternal();
             break;
         }
     }
 
     ALOGD("callbackLoop() exiting, result = %d, isActive() = %d",
           result, (int) isActive());
-    return NULL;
+    return nullptr;
 }

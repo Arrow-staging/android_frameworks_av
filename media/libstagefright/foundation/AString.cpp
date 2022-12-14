@@ -23,10 +23,13 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <binder/Parcel.h>
 #include <utils/String8.h>
 #include "ADebug.h"
 #include "AString.h"
+
+#if defined(__ANDROID__) && !defined(__ANDROID_VNDK__) && !defined(__ANDROID_APEX__)
+#include <binder/Parcel.h>
+#endif
 
 namespace android {
 
@@ -362,11 +365,10 @@ bool AString::endsWithIgnoreCase(const char *suffix) const {
     return !strcasecmp(mData + mSize - suffixLen, suffix);
 }
 
+#if defined(__ANDROID__) && !defined(__ANDROID_VNDK__) && !defined(__ANDROID_APEX__)
 // static
 AString AString::FromParcel(const Parcel &parcel) {
     size_t size = static_cast<size_t>(parcel.readInt32());
-    // The static analyzer incorrectly reports a false-positive here in c++17.
-    // https://bugs.llvm.org/show_bug.cgi?id=38176 . NOLINTNEXTLINE
     return AString(static_cast<const char *>(parcel.readInplace(size)), size);
 }
 
@@ -378,15 +380,20 @@ status_t AString::writeToParcel(Parcel *parcel) const {
     }
     return err;
 }
+#endif // defined(__ANDROID__) && !defined(__ANDROID_VNDK__) && !defined(__ANDROID_APEX__)
 
 AString AStringPrintf(const char *format, ...) {
     va_list ap;
     va_start(ap, format);
 
     char *buffer;
-    vasprintf(&buffer, format, ap);
+    int bufferSize = vasprintf(&buffer, format, ap);
 
     va_end(ap);
+
+    if(bufferSize < 0) {
+        return AString();
+    }
 
     AString result(buffer);
 

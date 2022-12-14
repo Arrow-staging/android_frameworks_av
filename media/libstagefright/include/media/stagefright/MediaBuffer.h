@@ -46,9 +46,13 @@ public:
     explicit MediaBuffer(size_t size);
 
     explicit MediaBuffer(const sp<ABuffer> &buffer);
-#ifndef NO_IMEMORY
+#if !defined(NO_IMEMORY) && !defined(__ANDROID_APEX__)
     MediaBuffer(const sp<IMemory> &mem) :
-        MediaBuffer((uint8_t *)mem->pointer() + sizeof(SharedControl), mem->size()) {
+         // TODO: Using unsecurePointer() has some associated security pitfalls
+         //       (see declaration for details).
+         //       Either document why it is safe in this case or address the
+         //       issue (e.g. by copying).
+        MediaBuffer((uint8_t *)mem->unsecurePointer() + sizeof(SharedControl), mem->size()) {
         // delegate and override mMemory
         mMemory = mem;
     }
@@ -93,11 +97,14 @@ public:
     }
 
     virtual int remoteRefcount() const {
-#ifndef NO_IMEMORY
-        if (mMemory.get() == nullptr || mMemory->pointer() == nullptr) return 0;
+#if !defined(NO_IMEMORY) && !defined(__ANDROID_APEX__)
+         // TODO: Using unsecurePointer() has some associated security pitfalls
+         //       (see declaration for details).
+         //       Either document why it is safe in this case or address the
+         //       issue (e.g. by copying).
+        if (mMemory.get() == nullptr || mMemory->unsecurePointer() == nullptr) return 0;
         int32_t remoteRefcount =
-                reinterpret_cast<SharedControl *>(mMemory->pointer())->getRemoteRefcount();
-        // Sanity check so that remoteRefCount() is non-negative.
+                reinterpret_cast<SharedControl *>(mMemory->unsecurePointer())->getRemoteRefcount();
         return remoteRefcount >= 0 ? remoteRefcount : 0; // do not allow corrupted data.
 #else
         return 0;
@@ -106,9 +113,13 @@ public:
 
     // returns old value
     int addRemoteRefcount(int32_t value) {
-#ifndef NO_IMEMORY
-        if (mMemory.get() == nullptr || mMemory->pointer() == nullptr) return 0;
-        return reinterpret_cast<SharedControl *>(mMemory->pointer())->addRemoteRefcount(value);
+#if !defined(NO_IMEMORY) && !defined(__ANDROID_APEX__)
+          // TODO: Using unsecurePointer() has some associated security pitfalls
+         //       (see declaration for details).
+         //       Either document why it is safe in this case or address the
+         //       issue (e.g. by copying).
+       if (mMemory.get() == nullptr || mMemory->unsecurePointer() == nullptr) return 0;
+        return reinterpret_cast<SharedControl *>(mMemory->unsecurePointer())->addRemoteRefcount(value);
 #else
         (void) value;
         return 0;
@@ -120,9 +131,13 @@ public:
     }
 
     static bool isDeadObject(const sp<IMemory> &memory) {
-#ifndef NO_IMEMORY
-        if (memory.get() == nullptr || memory->pointer() == nullptr) return false;
-        return reinterpret_cast<SharedControl *>(memory->pointer())->isDeadObject();
+#if !defined(NO_IMEMORY) && !defined(__ANDROID_APEX__)
+         // TODO: Using unsecurePointer() has some associated security pitfalls
+         //       (see declaration for details).
+         //       Either document why it is safe in this case or address the
+         //       issue (e.g. by copying).
+        if (memory.get() == nullptr || memory->unsecurePointer() == nullptr) return false;
+        return reinterpret_cast<SharedControl *>(memory->unsecurePointer())->isDeadObject();
 #else
         (void) memory;
         return false;
@@ -219,8 +234,12 @@ private:
     };
 
     inline SharedControl *getSharedControl() const {
-#ifndef NO_IMEMORY
-         return reinterpret_cast<SharedControl *>(mMemory->pointer());
+#if !defined(NO_IMEMORY) && !defined(__ANDROID_APEX__)
+         // TODO: Using unsecurePointer() has some associated security pitfalls
+         //       (see declaration for details).
+         //       Either document why it is safe in this case or address the
+         //       issue (e.g. by copying).
+         return reinterpret_cast<SharedControl *>(mMemory->unsecurePointer());
 #else
          return nullptr;
 #endif

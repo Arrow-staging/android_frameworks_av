@@ -32,7 +32,7 @@ namespace android {
 
 static const size_t kMaxMetadataSize = 3 * 1024 * 1024;
 
-struct MemorySource : public DataSourceBase {
+struct ID3::MemorySource : public DataSourceBase {
     MemorySource(const uint8_t *data, size_t size)
         : mData(data),
           mSize(size) {
@@ -58,7 +58,7 @@ private:
     DISALLOW_EVIL_CONSTRUCTORS(MemorySource);
 };
 
-class DataSourceUnwrapper : public DataSourceBase {
+class ID3::DataSourceUnwrapper : public DataSourceBase {
 
 public:
     explicit DataSourceUnwrapper(DataSourceHelper *sourcehelper) {
@@ -104,20 +104,6 @@ ID3::ID3(DataSourceHelper *sourcehelper, bool ignoreV1, off64_t offset)
 
     if (!mIsValid && !ignoreV1) {
         mIsValid = parseV1(&source);
-    }
-}
-
-ID3::ID3(DataSourceBase *source, bool ignoreV1, off64_t offset)
-    : mIsValid(false),
-      mData(NULL),
-      mSize(0),
-      mFirstFrameOffset(0),
-      mVersion(ID3_UNKNOWN),
-      mRawSize(0) {
-    mIsValid = parseV2(source, offset);
-
-    if (!mIsValid && !ignoreV1) {
-        mIsValid = parseV1(source);
     }
 }
 
@@ -247,44 +233,24 @@ struct id3_header {
         return false;
     }
 
-    if (header.version_major == 4) {
-        void *copy = malloc(size);
-        if (copy == NULL) {
-            free(mData);
-            mData = NULL;
-            ALOGE("b/24623447, no more memory");
-            return false;
+    // first handle global unsynchronization
+    bool hasGlobalUnsync = false;
+    if (header.flags & 0x80) {
+        ALOGV("has Global unsynchronization");
+        hasGlobalUnsync = true;
+        // we have to wait on applying global unsynchronization to V2.4 frames
+        // if we apply it now, the length information within any V2.4 frames goes bad
+        // Removing unsynchronization shrinks the buffer, but lengths (stored in safesync
+        // format) stored within the frame reflect "pre-shrinking" totals.
+
+        // we can (and should) apply the non-2.4 synch now.
+        if ( header.version_major != 4) {
+            ALOGV("Apply global unsync for non V2.4 frames");
+            removeUnsynchronization();
         }
-
-        memcpy(copy, mData, size);
-
-        bool success = removeUnsynchronizationV2_4(false /* iTunesHack */);
-        if (!success) {
-            memcpy(mData, copy, size);
-            mSize = size;
-
-            success = removeUnsynchronizationV2_4(true /* iTunesHack */);
-
-            if (success) {
-                ALOGV("Had to apply the iTunes hack to parse this ID3 tag");
-            }
-        }
-
-        free(copy);
-        copy = NULL;
-
-        if (!success) {
-            free(mData);
-            mData = NULL;
-
-            return false;
-        }
-    } else if (header.flags & 0x80) {
-        ALOGV("removing unsynchronization");
-
-        removeUnsynchronization();
     }
 
+    // handle extended header, if present
     mFirstFrameOffset = 0;
     if (header.version_major == 3 && (header.flags & 0x40)) {
         // Version 2.3 has an optional extended header.
@@ -296,6 +262,7 @@ struct id3_header {
             return false;
         }
 
+        // v2.3 does not have syncsafe integers
         size_t extendedHeaderSize = U32_AT(&mData[0]);
         if (extendedHeaderSize > SIZE_MAX - 4) {
             free(mData);
@@ -367,6 +334,48 @@ struct id3_header {
         mFirstFrameOffset = ext_size;
     }
 
+    // Handle any v2.4 per-frame unsynchronization
+    // The id3 spec isn't clear about what should happen if the global
+    // unsynchronization flag is combined with per-frame unsynchronization,
+    // or whether that's even allowed. We choose a "no more than 1 unsynchronization"
+    // semantic; the V2_4 unsynchronizer gets a copy of the global flag so it can handle
+    // this possible ambiquity.
+    //
+    if (header.version_major == 4) {
+        void *copy = malloc(size);
+        if (copy == NULL) {
+            free(mData);
+            mData = NULL;
+            ALOGE("b/24623447, no more memory");
+            return false;
+        }
+
+        memcpy(copy, mData, size);
+
+        bool success = removeUnsynchronizationV2_4(false /* iTunesHack */, hasGlobalUnsync);
+        if (!success) {
+            memcpy(mData, copy, size);
+            mSize = size;
+
+            success = removeUnsynchronizationV2_4(true /* iTunesHack */, hasGlobalUnsync);
+
+            if (success) {
+                ALOGV("Had to apply the iTunes hack to parse this ID3 tag");
+            }
+        }
+
+        free(copy);
+        copy = NULL;
+
+        if (!success) {
+            free(mData);
+            mData = NULL;
+
+            return false;
+        }
+    }
+
+
     if (header.version_major == 2) {
         mVersion = ID3_V2_2;
     } else if (header.version_major == 3) {
@@ -408,10 +417,10 @@ static void WriteSyncsafeInteger(uint8_t *dst, size_t x) {
     }
 }
 
-bool ID3::removeUnsynchronizationV2_4(bool iTunesHack) {
+bool ID3::removeUnsynchronizationV2_4(bool iTunesHack, bool hasGlobalUnsync) {
     size_t oldSize = mSize;
 
-    size_t offset = 0;
+    size_t offset = mFirstFrameOffset;
     while (mSize >= 10 && offset <= mSize - 10) {
         if (!memcmp(&mData[offset], "\0\0\0\0", 4)) {
             break;
@@ -444,8 +453,12 @@ bool ID3::removeUnsynchronizationV2_4(bool iTunesHack) {
             flags &= ~1;
         }
 
-        if ((flags & 2) && (dataSize >= 2)) {
-            // This file has "unsynchronization", so we have to replace occurrences
+        ALOGV("hasglobal %d  flags&2 %d", hasGlobalUnsync, flags&2);
+        if (hasGlobalUnsync && !(flags & 2)) {
+            ALOGV("OOPS: global unsync set, but per-frame NOT set; removing unsync anyway");
+        }
+        if ((hasGlobalUnsync || (flags & 2)) && (dataSize >= 2)) {
+            // This frame has "unsynchronization", so we have to replace occurrences
             // of 0xff 0x00 with just 0xff in order to get the real data.
 
             size_t readOffset = offset + 11;
@@ -471,7 +484,6 @@ bool ID3::removeUnsynchronizationV2_4(bool iTunesHack) {
                 ALOGE("b/34618607 (%zu %zu %zu %zu)", readOffset, writeOffset, oldSize, mSize);
                 android_errorWriteLog(0x534e4554, "34618607");
             }
-
         }
         flags &= ~2;
         if (flags != prevFlags || iTunesHack) {

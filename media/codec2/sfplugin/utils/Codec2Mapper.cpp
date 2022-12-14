@@ -18,6 +18,9 @@
 #define LOG_TAG "Codec2Mapper"
 #include <utils/Log.h>
 
+#include <map>
+#include <optional>
+
 #include <media/stagefright/MediaCodecConstants.h>
 #include <media/stagefright/SurfaceUtils.h>
 #include <media/stagefright/foundation/ALookup.h>
@@ -92,6 +95,7 @@ ALookup<C2Config::profile_t, int32_t> sAvcProfiles = {
 
 ALookup<C2Config::bitrate_mode_t, int32_t> sBitrateModes = {
     { C2Config::BITRATE_CONST,      BITRATE_MODE_CBR },
+    { C2Config::BITRATE_CONST_SKIP_ALLOWED, BITRATE_MODE_CBR_FD },
     { C2Config::BITRATE_VARIABLE,   BITRATE_MODE_VBR },
     { C2Config::BITRATE_IGNORE,     BITRATE_MODE_CQ },
 };
@@ -166,6 +170,9 @@ ALookup<C2Config::level_t, int32_t> sDolbyVisionLevels = {
     { C2Config::LEVEL_DV_MAIN_UHD_30, DolbyVisionLevelUhd30 },
     { C2Config::LEVEL_DV_MAIN_UHD_48, DolbyVisionLevelUhd48 },
     { C2Config::LEVEL_DV_MAIN_UHD_60, DolbyVisionLevelUhd60 },
+    { C2Config::LEVEL_DV_MAIN_UHD_120, DolbyVisionLevelUhd120 },
+    { C2Config::LEVEL_DV_MAIN_8K_30,  DolbyVisionLevel8k30 },
+    { C2Config::LEVEL_DV_MAIN_8K_60,  DolbyVisionLevel8k60 },
 
     // high tiers are not yet supported on android, for now map them to main tier
     { C2Config::LEVEL_DV_HIGH_HD_24,  DolbyVisionLevelHd24 },
@@ -177,6 +184,9 @@ ALookup<C2Config::level_t, int32_t> sDolbyVisionLevels = {
     { C2Config::LEVEL_DV_HIGH_UHD_30, DolbyVisionLevelUhd30 },
     { C2Config::LEVEL_DV_HIGH_UHD_48, DolbyVisionLevelUhd48 },
     { C2Config::LEVEL_DV_HIGH_UHD_60, DolbyVisionLevelUhd60 },
+    { C2Config::LEVEL_DV_HIGH_UHD_120, DolbyVisionLevelUhd120 },
+    { C2Config::LEVEL_DV_HIGH_8K_30,  DolbyVisionLevel8k30 },
+    { C2Config::LEVEL_DV_HIGH_8K_60,  DolbyVisionLevel8k60 },
 };
 
 ALookup<C2Config::profile_t, int32_t> sDolbyVisionProfiles = {
@@ -190,6 +200,7 @@ ALookup<C2Config::profile_t, int32_t> sDolbyVisionProfiles = {
     { C2Config::PROFILE_DV_HE_07, DolbyVisionProfileDvheDtb },
     { C2Config::PROFILE_DV_HE_08, DolbyVisionProfileDvheSt },
     { C2Config::PROFILE_DV_AV_09, DolbyVisionProfileDvavSe },
+    { C2Config::PROFILE_DV_AV1_10, DolbyVisionProfileDvav110 },
 };
 
 ALookup<C2Config::level_t, int32_t> sH263Levels = {
@@ -253,6 +264,8 @@ ALookup<C2Config::profile_t, int32_t> sHevcProfiles = {
     { C2Config::PROFILE_HEVC_MAIN_STILL, HEVCProfileMainStill },
     { C2Config::PROFILE_HEVC_MAIN_INTRA, HEVCProfileMain },
     { C2Config::PROFILE_HEVC_MAIN_10_INTRA, HEVCProfileMain10 },
+    { C2Config::PROFILE_HEVC_MAIN_10, HEVCProfileMain10HDR10 },
+    { C2Config::PROFILE_HEVC_MAIN_10, HEVCProfileMain10HDR10Plus },
 };
 
 ALookup<C2Config::profile_t, int32_t> sHevcHdrProfiles = {
@@ -261,6 +274,13 @@ ALookup<C2Config::profile_t, int32_t> sHevcHdrProfiles = {
 
 ALookup<C2Config::profile_t, int32_t> sHevcHdr10PlusProfiles = {
     { C2Config::PROFILE_HEVC_MAIN_10, HEVCProfileMain10HDR10Plus },
+};
+
+ALookup<C2Config::hdr_format_t, int32_t> sHevcHdrFormats = {
+    { C2Config::hdr_format_t::SDR, HEVCProfileMain },
+    { C2Config::hdr_format_t::HLG, HEVCProfileMain10 },
+    { C2Config::hdr_format_t::HDR10, HEVCProfileMain10HDR10 },
+    { C2Config::hdr_format_t::HDR10_PLUS, HEVCProfileMain10HDR10Plus },
 };
 
 ALookup<C2Config::level_t, int32_t> sMpeg2Levels = {
@@ -310,6 +330,8 @@ ALookup<C2Config::pcm_encoding_t, int32_t> sPcmEncodings = {
     { C2Config::PCM_8, kAudioEncodingPcm8bit },
     { C2Config::PCM_16, kAudioEncodingPcm16bit },
     { C2Config::PCM_FLOAT, kAudioEncodingPcmFloat },
+    { C2Config::PCM_24, kAudioEncodingPcm24bitPacked },
+    { C2Config::PCM_32, kAudioEncodingPcm32bit },
 };
 
 ALookup<C2Config::level_t, int32_t> sVp9Levels = {
@@ -350,6 +372,17 @@ ALookup<C2Config::profile_t, int32_t> sVp9Hdr10PlusProfiles = {
     { C2Config::PROFILE_VP9_3, VP9Profile3HDR10Plus },
 };
 
+ALookup<C2Config::hdr_format_t, int32_t> sVp9HdrFormats = {
+    { C2Config::hdr_format_t::SDR, VP9Profile0 },
+    { C2Config::hdr_format_t::SDR, VP9Profile1 },
+    { C2Config::hdr_format_t::HLG, VP9Profile2 },
+    { C2Config::hdr_format_t::HLG, VP9Profile3 },
+    { C2Config::hdr_format_t::HDR10, VP9Profile2HDR },
+    { C2Config::hdr_format_t::HDR10, VP9Profile3HDR },
+    { C2Config::hdr_format_t::HDR10_PLUS, VP9Profile2HDR10Plus },
+    { C2Config::hdr_format_t::HDR10_PLUS, VP9Profile3HDR10Plus },
+};
+
 ALookup<C2Config::level_t, int32_t> sAv1Levels = {
     { C2Config::LEVEL_AV1_2,    AV1Level2  },
     { C2Config::LEVEL_AV1_2_1,  AV1Level21 },
@@ -377,13 +410,62 @@ ALookup<C2Config::level_t, int32_t> sAv1Levels = {
     { C2Config::LEVEL_AV1_7_3,  AV1Level73 },
 };
 
-
 ALookup<C2Config::profile_t, int32_t> sAv1Profiles = {
-    { C2Config::PROFILE_AV1_0, AV1Profile0 },
-    { C2Config::PROFILE_AV1_1, AV1Profile1 },
-    { C2Config::PROFILE_AV1_2, AV1Profile2 },
+    { C2Config::PROFILE_AV1_0, AV1ProfileMain8 },
+    { C2Config::PROFILE_AV1_0, AV1ProfileMain10 },
+    { C2Config::PROFILE_AV1_0, AV1ProfileMain10HDR10 },
+    { C2Config::PROFILE_AV1_0, AV1ProfileMain10HDR10Plus },
 };
 
+ALookup<C2Config::profile_t, int32_t> sAv1TenbitProfiles = {
+    { C2Config::PROFILE_AV1_0, AV1ProfileMain10 },
+};
+
+ALookup<C2Config::profile_t, int32_t> sAv1HdrProfiles = {
+    { C2Config::PROFILE_AV1_0, AV1ProfileMain10HDR10 },
+};
+
+ALookup<C2Config::profile_t, int32_t> sAv1Hdr10PlusProfiles = {
+    { C2Config::PROFILE_AV1_0, AV1ProfileMain10HDR10Plus },
+};
+
+ALookup<C2Config::hdr_format_t, int32_t> sAv1HdrFormats = {
+    { C2Config::hdr_format_t::SDR, AV1ProfileMain8 },
+    { C2Config::hdr_format_t::HLG, AV1ProfileMain10 },
+    { C2Config::hdr_format_t::HDR10, AV1ProfileMain10HDR10 },
+    { C2Config::hdr_format_t::HDR10_PLUS, AV1ProfileMain10HDR10Plus },
+};
+
+// HAL_PIXEL_FORMAT_* -> COLOR_Format*
+ALookup<uint32_t, int32_t> sPixelFormats = {
+    { HAL_PIXEL_FORMAT_IMPLEMENTATION_DEFINED, COLOR_FormatSurface },
+
+    // YCBCR_420_888 maps to YUV420Flexible and vice versa
+    { HAL_PIXEL_FORMAT_YCBCR_420_888,          COLOR_FormatYUV420Flexible },
+
+    // Fallback matches for YCBCR_420_888
+    { HAL_PIXEL_FORMAT_YCBCR_420_888,          COLOR_FormatYUV420Planar },
+    { HAL_PIXEL_FORMAT_YCBCR_420_888,          COLOR_FormatYUV420SemiPlanar },
+    { HAL_PIXEL_FORMAT_YCBCR_420_888,          COLOR_FormatYUV420PackedPlanar },
+    { HAL_PIXEL_FORMAT_YCBCR_420_888,          COLOR_FormatYUV420PackedSemiPlanar },
+
+    // Fallback matches for YUV420Flexible
+    { HAL_PIXEL_FORMAT_YCRCB_420_SP,           COLOR_FormatYUV420Flexible },
+    { HAL_PIXEL_FORMAT_YV12,                   COLOR_FormatYUV420Flexible },
+
+    { HAL_PIXEL_FORMAT_YCBCR_422_SP,           COLOR_FormatYUV422PackedSemiPlanar },
+    { HAL_PIXEL_FORMAT_YCBCR_422_I,            COLOR_FormatYUV422PackedPlanar },
+    { HAL_PIXEL_FORMAT_YCBCR_P010,             COLOR_FormatYUVP010 },
+    { HAL_PIXEL_FORMAT_RGBA_1010102,           COLOR_Format32bitABGR2101010 },
+    { HAL_PIXEL_FORMAT_RGBA_FP16,              COLOR_Format64bitABGRFloat },
+};
+
+ALookup<C2Config::picture_type_t, int32_t> sPictureType = {
+    { C2Config::picture_type_t::SYNC_FRAME,     PICTURE_TYPE_I },
+    { C2Config::picture_type_t::I_FRAME,        PICTURE_TYPE_I },
+    { C2Config::picture_type_t::P_FRAME,        PICTURE_TYPE_P },
+    { C2Config::picture_type_t::B_FRAME,        PICTURE_TYPE_B },
+};
 
 /**
  * A helper that passes through vendor extension profile and level values.
@@ -437,6 +519,10 @@ struct AacProfileLevelMapper : ProfileLevelMapperHelper {
     virtual bool simpleMap(int32_t from, C2Config::profile_t *to) {
         return sAacProfiles.map(from, to);
     }
+    // AAC does not have HDR format
+    virtual bool mapHdrFormat(int32_t, C2Config::hdr_format_t*) override {
+        return false;
+    }
 };
 
 struct AvcProfileLevelMapper : ProfileLevelMapperHelper {
@@ -466,6 +552,12 @@ struct DolbyVisionProfileLevelMapper : ProfileLevelMapperHelper {
     }
     virtual bool simpleMap(int32_t from, C2Config::profile_t *to) {
         return sDolbyVisionProfiles.map(from, to);
+    }
+    // Dolby Vision is always HDR and the profile is fully expressive so use unknown
+    // HDR format
+    virtual bool mapHdrFormat(int32_t, C2Config::hdr_format_t *to) override {
+        *to = C2Config::hdr_format_t::UNKNOWN;
+        return true;
     }
 };
 
@@ -504,6 +596,9 @@ struct HevcProfileLevelMapper : ProfileLevelMapperHelper {
         return mIsHdr10Plus ? sHevcHdr10PlusProfiles.map(from, to) :
                      mIsHdr ? sHevcHdrProfiles.map(from, to) :
                               sHevcProfiles.map(from, to);
+    }
+    virtual bool mapHdrFormat(int32_t from, C2Config::hdr_format_t *to) override {
+        return sHevcHdrFormats.map(from, to);
     }
 
 private:
@@ -583,18 +678,61 @@ struct Vp9ProfileLevelMapper : ProfileLevelMapperHelper {
                      mIsHdr ? sVp9HdrProfiles.map(from, to) :
                               sVp9Profiles.map(from, to);
     }
+    virtual bool mapHdrFormat(int32_t from, C2Config::hdr_format_t *to) override {
+        return sVp9HdrFormats.map(from, to);
+    }
 
 private:
     bool mIsHdr;
     bool mIsHdr10Plus;
 };
 
+struct Av1ProfileLevelMapper : ProfileLevelMapperHelper {
+    Av1ProfileLevelMapper(bool isHdr = false, bool isHdr10Plus = false, int32_t bitDepth = 8) :
+        ProfileLevelMapperHelper(),
+        mIsHdr(isHdr), mIsHdr10Plus(isHdr10Plus), mBitDepth(bitDepth) {}
+
+    virtual bool simpleMap(C2Config::level_t from, int32_t *to) {
+        return sAv1Levels.map(from, to);
+    }
+    virtual bool simpleMap(int32_t from, C2Config::level_t *to) {
+        return sAv1Levels.map(from, to);
+    }
+    virtual bool simpleMap(C2Config::profile_t from, int32_t *to) {
+        return (mBitDepth == 10) ? sAv1TenbitProfiles.map(from, to) :
+                    mIsHdr10Plus ? sAv1Hdr10PlusProfiles.map(from, to) :
+                          mIsHdr ? sAv1HdrProfiles.map(from, to) :
+                                   sAv1Profiles.map(from, to);
+    }
+    virtual bool simpleMap(int32_t from, C2Config::profile_t *to) {
+        return (mBitDepth == 10) ? sAv1TenbitProfiles.map(from, to) :
+                    mIsHdr10Plus ? sAv1Hdr10PlusProfiles.map(from, to) :
+                          mIsHdr ? sAv1HdrProfiles.map(from, to) :
+                                   sAv1Profiles.map(from, to);
+    }
+    virtual bool mapHdrFormat(int32_t from, C2Config::hdr_format_t *to) override {
+        return sAv1HdrFormats.map(from, to);
+    }
+
+private:
+    bool mIsHdr;
+    bool mIsHdr10Plus;
+    int32_t mBitDepth;
+};
+
 } // namespace
+
+// the default mapper is used for media types that do not support HDR
+bool C2Mapper::ProfileLevelMapper::mapHdrFormat(int32_t, C2Config::hdr_format_t *to) {
+    // by default map all (including vendor) profiles to SDR
+    *to = C2Config::hdr_format_t::SDR;
+    return true;
+}
 
 // static
 std::shared_ptr<C2Mapper::ProfileLevelMapper>
 C2Mapper::GetProfileLevelMapper(std::string mediaType) {
-    std::transform(mediaType.begin(), mediaType.begin(), mediaType.end(), ::tolower);
+    std::transform(mediaType.begin(), mediaType.end(), mediaType.begin(), ::tolower);
     if (mediaType == MIMETYPE_AUDIO_AAC) {
         return std::make_shared<AacProfileLevelMapper>();
     } else if (mediaType == MIMETYPE_VIDEO_AVC) {
@@ -613,6 +751,8 @@ C2Mapper::GetProfileLevelMapper(std::string mediaType) {
         return std::make_shared<Vp8ProfileLevelMapper>();
     } else if (mediaType == MIMETYPE_VIDEO_VP9) {
         return std::make_shared<Vp9ProfileLevelMapper>();
+    } else if (mediaType == MIMETYPE_VIDEO_AV1) {
+        return std::make_shared<Av1ProfileLevelMapper>();
     }
     return nullptr;
 }
@@ -620,11 +760,25 @@ C2Mapper::GetProfileLevelMapper(std::string mediaType) {
 // static
 std::shared_ptr<C2Mapper::ProfileLevelMapper>
 C2Mapper::GetHdrProfileLevelMapper(std::string mediaType, bool isHdr10Plus) {
-    std::transform(mediaType.begin(), mediaType.begin(), mediaType.end(), ::tolower);
+    std::transform(mediaType.begin(), mediaType.end(), mediaType.begin(), ::tolower);
     if (mediaType == MIMETYPE_VIDEO_HEVC) {
         return std::make_shared<HevcProfileLevelMapper>(true, isHdr10Plus);
     } else if (mediaType == MIMETYPE_VIDEO_VP9) {
         return std::make_shared<Vp9ProfileLevelMapper>(true, isHdr10Plus);
+    } else if (mediaType == MIMETYPE_VIDEO_AV1) {
+        return std::make_shared<Av1ProfileLevelMapper>(true, isHdr10Plus);
+    }
+    return nullptr;
+}
+
+// static
+std::shared_ptr<C2Mapper::ProfileLevelMapper>
+C2Mapper::GetBitDepthProfileLevelMapper(std::string mediaType, int32_t bitDepth) {
+    std::transform(mediaType.begin(), mediaType.end(), mediaType.begin(), ::tolower);
+    if (bitDepth == 8) {
+        return GetProfileLevelMapper(mediaType);
+    } else if (mediaType == MIMETYPE_VIDEO_AV1 && bitDepth == 10) {
+        return std::make_shared<Av1ProfileLevelMapper>(false, false, bitDepth);
     }
     return nullptr;
 }
@@ -907,4 +1061,34 @@ bool C2Mapper::map(C2Color::transfer_t from, ColorAspects::Transfer *to) {
 // static
 bool C2Mapper::map(ColorAspects::Transfer from, C2Color::transfer_t *to) {
     return sColorTransfersSf.map(from, to);
+}
+
+// static
+bool C2Mapper::mapPixelFormatFrameworkToCodec(
+        int32_t frameworkValue, uint32_t *c2Value) {
+    if (!sPixelFormats.map(frameworkValue, c2Value)) {
+        // passthrough if not mapped
+        *c2Value = uint32_t(frameworkValue);
+    }
+    return true;
+}
+
+// static
+bool C2Mapper::mapPixelFormatCodecToFramework(
+        uint32_t c2Value, int32_t *frameworkValue) {
+    if (!sPixelFormats.map(c2Value, frameworkValue)) {
+        // passthrough if not mapped
+        *frameworkValue = int32_t(c2Value);
+    }
+    return true;
+}
+
+// static
+bool C2Mapper::map(C2Config::picture_type_t from, int32_t *to) {
+    return sPictureType.map(from, to);
+}
+
+// static
+bool C2Mapper::map(int32_t from, C2Config::picture_type_t *to) {
+    return sPictureType.map(from, to);
 }
